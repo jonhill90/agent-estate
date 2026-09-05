@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
+	"unicode"
 
 	"github.com/jonhill90/agent-estate/estate/internal/isolate"
 )
@@ -127,16 +130,49 @@ func resolveOutputPath() (path string, sharedFallback bool, err error) {
 
 // samePath reports whether a and b name the same file, tolerating the
 // spellings the same path can arrive in: relative vs. absolute, redundant
-// `..`/`.` segments, and a symlinked directory component (e.g. a symlinked
-// $HOME). It does NOT resolve everything two paths could mean the same
-// thing by: case-insensitive filesystem folding, bind mounts, or a hardlink
-// with no symlink between the two spellings -- those are not handled, and a
-// caller relying on this to catch them will not get an acknowledgement
-// requirement where one of those is the only difference.
+// `..`/`.` segments, a symlinked directory component (e.g. a symlinked
+// $HOME), and -- agent-estate#1193 -- a spelling that differs only by case
+// on a filesystem that actually folds case (macOS APFS by default). Case is
+// handled by empirical, per-path detection (see probeCaseFolding), never by
+// an unconditional case-insensitive compare: on a case-sensitive filesystem,
+// two differently-cased paths ARE two different files, and folding them
+// together there would wrongly refuse a legitimate override.
+//
+// Still NOT handled: bind mounts and a hardlink with no symlink between the
+// two spellings. Both are out of scope per agent-estate#1193's own issue
+// text, and a caller relying on this to catch either will not get an
+// acknowledgement requirement where one of those is the only difference.
 func samePath(a, b string) bool {
 	na := normalizePath(a)
 	nb := normalizePath(b)
-	return na != "" && na == nb
+	if na == "" {
+		return false
+	}
+	if na == nb {
+		return true
+	}
+	if !strings.EqualFold(na, nb) {
+		return false // different even ignoring case -- definitely different files
+	}
+	switch probeCaseFolding(nb) {
+	case caseInsensitive:
+		return true // same spelling once case is folded, and this filesystem folds it
+	case caseSensitive:
+		return false // this filesystem does not fold case -- these are different files
+	default: // caseUnknown -- the probe could not determine the property
+		// Fail closed on the guard rather than open: an override that
+		// matches the shared path case-insensitively, on a filesystem
+		// whose case behaviour could not be empirically confirmed
+		// (unwritable directory, missing parent, read-only volume),
+		// still requires the acknowledgement. The failure this trades
+		// against is an occasional unnecessary ack on a legitimate
+		// override that merely LOOKS like the shared path case-
+		// insensitively and sits on a filesystem we could not probe --
+		// annoying, recoverable with --allow-shared-write, and far
+		// cheaper than silently writing the one index every other lane
+		// reads with no record anyone chose to.
+		return true
+	}
 }
 
 // normalizePath resolves p to an absolute, cleaned path, additionally
@@ -156,6 +192,134 @@ func normalizePath(p string) string {
 		return filepath.Join(resolvedDir, file)
 	}
 	return abs
+}
+
+// caseFolding is the empirically-determined answer to "does this
+// filesystem treat two differently-cased spellings of the same path as the
+// same file?" -- a third caseUnknown state on purpose, per agent-estate#1193:
+// an undetermined probe is not a guess in either direction, it is reported
+// and the caller decides how to treat it (samePath fails closed).
+type caseFolding int
+
+const (
+	caseUnknown caseFolding = iota
+	caseSensitive
+	caseInsensitive
+)
+
+// caseProbeCache memoises probeCaseSensitivity per resolved directory for
+// the lifetime of the process. agent-estate#1193 requires this: resolving
+// the write path runs on every dispatched lane's own per-turn index, a
+// filesystem's case behaviour cannot change between two calls in the same
+// run, and a stat+create+remove per resolution would otherwise cost a real
+// filesystem round trip on every single one.
+var (
+	caseProbeMu    sync.Mutex
+	caseProbeCache = map[string]caseFolding{}
+)
+
+// probeCaseFolding determines whether the filesystem holding path's
+// directory folds case, by probing the nearest existing ancestor of that
+// directory -- path itself (e.g. the shared index file) need not exist yet,
+// since this runs before the index has ever been written.
+func probeCaseFolding(path string) caseFolding {
+	dir := nearestExistingDir(filepath.Dir(path))
+	if dir == "" {
+		return caseUnknown
+	}
+
+	caseProbeMu.Lock()
+	if v, ok := caseProbeCache[dir]; ok {
+		caseProbeMu.Unlock()
+		return v
+	}
+	caseProbeMu.Unlock()
+
+	result := probeCaseSensitivity(dir)
+
+	caseProbeMu.Lock()
+	caseProbeCache[dir] = result
+	caseProbeMu.Unlock()
+	return result
+}
+
+// nearestExistingDir walks upward from dir until it finds a directory that
+// actually exists, returning "" if it reaches the filesystem root without
+// finding one. The shared index's own directory
+// (~/.local/state/agent-estate/knowledge) will not exist on a machine that
+// has never run `estate knowledge` yet, so probeCaseFolding cannot assume
+// its immediate target directory is there to probe.
+func nearestExistingDir(dir string) string {
+	for {
+		if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+}
+
+// probeCaseSensitivity empirically determines whether dir's filesystem
+// folds case, per agent-estate#1193: it creates a uniquely-named temp file
+// IN dir, looks it up again by a differently-cased spelling of its own
+// name, and concludes from whether that resolves to the same file --
+// then removes the probe file itself. It never touches, truncates, or
+// changes the mtime of anything already in dir; the only file it creates
+// is its own, and it is always removed before returning.
+//
+// Returns caseUnknown -- a third state, not a guess -- when the property
+// cannot be determined at all: dir does not exist, is not writable,
+// permission is denied, or the volume is read-only. Callers must not treat
+// caseUnknown as either answer; samePath's own doc comment argues which way
+// it should be treated for the shared-index guard specifically.
+func probeCaseSensitivity(dir string) caseFolding {
+	f, err := os.CreateTemp(dir, ".estate-case-probe-*")
+	if err != nil {
+		return caseUnknown // unwritable, missing, permission denied, read-only volume
+	}
+	name := f.Name()
+	_ = f.Close()
+	defer os.Remove(name)
+
+	base := filepath.Base(name)
+	flippedBase := flipFirstLetterCase(base)
+	if flippedBase == base {
+		return caseUnknown // no letter to flip in the probe's own name -- cannot determine
+	}
+	flipped := filepath.Join(filepath.Dir(name), flippedBase)
+
+	fi, err := os.Stat(name)
+	if err != nil {
+		return caseUnknown // just created it; a failure to stat it back is not this filesystem's case behaviour
+	}
+	fiFlipped, err := os.Stat(flipped)
+	if err != nil {
+		return caseSensitive // the differently-cased spelling does not resolve at all
+	}
+	if os.SameFile(fi, fiFlipped) {
+		return caseInsensitive
+	}
+	return caseSensitive // resolved, but to a different file -- e.g. a coincidental collision
+}
+
+// flipFirstLetterCase returns s with the case of its first cased letter
+// flipped, or s unchanged if it has no cased letter at all.
+func flipFirstLetterCase(s string) string {
+	r := []rune(s)
+	for i, c := range r {
+		switch {
+		case unicode.IsUpper(c):
+			r[i] = unicode.ToLower(c)
+			return string(r)
+		case unicode.IsLower(c):
+			r[i] = unicode.ToUpper(c)
+			return string(r)
+		}
+	}
+	return s
 }
 
 // AllowSharedWriteEnv is the explicit acknowledgement required to write the

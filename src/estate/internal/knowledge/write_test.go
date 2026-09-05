@@ -363,6 +363,121 @@ func TestResolveWritePathRequiresAckWhenOverrideNamesTheSharedPathViaASymlinkedD
 	}
 }
 
+// agent-estate#1193: PR #1192 (hole 2 above) compared paths
+// case-sensitively, so on a case-insensitive filesystem (macOS APFS by
+// default) an override spelled with different case names the SAME file as
+// the shared default and still slipped through with requiresAck=false.
+//
+// This skips honestly, rather than silently passing, when the host's own
+// temp filesystem is not case-insensitive -- probeCaseSensitivity is the
+// same empirical probe production code uses, so the skip condition and the
+// behaviour under test can never disagree about what this host actually is.
+//
+// This test FAILS before the fix (requiresAck = false on a case-insensitive
+// host) and PASSES after it.
+func TestResolveWritePathRequiresAckWhenOverrideNamesTheSharedPathWithDifferentCase(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv(AllowSharedWriteEnv, "")
+
+	sharedDir := filepath.Join(home, ".local", "state", "agent-estate", "knowledge")
+	if err := os.MkdirAll(sharedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if probeCaseSensitivity(sharedDir) != caseInsensitive {
+		t.Skip("host filesystem is not case-insensitive -- cannot exercise this path honestly")
+	}
+
+	differentCase := filepath.Join(sharedDir, "Index.json") // shared default spells it "index.json"
+	t.Setenv("ESTATE_KNOWLEDGE_INDEX", differentCase)
+
+	path, requiresAck, err := ResolveWritePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != differentCase {
+		t.Errorf("ResolveWritePath() path = %q, want %q", path, differentCase)
+	}
+	if !requiresAck {
+		t.Error("ResolveWritePath() requiresAck = false for a differently-cased override naming the shared path on a case-insensitive filesystem, want true -- this is agent-estate#1193")
+	}
+}
+
+// The other side of the same fix: on a filesystem that does NOT fold case,
+// a differently-cased spelling names a genuinely different file, and
+// folding it into the shared-path comparison anyway would wrongly require
+// the acknowledgement for a legitimate, distinct override -- a worse
+// failure than the gap agent-estate#1193 closes. Skips honestly when the
+// host's temp filesystem is not case-sensitive (the common case on an
+// unmodified macOS volume).
+func TestResolveWritePathStillNoAckForDifferentCaseOnACaseSensitiveFilesystem(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv(AllowSharedWriteEnv, "")
+
+	sharedDir := filepath.Join(home, ".local", "state", "agent-estate", "knowledge")
+	if err := os.MkdirAll(sharedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if probeCaseSensitivity(sharedDir) != caseSensitive {
+		t.Skip("host filesystem is not case-sensitive -- cannot exercise this path honestly")
+	}
+
+	differentCase := filepath.Join(sharedDir, "Index.json") // a genuinely different file here
+	t.Setenv("ESTATE_KNOWLEDGE_INDEX", differentCase)
+
+	_, requiresAck, err := ResolveWritePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requiresAck {
+		t.Error("ResolveWritePath() requiresAck = true for a differently-cased override naming a genuinely DIFFERENT file on a case-sensitive filesystem, want false")
+	}
+}
+
+// When the case-folding property of the relevant directory cannot be
+// determined at all (here: the probe's own CreateTemp fails against a
+// read-only directory), agent-estate#1193 leans toward failing closed on
+// the guard -- an override that matches the shared path case-insensitively
+// still requires the acknowledgement rather than being waved through on an
+// unproven assumption that the filesystem is case-sensitive.
+func TestResolveWritePathRequiresAckWhenCaseProbeCannotBeDetermined(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root -- a permission-denied probe cannot be forced")
+	}
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv(AllowSharedWriteEnv, "")
+
+	// Nothing under home exists yet, so probeCaseFolding's
+	// nearestExistingDir walk lands on home itself -- make it unwritable so
+	// the probe's own CreateTemp fails there.
+	if err := os.Chmod(home, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(home, 0o755) })
+
+	if probeCaseSensitivity(home) != caseUnknown {
+		t.Skip("could not force an undetermined probe on this host (e.g. write succeeded despite chmod)")
+	}
+
+	shared := filepath.Join(home, ".local", "state", "agent-estate", "knowledge", "index.json")
+	differentCase := filepath.Join(home, ".local", "state", "agent-estate", "knowledge", "Index.json")
+	t.Setenv("ESTATE_KNOWLEDGE_INDEX", differentCase)
+
+	path, requiresAck, err := ResolveWritePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != differentCase {
+		t.Errorf("ResolveWritePath() path = %q, want %q", path, differentCase)
+	}
+	if !requiresAck {
+		t.Errorf("ResolveWritePath() requiresAck = false when the case probe against %q is undetermined and paths match case-insensitively, want true -- fails closed per agent-estate#1193", shared)
+	}
+}
+
 // An override pointing anywhere genuinely else -- not the shared path under
 // any spelling -- must keep behaving exactly as before this fix: no
 // acknowledgement required. A per-turn or scratch index depends on this;
