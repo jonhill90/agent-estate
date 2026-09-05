@@ -587,7 +587,7 @@ func buildRatchets(nlTop3, nlTotal, nlScopedTop3, nlScopedTotal, privateHits, pr
 		{"natural-language stratum top-3, scoped source:repo-docs", nlScopedTop3, nlScopedTotal, 4,
 			"agent-estate#1066: same floor drop (6 to 4) and same reasoning as the unscoped top-3 line above -- agent-estate#1140 re-authored nl-09/nl-11, and source: scoping does not recover either miss"},
 		{"retrieval score (private)", privateHits, privateTotal, 16,
-			"agent-estate#1066: floor at the value measured on add887e -- unaffected by #1137/#1138, neither of which touched a private-mode cases.json case"},
+			"agent-estate#1066: floor at the value measured on add887e -- unaffected by #1137/#1138, neither of which touched a private-mode cases.json case. Denominator moved 17 -> 22 by agent-estate#1150's five camelcase-01..05 corpus-directive cases; the floor stays the literal value 16 (all five landed as new hits, never a subtraction) but the printed fraction now reads e.g. 21/22, not 16/17 -- read the fraction, not just the pass/fail, before assuming this floor still means what it meant before #1150"},
 		{"publishable-reachable score", reachableHits, reachableTotal, 5,
 			"agent-estate#1066: floor at the value measured on add887e -- agent-estate#1133 established this as the reachable-only denominator (github-stars, repo-docs), not the raw 17"},
 		{"github-stars stratum top-3", starTop3, starTotal, 7,

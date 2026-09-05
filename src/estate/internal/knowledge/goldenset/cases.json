@@ -113,6 +113,46 @@
     "rationale": "docs/ci-rules-retired.md's \"Rules retired with their scripts, not with a workflow\" section states it directly: collision-check.sh refused 'a dispatch whose files overlap an in-flight lane's files', and 'In flight' is defined there as 'every ledger task not recorded complete/failed/cancelled that has a recorded worktree path.' No other file in the index carries this."
   },
   {
+    "id": "camelcase-01",
+    "question": "If a dispatch to an agent times out, should the timeout path record the failure the same way an ordinary failed dispatch already does, instead of leaving it looking like a silent success?",
+    "expected_source": "corpus-directive",
+    "expected_identifier": "corpus:item:it-1b08d9b19b25eee7",
+    "note": "agent-estate#1150's corpus-directive stratum: this item's own body names its dispatch-delivery routing check with a single run-together identifier joining three ordinary English words with no internal separator or space -- the exact shape splitWords does not currently break apart. This rationale and question deliberately do not reproduce that identifier or any other of the item's own wording (no corpus body text may live in this repo, fixtures included) -- the question is authored in ordinary spelled-out English instead, so it shares no unsplit token with the item's own text and can only gain overlap from camelCase splitting being enabled. LIMITATION (agent-estate#1154 fix pass): this case's authoring honesty is not automatically measurable -- there is no target_text, so goldenquery computes no overlap line for it. Manual read-only review of this case's own target body against its question measured roughly 53% content-word overlap, substantially derivative of the target beyond the camelCase term the case is meant to test. That derivativeness makes this an easy question likely to rank near the top even under a much weaker scorer, which weakens this case's power to catch a real regression, not just its authoring honesty -- a HIT here is not strong evidence against a regression.",
+    "rationale": "corpus:item:it-1b08d9b19b25eee7 is a hard, live (weight=hard, status=acted) directive about exactly this timeout-vs-silent-failure question for dispatch delivery to an agent; grep confirms the identifying camelCase term appears in no other live item across any of the five compiled sources, so it is the one unambiguous answer regardless of whether the current ranking finds it."
+  },
+  {
+    "id": "camelcase-02",
+    "question": "What is supposed to happen if the step that hands a chat message off to its agent fails after the message's own thread row has already been written?",
+    "expected_source": "corpus-directive",
+    "expected_identifier": "corpus:item:it-02f3650145ef2d30",
+    "note": "Same camelCase-collision stratum as camelcase-01 -- the item's own body names the chat-dispatch step with a single run-together identifier; this question uses ordinary spelled-out English instead and quotes none of the item's own text. LIMITATION (agent-estate#1154 fix pass): not automatically measurable -- no target_text, so goldenquery computes no overlap line. Manual read-only review measured roughly 57% content-word overlap between this case's question and its target body, substantially derivative beyond the camelCase term under test, which weakens this case's power to catch a real regression, not just its authoring honesty -- a HIT here is not strong evidence against a regression.",
+    "rationale": "corpus:item:it-02f3650145ef2d30 is a hard, live (weight=hard, status=acted) sweep directive naming this exact failure path -- a chat-dispatch rejection arriving after the thread row is already persisted. Grep confirms its identifying camelCase term appears in no other live item, so it is the one unambiguous answer regardless of whether the current ranking finds it."
+  },
+  {
+    "id": "camelcase-03",
+    "question": "Was a particular agent-facing Claude config component cleared as a non-issue because its environment variables and agent id are both read fresh at call time rather than captured once and reused?",
+    "expected_source": "corpus-directive",
+    "expected_identifier": "corpus:item:it-125bac07eb029777",
+    "note": "Same camelCase-collision stratum -- the item's own body names the component and its two fields with three separate run-together identifiers; this question spells all three out as ordinary English instead of quoting any of them. LIMITATION (agent-estate#1154 fix pass): not automatically measurable -- no target_text, so goldenquery computes no overlap line. Manual read-only review measured roughly 30% content-word overlap between this case's question and its target body -- the lowest of the five, but still not automatically checked -- and the question still reuses the target's overall shape beyond the camelCase term under test, which weakens this case's power to catch a real regression, not just its authoring honesty.",
+    "rationale": "corpus:item:it-125bac07eb029777 is a hard, live (weight=hard, status=acted) PR note recording exactly this negative result -- a named config component checked and cleared because two of its fields are read at call time, not captured stale. Grep confirms its three identifying camelCase terms appear in no other live item, so it is the one unambiguous answer regardless of whether the current ranking finds it."
+  },
+  {
+    "id": "camelcase-04",
+    "question": "Is there a cheap assertion that a render-phase adjustment only fires once per thread id change, instead of on every render, so that page's flakiness stops being chased?",
+    "expected_source": "corpus-directive",
+    "expected_identifier": "corpus:item:it-a9e4691c8306e609",
+    "note": "Same camelCase-collision stratum -- the item's own body names the changing value with a single run-together identifier joining two ordinary English words; this question spells it out as 'thread id' instead of quoting the item's own token. LIMITATION (agent-estate#1154 fix pass): not automatically measurable -- no target_text, so goldenquery computes no overlap line. Manual read-only review measured roughly 67% content-word overlap between this case's question and its target body -- at the github-stars failure-mode threshold agent-estate#1115 identified -- with several 3-4 word verbatim runs shared beyond the camelCase term under test, which weakens this case's power to catch a real regression, not just its authoring honesty -- a HIT here is not strong evidence against a regression.",
+    "rationale": "corpus:item:it-a9e4691c8306e609 is a hard, live (weight=hard, status=acted) directive proposing exactly this cheap assertion for a flaky render path. Grep confirms its identifying camelCase term appears in no other live item, so it is the one unambiguous answer regardless of whether the current ranking finds it."
+  },
+  {
+    "id": "camelcase-05",
+    "question": "For that model-creation bug, does the POST path decide whether a model counts as a platform model at creation time, while the PUT path has to read the existing row's value instead of re-deriving it?",
+    "expected_source": "corpus-directive",
+    "expected_identifier": "corpus:item:it-a0e34b1721ee4bb6",
+    "note": "Same camelCase-collision stratum -- the item's own body names the derived flag with a single run-together identifier joining three ordinary English words; this question spells it out as 'platform model' instead of quoting the item's own token. LIMITATION (agent-estate#1154 fix pass): not automatically measurable -- no target_text, so goldenquery computes no overlap line. Manual read-only review measured roughly 65% content-word overlap between this case's question and its target body, close to the github-stars failure-mode threshold agent-estate#1115 identified and substantially derivative beyond the camelCase term under test, which weakens this case's power to catch a real regression, not just its authoring honesty -- a HIT here is not strong evidence against a regression.",
+    "rationale": "corpus:item:it-a0e34b1721ee4bb6 is a hard, live (weight=hard, status=acted) directive fixing exactly this POST-vs-PUT asymmetry for a derived flag. Grep confirms its identifying camelCase term appears in no other live item, so it is the one unambiguous answer regardless of whether the current ranking finds it."
+  },
+  {
     "id": "none-01",
     "question": "What's the office vending machine restocking schedule?",
     "expected_source": "none",
