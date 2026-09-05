@@ -199,12 +199,15 @@ func knowledgeGrounding() string {
 	return "\n\n## Knowledge retrieval exists (agent-estate#1049)\n" +
 		"A fresh dispatch worktree starts with no index at all -- `knowledge query` " +
 		"will exit non-zero until one exists. Before asking a question, run " +
-		"`go run ./src/estate knowledge` once with no subcommand: it builds your " +
-		"turn's own index at its own path (agent-estate#1048), never the shared " +
-		"index every other lane reads, and running the same command again later " +
-		"refreshes it -- one verb for both a turn that never had an index and one " +
-		"whose index has gone stale. Run it, and everything below, from this " +
-		"worktree's root; `estate` itself is not on PATH here.\n" +
+		"`go run ./src/estate knowledge` once with no subcommand, FROM THIS " +
+		"WORKTREE'S ROOT: run from there, it builds your turn's own index at its " +
+		"own path (agent-estate#1048), never the shared index every other lane " +
+		"reads -- run it from anywhere else (your home directory, another repo, " +
+		"wherever this session's cwd has drifted to) and it builds the SHARED " +
+		"index instead, which must never happen. Running the same command again " +
+		"later refreshes it -- one verb for both a turn that never had an index " +
+		"and one whose index has gone stale -- but only if you are still at this " +
+		"worktree's root when you run it. `estate` itself is not on PATH here.\n" +
 		"Then ask: `go run ./src/estate knowledge query [--private] \"<question>\"` " +
 		"returns small, ranked, cited pointers, and `go run ./src/estate knowledge " +
 		"get [--private] <id>` returns one pointer's full body. The index is " +
@@ -1221,8 +1224,10 @@ func main() {
 		// request to regenerate. A bare `estate knowledge` (os.Args[2]
 		// absent) still falls through to generation below -- that is the
 		// documented behaviour -- but an unrecognised subcommand must be
-		// refused before it reaches knowledge.Generate/Write, which writes
-		// to the one index path every lane shares (#1048).
+		// refused before it reaches knowledge.Generate/Write, which writes to
+		// whatever path DefaultOutputPath resolves: this turn's own per-turn
+		// index from inside a dispatch worktree, or the shared index every
+		// other lane reads from anywhere else (#1048).
 		//
 		// --allow-coverage-loss (agent-estate#1123) is the one flag this
 		// path accepts rather than a subcommand: it does not change what
