@@ -1,6 +1,8 @@
 package main
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/jonhill90/agent-estate/estate/internal/knowledge/goldenset"
@@ -203,11 +205,19 @@ func TestSplitPublishableExcludesPrivateSourcesFromReachableDenominator(t *testi
 // primitives -- a ratcheted line that drops below its recorded floor must
 // be reported as a failure, and every ratchet's reason must be non-empty so
 // the accepted-cost text this issue requires can never silently go missing.
+//
+// agent-estate#1152: ratchet is now defined by maxMisses (total-got vs a
+// miss budget), not a hardcoded hit floor -- floor() derives the printed
+// floor from maxMisses and the CURRENT total, so these tests exercise the
+// miss-budget comparison directly rather than a stored minimum.
 
 func TestRatchetOkAtOrAboveFloor(t *testing.T) {
-	r := ratchet{name: "x", got: 6, total: 12, minimum: 6}
+	r := ratchet{name: "x", got: 6, total: 12, maxMisses: 6}
 	if !r.ok() {
 		t.Fatal("ratchet.ok() = false at exactly the floor, want true")
+	}
+	if r.floor() != 6 {
+		t.Fatalf("ratchet.floor() = %d, want 6", r.floor())
 	}
 	r.got = 7
 	if !r.ok() {
@@ -216,9 +226,54 @@ func TestRatchetOkAtOrAboveFloor(t *testing.T) {
 }
 
 func TestRatchetFailsBelowFloor(t *testing.T) {
-	r := ratchet{name: "x", got: 5, total: 12, minimum: 6}
+	r := ratchet{name: "x", got: 5, total: 12, maxMisses: 6}
 	if r.ok() {
 		t.Fatal("ratchet.ok() = true below the floor, want false")
+	}
+}
+
+// TestRatchetFloorIsDenominatorIndependent is agent-estate#1152's own
+// regression test: a hardcoded hit floor tolerated MORE misses every time a
+// passing case was added to the stratum (the exact defect agent-estate#1150
+// exposed against the private retrieval score, 17/17 floor-16 -> 22/22
+// floor-16, tolerating 1 miss and then 6). Adding a passing case to a
+// maxMisses-based ratchet must never change how many misses it tolerates.
+func TestRatchetFloorIsDenominatorIndependent(t *testing.T) {
+	before := ratchet{name: "x", got: 16, total: 17, maxMisses: 1}
+	if !before.ok() {
+		t.Fatal("ratchet.ok() = false at 16/17 with maxMisses 1, want true (exactly 1 miss)")
+	}
+	// Five new cases land, all passing -- total and got both grow by 5, the
+	// same shape as agent-estate#1150's five camelcase-01..05 additions.
+	after := ratchet{name: "x", got: 21, total: 22, maxMisses: 1}
+	if !after.ok() {
+		t.Fatal("ratchet.ok() = false at 21/22 with maxMisses 1, want true (still exactly 1 miss)")
+	}
+	// The regression this guards: if a SIXTH case had been added as a MISS
+	// instead of a hit, the old hardcoded-floor-16 ratchet would still read
+	// [OK] (21 >= 16) even though the stratum lost ground. The maxMisses
+	// ratchet must catch it.
+	regressed := ratchet{name: "x", got: 20, total: 22, maxMisses: 1}
+	if regressed.ok() {
+		t.Fatal("ratchet.ok() = true at 20/22 with maxMisses 1 (2 misses), want false")
+	}
+}
+
+// TestBuildRatchetsReasonsStateTheirOwnMissBudget is agent-estate#1155's
+// finding, closed for this file: a reason that names an accepted cost only
+// in prose ("floor at the value measured on add887e") reads as true forever
+// and is never checked against the number actually enforced. This mirrors
+// agent-estate#1121's TestRankingBasisNamesLiveFieldWeights -- pin the
+// number the reason claims to the number the ratchet actually enforces
+// (r.maxMisses), not the surrounding sentence, so changing one without the
+// other fails the build.
+func TestBuildRatchetsReasonsStateTheirOwnMissBudget(t *testing.T) {
+	none := &result{c: goldenset.Case{ID: "none-01", ExpectedSource: goldenset.SourceNone}, pass: true, exitCode: 1}
+	for _, r := range buildRatchets(4, 12, 4, 12, 16, 17, 5, 5, 7, 7, 8, none) {
+		want := fmt.Sprintf("at most %d miss(es)", r.maxMisses)
+		if !strings.Contains(r.reason, want) {
+			t.Errorf("ratchet %q reason = %q, does not contain %q -- agent-estate#1155 requires the reason state the exact number it enforces", r.name, r.reason, want)
+		}
 	}
 }
 
@@ -231,6 +286,44 @@ func TestBuildRatchetsEveryEntryCarriesAReason(t *testing.T) {
 	for _, r := range rs {
 		if r.reason == "" {
 			t.Errorf("ratchet %q has no reason -- agent-estate#1066 requires the accepted-cost reason travel with the check itself", r.name)
+		}
+	}
+}
+
+// TestBuildRatchetsMaxMissesArePinned closes the gap TestBuildRatchetsReasonsStateTheirOwnMissBudget
+// left open: that test only checks the reason string against r.maxMisses,
+// which is formatted FROM the same constant it is meant to guard -- a
+// six-way mutation of buildRatchets's six maxMisses constants (widen each
+// by one, independently) showed only two of six caused any test to fail,
+// and both of those failed incidentally (TestRatchetFailuresDetectsRegressionBelowFloor
+// and TestBuildRatchetsNoneResultMustBeHitToPass are baseline/none-result
+// checks, not a pin on the constant itself). This test hardcodes the
+// agreed-on value for every named ratchet and fails the moment any one of
+// the six constants in buildRatchets changes, whether tightened or
+// loosened, so a widened budget cannot hide behind a reason string that
+// updates itself to describe the new, looser number.
+func TestBuildRatchetsMaxMissesArePinned(t *testing.T) {
+	none := &result{c: goldenset.Case{ID: "none-01", ExpectedSource: goldenset.SourceNone}, pass: true, exitCode: 1}
+	rs := buildRatchets(4, 12, 4, 12, 16, 17, 5, 5, 7, 7, 8, none)
+	want := map[string]int{
+		"natural-language stratum top-3, unscoped":                8,
+		"natural-language stratum top-3, scoped source:repo-docs": 8,
+		"retrieval score (private)":                               1,
+		"publishable-reachable score":                             0,
+		"github-stars stratum top-3":                              1,
+		"github-stars stratum top-10":                             1,
+		"none-01 (absence must report no_match)":                  0,
+	}
+	if len(rs) != len(want) {
+		t.Fatalf("buildRatchets() returned %d ratchets, want %d -- update this test's want map to match", len(rs), len(want))
+	}
+	for _, r := range rs {
+		wantMax, known := want[r.name]
+		if !known {
+			t.Fatalf("ratchet %q is not in this test's want map -- add its agreed-on maxMisses so a future change to it is pinned", r.name)
+		}
+		if r.maxMisses != wantMax {
+			t.Errorf("ratchet %q maxMisses = %d, want %d -- a maxMisses constant in buildRatchets changed without updating this pin (agent-estate#1152 follow-up: a floor that only some ratchets pin is the same defect with a smaller number)", r.name, r.maxMisses, wantMax)
 		}
 	}
 }

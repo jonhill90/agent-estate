@@ -114,6 +114,15 @@
 // ratcheted; buildRatchets' own doc comment is the one place that list and
 // its reasoning are allowed to live.
 //
+// agent-estate#1152: the floor each ratcheted line compares against is
+// derived from a fixed miss budget (ratchet.maxMisses) and the CURRENT
+// total, not a hardcoded hit count -- a hardcoded floor tolerated more and
+// more misses every time a passing case was added to the stratum it
+// guarded (agent-estate#1150 grew the private retrieval stratum 17->22
+// cases and silently took its floor-16 ratchet from tolerating 1 miss to
+// tolerating 6, with every line still printing [OK]). See ratchet.ok's own
+// doc comment for the comparison and buildRatchets' for each line's budget.
+//
 // Usage:
 //
 //	go run ./cmd/goldenquery [-bin estate] [-v]
@@ -518,27 +527,49 @@ func splitPublishable(results []result) (reachableHits, reachableTotal, excluded
 }
 
 // ratchet is one agent-estate#1066 regression guard: a named measurement
-// already printed elsewhere in this report, its accepted floor, and the
-// reason that floor is what it is. The reason is required and is printed
-// as part of the FAIL line itself (see main) -- #1066's own thesis is that
-// a cost disclosed only in prose or a PR body is a cost that gets
-// rediscovered downstream; putting it in the assertion message is what
-// stops that.
+// already printed elsewhere in this report, the number of misses it
+// tolerates against the CURRENT total, and the reason that tolerance is
+// what it is. The reason is required and is printed as part of the FAIL
+// line itself (see main) -- #1066's own thesis is that a cost disclosed
+// only in prose or a PR body is a cost that gets rediscovered downstream;
+// putting it in the assertion message is what stops that.
+//
+// agent-estate#1152: this used to carry a hardcoded `minimum` hit count
+// compared directly against got, with total only ever printed. That let a
+// stratum gaining passing cases silently loosen the guard -- #1150 added
+// five passing corpus-directive cases to the private retrieval stratum,
+// moving it from 17/17 to 22/22, and the floor of 16 that used to tolerate
+// one miss out of 17 now tolerated six out of 22, with every line still
+// printing [OK] and the reason text still reading as accurate. maxMisses
+// fixes this structurally: it is compared against total-got, so a ratchet's
+// tolerance stays fixed in MISSES as the fixture grows, rather than
+// drifting looser every time the fixture gets bigger. floor() below derives
+// the printed floor from maxMisses and the CURRENT total so the printed
+// line's shape (`got/total (floor N)`) is unchanged.
 type ratchet struct {
-	name    string
-	got     int
-	total   int
-	minimum int
-	reason  string
+	name      string
+	got       int
+	total     int
+	maxMisses int
+	reason    string
 }
 
-// ok reports whether this ratchet's currently measured value still meets
-// its accepted floor. total is carried for the printed line only (got/total
-// alongside the floor) and never compared -- two runs with different totals
-// (a fixture gaining or losing a case) are a different, louder failure this
-// ratchet does not attempt to catch.
+// floor is the minimum got value this ratchet currently accepts, derived
+// from maxMisses and this run's own total -- never a stored literal, so it
+// tracks the fixture's current size automatically instead of requiring a
+// human to recompute and edit it by hand every time a case is added.
+func (r ratchet) floor() int {
+	return r.total - r.maxMisses
+}
+
+// ok reports whether this ratchet's currently measured value still stays
+// within its accepted miss budget. Comparing total-got against maxMisses,
+// rather than got against a stored floor, is what makes this
+// denominator-independent (agent-estate#1152): adding a passing case grows
+// total and got together and leaves total-got unchanged, so it cannot loosen
+// the guard the way a hardcoded hit floor did.
 func (r ratchet) ok() bool {
-	return r.got >= r.minimum
+	return r.total-r.got <= r.maxMisses
 }
 
 // buildRatchets is agent-estate#1066's own set of regression guards --
@@ -565,43 +596,72 @@ func (r ratchet) ok() bool {
 //     would reward authoring questions that share no words with anything,
 //     which is not the goal (agent-estate#1115, agent-estate#1138).
 //
-// Every floor below is the value measured on add887e (2026-09-04), the
-// first commit where the baselines it ratchets had stopped moving --
-// agent-estate#1137 and agent-estate#1138 were the last two changes to move
-// them, and both are required preconditions for this function to exist at
-// all (see this issue's own sequencing precondition) -- EXCEPT the two
-// natural-language top-3 floors, which agent-estate#1140 deliberately
-// lowered from 6 to 4 the same way #1138 lowered the github-stars top-10
-// floor: nl-09 and nl-11 were re-authored from a caller's actual need
-// instead of borrowing the target section's own title wording (both were
-// 100% term overlap, rank 1), and both fell out of the top 10 entirely as a
-// result. That drop is the fixture getting better while the retriever is
-// unchanged, not a retrieval regression -- see each ratchet's own reason
-// string, never only this comment or a PR body. Re-measure before trusting
-// any of these numbers further; they are one observation from one
-// checkout, not a constant.
+// Every maxMisses value below is the miss budget implied by the floor
+// measured on add887e (2026-09-04), the first commit where the baselines it
+// ratchets had stopped moving -- agent-estate#1137 and agent-estate#1138
+// were the last two changes to move them, and both are required
+// preconditions for this function to exist at all (see this issue's own
+// sequencing precondition) -- EXCEPT:
+//
+//   - the two natural-language top-3 lines, whose miss budget reflects
+//     agent-estate#1140's deliberate floor drop from 6 to 4 (the same way
+//     #1138 lowered the github-stars top-10 floor): nl-09 and nl-11 were
+//     re-authored from a caller's actual need instead of borrowing the
+//     target section's own title wording (both were 100% term overlap,
+//     rank 1), and both fell out of the top 10 entirely as a result. That
+//     drop is the fixture getting better while the retriever is unchanged,
+//     not a retrieval regression -- see each ratchet's own reason string,
+//     never only this comment or a PR body.
+//   - retrieval score (private), whose maxMisses is agent-estate#1152's own
+//     fix: agent-estate#1150 added five passing corpus-directive cases
+//     (camelcase-01..05) without raising the floor, so a hardcoded-hit-count
+//     floor of 16 against the new total of 22 silently went from tolerating
+//     1 miss to tolerating 6. maxMisses=1 restores the original tolerance
+//     and keeps it fixed as the total keeps growing, instead of another
+//     one-line floor edit someone has to remember to make next time.
+//
+// Re-measure before trusting any of these numbers further; they are one
+// observation from one checkout, not a constant.
 func buildRatchets(nlTop3, nlTotal, nlScopedTop3, nlScopedTotal, privateHits, privateTotal, reachableHits, reachableTotal, starTop3, starTop10, starTotal int, noneResult *result) []ratchet {
+	// agent-estate#1155: each constant below is the ONLY place its ratchet's
+	// miss budget is spelled out as a number -- the reason strings format
+	// this same constant with fmt.Sprintf rather than hand-typing the value
+	// a second time, the way agent-estate#1121's TestRankingBasisNamesLiveFieldWeights
+	// pins prose to a live field-weight constant. A reason that quoted its
+	// budget as a separate hand-written numeral could drift the moment
+	// someone edited the constant and not the string; formatting from the
+	// constant makes that impossible by construction, and
+	// TestBuildRatchetsReasonsStateTheirOwnMissBudget below still asserts it,
+	// the same belt-and-suspenders shape #1121 used.
+	const (
+		nlTop3MaxMisses    = 8 // floor 4 of 12 (agent-estate#1140)
+		retrievalMaxMisses = 1 // floor 16 of 17 pre-#1150, now 21 of 22 -- agent-estate#1152
+		reachableMaxMisses = 0 // floor 5 of 5 (agent-estate#1133)
+		starTop3MaxMisses  = 1 // floor 7 of 8
+		starTop10MaxMisses = 1 // floor 7 of 8, post-agent-estate#1138
+		noneMaxMisses      = 0 // agent-estate#1137's own fix, no room to slip
+	)
 	rs := []ratchet{
-		{"natural-language stratum top-3, unscoped", nlTop3, nlTotal, 4,
-			"agent-estate#1066: floor LOWERED from 6 to 4 by agent-estate#1140 -- nl-09 and nl-11 were re-authored from a caller's actual need instead of the section title's own wording (both were 100% term overlap, rank 1, no headroom to detect a regression), which is expected to move them out of the top 10 entirely, not just out of the top 3. This is the fixture getting better while the retriever is unchanged, not a retrieval regression -- see agent-estate#1140's PR body"},
-		{"natural-language stratum top-3, scoped source:repo-docs", nlScopedTop3, nlScopedTotal, 4,
-			"agent-estate#1066: same floor drop (6 to 4) and same reasoning as the unscoped top-3 line above -- agent-estate#1140 re-authored nl-09/nl-11, and source: scoping does not recover either miss"},
-		{"retrieval score (private)", privateHits, privateTotal, 16,
-			"agent-estate#1066: floor at the value measured on add887e -- unaffected by #1137/#1138, neither of which touched a private-mode cases.json case. Denominator moved 17 -> 22 by agent-estate#1150's five camelcase-01..05 corpus-directive cases; the floor stays the literal value 16 (all five landed as new hits, never a subtraction) but the printed fraction now reads e.g. 21/22, not 16/17 -- read the fraction, not just the pass/fail, before assuming this floor still means what it meant before #1150"},
-		{"publishable-reachable score", reachableHits, reachableTotal, 5,
-			"agent-estate#1066: floor at the value measured on add887e -- agent-estate#1133 established this as the reachable-only denominator (github-stars, repo-docs), not the raw 17"},
-		{"github-stars stratum top-3", starTop3, starTotal, 7,
-			"agent-estate#1066: floor at the value measured on add887e"},
-		{"github-stars stratum top-10", starTop10, starTotal, 7,
-			"agent-estate#1066: accepted regression from a prior 8/8 -- agent-estate#1138 re-authored github-stars questions from need rather than target-description overlap, which cost one hit; this floor is the post-#1138 value, never the pre-#1138 8/8"},
+		{"natural-language stratum top-3, unscoped", nlTop3, nlTotal, nlTop3MaxMisses,
+			fmt.Sprintf("agent-estate#1066: tolerates at most %d miss(es) out of the current total -- floor LOWERED from 6-of-12 to 4-of-12 by agent-estate#1140, nl-09 and nl-11 were re-authored from a caller's actual need instead of the section title's own wording (both were 100%% term overlap, rank 1, no headroom to detect a regression), which is expected to move them out of the top 10 entirely, not just out of the top 3. This is the fixture getting better while the retriever is unchanged, not a retrieval regression -- see agent-estate#1140's PR body", nlTop3MaxMisses)},
+		{"natural-language stratum top-3, scoped source:repo-docs", nlScopedTop3, nlScopedTotal, nlTop3MaxMisses,
+			fmt.Sprintf("agent-estate#1066: tolerates at most %d miss(es) out of the current total -- same floor drop (6-of-12 to 4-of-12) and same reasoning as the unscoped top-3 line above, agent-estate#1140 re-authored nl-09/nl-11, and source: scoping does not recover either miss", nlTop3MaxMisses)},
+		{"retrieval score (private)", privateHits, privateTotal, retrievalMaxMisses,
+			fmt.Sprintf("agent-estate#1152: tolerates at most %d miss(es) out of the current total, denominator-independent -- unaffected by #1137/#1138, neither of which touched a private-mode cases.json case. agent-estate#1150's five camelcase-01..05 corpus-directive cases moved the denominator 17 -> 22 without raising the old hardcoded floor of 16, which silently grew the tolerated-miss count from 1 to 6; this ratchet is now defined by the miss budget instead of a hit floor, so the next case added here cannot loosen it the same way", retrievalMaxMisses)},
+		{"publishable-reachable score", reachableHits, reachableTotal, reachableMaxMisses,
+			fmt.Sprintf("agent-estate#1066: tolerates at most %d miss(es) out of the current total -- agent-estate#1133 established this as the reachable-only denominator (github-stars, repo-docs), not the raw 17", reachableMaxMisses)},
+		{"github-stars stratum top-3", starTop3, starTotal, starTop3MaxMisses,
+			fmt.Sprintf("agent-estate#1066: tolerates at most %d miss(es) out of the current total -- floor at the value measured on add887e", starTop3MaxMisses)},
+		{"github-stars stratum top-10", starTop10, starTotal, starTop10MaxMisses,
+			fmt.Sprintf("agent-estate#1066: tolerates at most %d miss(es) out of the current total -- accepted regression from a prior 8-of-8, agent-estate#1138 re-authored github-stars questions from need rather than target-description overlap, which cost one hit; this is the post-#1138 value, never the pre-#1138 8-of-8", starTop10MaxMisses)},
 	}
 	if noneResult != nil {
 		got := 0
 		if noneResult.pass {
 			got = 1
 		}
-		rs = append(rs, ratchet{"none-01 (absence must report no_match)", got, 1, 1,
-			"agent-estate#1066: this is agent-estate#1137's own fix, not a floor with room to slip further -- none-01 failing to exit 1/no_match is the exact regression #1137 closed"})
+		rs = append(rs, ratchet{"none-01 (absence must report no_match)", got, 1, noneMaxMisses,
+			fmt.Sprintf("agent-estate#1066: tolerates at most %d miss(es) -- this is agent-estate#1137's own fix, not a floor with room to slip further, none-01 failing to exit 1/no_match is the exact regression #1137 closed", noneMaxMisses)})
 	}
 	return rs
 }
@@ -754,7 +814,7 @@ func main() {
 		if !r.ok() {
 			status = "FAIL"
 		}
-		fmt.Fprintf(w, "  [%s] %s: %d/%d (floor %d) -- %s\n", status, r.name, r.got, r.total, r.minimum, r.reason)
+		fmt.Fprintf(w, "  [%s] %s: %d/%d (floor %d) -- %s\n", status, r.name, r.got, r.total, r.floor(), r.reason)
 	}
 	fmt.Fprintln(w, "  not ratcheted, known corpus-growth drift (agent-estate#1112): natural-language stratum top-10, unscoped and scoped")
 	fmt.Fprintln(w, "  not ratcheted, measures fixture honesty not quality (agent-estate#1066, agent-estate#1115): term overlap, github-stars and natural-language")
@@ -764,7 +824,7 @@ func main() {
 	if len(failed) > 0 {
 		fmt.Fprintf(os.Stderr, "goldenquery: %d ratchet(s) regressed below their accepted floor -- see the ratchet section above for which and why\n", len(failed))
 		for _, r := range failed {
-			fmt.Fprintf(os.Stderr, "  %s: %d/%d, floor %d -- %s\n", r.name, r.got, r.total, r.minimum, r.reason)
+			fmt.Fprintf(os.Stderr, "  %s: %d/%d, floor %d -- %s\n", r.name, r.got, r.total, r.floor(), r.reason)
 		}
 		os.Exit(1)
 	}
