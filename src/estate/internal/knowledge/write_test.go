@@ -276,3 +276,114 @@ func TestResolveWritePathNeverRequiresAckWithAnExplicitOverride(t *testing.T) {
 		t.Error("ResolveWritePath() requiresAck = true with an explicit override, want false")
 	}
 }
+
+// agent-estate#1191 hole 2: resolveOutputPath used to return
+// sharedFallback=false for ANY non-empty ESTATE_KNOWLEDGE_INDEX, without
+// checking whether it names the shared default -- so pointing the override
+// at the shared path wrote it with no acknowledgement. This is the same
+// $HOME-relative path resolveOutputPath itself would fall through to; it
+// must require the acknowledgement exactly as the fallback does.
+//
+// This test FAILS before the fix (requiresAck = false, because the override
+// branch never looked at where p pointed) and PASSES after it.
+func TestResolveWritePathRequiresAckWhenOverrideNamesTheSharedPathExactly(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv(AllowSharedWriteEnv, "")
+
+	shared := filepath.Join(home, ".local", "state", "agent-estate", "knowledge", "index.json")
+	t.Setenv("ESTATE_KNOWLEDGE_INDEX", shared)
+
+	path, requiresAck, err := ResolveWritePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != shared {
+		t.Errorf("ResolveWritePath() path = %q, want %q", path, shared)
+	}
+	if !requiresAck {
+		t.Error("ResolveWritePath() requiresAck = false for an override naming the shared path exactly, want true -- this is agent-estate#1191 hole 2")
+	}
+}
+
+// Same defect, a differently-spelled path naming the identical file: `..`
+// segments that lexically clean down to the shared default. samePath must
+// resolve both sides to absolute, cleaned form before comparing rather than
+// requiring a byte-identical string.
+//
+// This test FAILS before the fix for the same reason as the exact-spelling
+// case above, and would also fail against a naive `p == shared` string
+// comparison fix that did not clean/absolute both sides first.
+func TestResolveWritePathRequiresAckWhenOverrideNamesTheSharedPathViaDotDotSegments(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv(AllowSharedWriteEnv, "")
+
+	shared := filepath.Join(home, ".local", "state", "agent-estate", "knowledge", "index.json")
+	nonCanonical := filepath.Join(home, ".local", "state", "agent-estate", "knowledge", "nested", "..", "index.json")
+	t.Setenv("ESTATE_KNOWLEDGE_INDEX", nonCanonical)
+
+	_, requiresAck, err := ResolveWritePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !requiresAck {
+		t.Errorf("ResolveWritePath() requiresAck = false for %q, a non-canonical spelling of the shared path %q, want true -- this is agent-estate#1191 hole 2", nonCanonical, shared)
+	}
+}
+
+// A symlinked directory component is the third spelling this fix commits to
+// handling: the resolved, real shared path is reached via a symlink placed
+// somewhere in its ancestry (the shape a symlinked $HOME produces).
+// normalizePath must resolve that symlink before comparing rather than
+// treating the symlink path and its target as different files.
+func TestResolveWritePathRequiresAckWhenOverrideNamesTheSharedPathViaASymlinkedDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv(AllowSharedWriteEnv, "")
+
+	sharedDir := filepath.Join(home, ".local", "state", "agent-estate", "knowledge")
+	if err := os.MkdirAll(sharedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	link := filepath.Join(t.TempDir(), "linked-knowledge-dir")
+	if err := os.Symlink(sharedDir, link); err != nil {
+		t.Skipf("symlink not supported in this environment: %v", err)
+	}
+	viaSymlink := filepath.Join(link, "index.json")
+	t.Setenv("ESTATE_KNOWLEDGE_INDEX", viaSymlink)
+
+	_, requiresAck, err := ResolveWritePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !requiresAck {
+		t.Errorf("ResolveWritePath() requiresAck = false for %q, a symlinked spelling of the shared path, want true -- this is agent-estate#1191 hole 2", viaSymlink)
+	}
+}
+
+// An override pointing anywhere genuinely else -- not the shared path under
+// any spelling -- must keep behaving exactly as before this fix: no
+// acknowledgement required. A per-turn or scratch index depends on this;
+// every dispatched lane's own ESTATE_KNOWLEDGE_INDEX must keep writing
+// without prompting.
+func TestResolveWritePathStillNoAckForAnOverrideElsewhere(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv(AllowSharedWriteEnv, "")
+
+	override := filepath.Join(t.TempDir(), "dispatch", "turn-123", "index.json")
+	t.Setenv("ESTATE_KNOWLEDGE_INDEX", override)
+
+	path, requiresAck, err := ResolveWritePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != override {
+		t.Errorf("ResolveWritePath() path = %q, want %q", path, override)
+	}
+	if requiresAck {
+		t.Error("ResolveWritePath() requiresAck = true for an override pointing elsewhere, want false")
+	}
+}
