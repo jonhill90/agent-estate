@@ -306,13 +306,13 @@ func TestBuildRatchetsMaxMissesArePinned(t *testing.T) {
 	none := &result{c: goldenset.Case{ID: "none-01", ExpectedSource: goldenset.SourceNone}, pass: true, exitCode: 1}
 	rs := buildRatchets(4, 12, 4, 12, 16, 17, 5, 5, 7, 7, 8, none)
 	want := map[string]int{
-		"natural-language stratum top-3, unscoped":                8,
-		"natural-language stratum top-3, scoped source:repo-docs": 8,
-		"retrieval score (private)":                               1,
-		"publishable-reachable score":                             0,
-		"github-stars stratum top-3":                              1,
-		"github-stars stratum top-10":                             1,
-		"none-01 (absence must report no_match)":                  0,
+		"natural-language stratum top-3, unscoped":                        8,
+		"natural-language stratum top-3, private scoped source:repo-docs": 8,
+		"retrieval score (private)":                                       1,
+		"publishable-reachable score":                                     0,
+		"github-stars stratum top-3":                                      1,
+		"github-stars stratum top-10":                                     1,
+		"none-01 (absence must report no_match)":                          0,
 	}
 	if len(rs) != len(want) {
 		t.Fatalf("buildRatchets() returned %d ratchets, want %d -- update this test's want map to match", len(rs), len(want))
