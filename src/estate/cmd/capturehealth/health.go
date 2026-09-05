@@ -100,68 +100,40 @@
 //     it in file order -- the only ordering rule the format supports, since
 //     no record carries an explicit session id of its own outside
 //     session_meta.
+//
+// # K2 slice 3 (agent-estate#1139): parsing moved to internal/rollout
+//
+// The record-shape decoding, genuineOperatorTurn predicate, and the
+// compacted/response_item same-file dedup rule documented above now live in
+// internal/rollout, not in this file -- cmd/corpusextract's dry-run manifest
+// needs the identical logic (down to the identical dedup rule) to guarantee
+// its own counts cannot diverge from the numbers measured here. This file
+// keeps the FileReport/Report shapes and the human-readable summary; every
+// type below that used to be decoded here is now a type alias onto
+// internal/rollout, and analyzeFile/buildReport are thin wrappers over
+// rollout.AnalyzeFile/rollout.WalkRolloutFiles. No behavior changed by this
+// move -- this package's own test suite (unmodified by K2 slice 3) is what
+// proves that.
 package main
 
 import (
-	"bufio"
-	"encoding/json"
-	"fmt"
-	"io"
-	"io/fs"
-	"os"
-	"path/filepath"
-	"sort"
+	"github.com/jonhill90/agent-estate/estate/internal/rollout"
 )
 
-// rawRecord is the top-level shape shared by every rollout JSONL line:
-// {"timestamp": "...", "type": "...", "payload": {...}}. payload is left as
-// raw bytes because its shape depends entirely on "type", and this report
-// must not assume it knows every shape that will ever appear (correction 3).
-type rawRecord struct {
-	Type    string          `json:"type"`
-	Payload json.RawMessage `json:"payload"`
-}
+// responseItemPayload and contentItem are aliased onto internal/rollout so
+// this package's existing tests (which construct them directly) keep
+// compiling unchanged while the actual decoding logic lives in one place.
+type responseItemPayload = rollout.ResponseItemPayload
+type contentItem = rollout.ContentItem
 
-// responseItemPayload is response_item's payload shape. Only "message"
-// payloads (as opposed to "reasoning", "function_call", "function_call_output")
-// carry a Role at all.
-type responseItemPayload struct {
-	Type    string        `json:"type"`
-	Role    string        `json:"role"`
-	Content []contentItem `json:"content"`
-}
+// SessionAttribution is aliased the same way -- FileReport.Sessions is
+// exactly rollout.SessionAttribution's shape.
+type SessionAttribution = rollout.SessionAttribution
 
-type contentItem struct {
-	Type string `json:"type"`
-
-	// Text is only decoded because compacted-overlap detection needs the
-	// actual operator words to compare against response_item's own text --
-	// every other consumer of contentItem only ever looked at Type.
-	Text string `json:"text"`
-}
-
-// compactedPayload is compacted's payload shape. replacement_history is a
-// list of the SAME shape response_item.payload uses for a message
-// ("type":"message","role":"user"/"assistant"/...,"content":[...]) -- so it
-// reuses responseItemPayload rather than a second near-identical struct.
-type compactedPayload struct {
-	ReplacementHistory []responseItemPayload `json:"replacement_history"`
-}
-
-// sessionMetaPayload is session_meta's payload shape. Field name is "id",
-// never "session_id" (correction 1) -- there is no session_id field to
-// mistakenly read here.
-//
-// Only ID is decoded typed. payload.originator/source/cwd are present in the
-// real tree but their shape is NOT stable: a forked/subagent session's
-// payload.source is an object ({"subagent":{"thread_spawn":{...}}}), not the
-// plain string a top-level CLI session carries. This report does not need
-// those fields, so it does not decode them at all -- decoding them typed
-// previously made a schema variation in an unused field fail the WHOLE file,
-// including its genuine operator turns, which is worse than not reading the
-// field in the first place.
-type sessionMetaPayload struct {
-	ID string `json:"id"`
+// genuineOperatorTurn delegates to internal/rollout's positive predicate --
+// see that package's doc comment for correction 2.
+func genuineOperatorTurn(p responseItemPayload) bool {
+	return rollout.GenuineOperatorTurn(p)
 }
 
 // FileReport is one rollout file's own counts.
@@ -248,22 +220,6 @@ type FileReport struct {
 	LineCount int `json:"line_count"`
 }
 
-func newFileReport(path string) FileReport {
-	return FileReport{
-		Path:                  path,
-		RecordTypeCounts:      map[string]int{},
-		RoleCounts:            map[string]int{},
-		UserContentTypeCounts: map[string]int{},
-	}
-}
-
-// SessionAttribution is one distinct session_meta.payload.id's own operator
-// turn count within one file. See FileReport.Sessions.
-type SessionAttribution struct {
-	SessionID     string `json:"session_id"`
-	OperatorTurns int    `json:"operator_turns"`
-}
-
 // ParseFailure names one file this report could not read as rollout JSONL,
 // and why -- never skipped silently.
 type ParseFailure struct {
@@ -305,228 +261,38 @@ type Report struct {
 	Files []FileReport `json:"files"`
 }
 
-// genuineOperatorTurn is the ONE positive predicate this report treats as an
-// extractable operator turn. It never checks "role != assistant" -- see the
-// package comment's correction 2.
-func genuineOperatorTurn(p responseItemPayload) bool {
-	if p.Role != "user" {
-		return false
-	}
-	if len(p.Content) == 0 {
-		return false
-	}
-	return p.Content[0].Type == "input_text"
-}
-
-// analyzeFile reads one rollout JSONL file top to bottom with a plain
-// buffered read (os.Open only -- no write mode, no truncate) and returns its
-// own FileReport. A line that fails to unmarshal as the shared rawRecord
-// shape fails the WHOLE file: it is reported as unparseable with the line
-// number and the json error, and contributes nothing to any aggregate count,
-// rather than silently counting only the lines before the break.
+// analyzeFile is a thin wrapper over rollout.AnalyzeFile: it re-shapes
+// rollout.FileAnalysis into this package's own FileReport. All decoding,
+// the genuineOperatorTurn predicate, and the compacted/response_item
+// same-file dedup rule live in internal/rollout -- see this file's package
+// comment, K2 slice 3 section.
 func analyzeFile(path string) (FileReport, error) {
-	f, err := os.Open(path)
+	fa, err := rollout.AnalyzeFile(path)
 	if err != nil {
 		return FileReport{}, err
 	}
-	defer f.Close()
-
-	// responseItemTexts is every genuine operator turn's own text ANYWHERE in
-	// this file -- collected as its own full-file first pass, not
-	// incrementally alongside the second pass below. A compacted record's
-	// replacement_history summarizes prior conversation history, but that is
-	// a statement about what it CONTAINS, not about where its matching
-	// response_item is positioned in the file: the live tree has been
-	// observed to carry a compacted record BEFORE the response_item it
-	// duplicates (agent-estate#1226 review; see this package's doc comment
-	// for the two counterexamples and corrected counts). Checking each
-	// compacted turn against only text seen so far therefore misses same-file
-	// matches that appear later, undercounting
-	// CompactedOverlapWithResponseItem and overcounting CompactedOnlyInCompacted.
-	responseItemTexts, err := collectResponseItemTexts(f)
-	if err != nil {
-		return FileReport{}, err
-	}
-	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		return FileReport{}, err
-	}
-
-	report := newFileReport(path)
-	seenSession := map[string]bool{}
-	sessionIdx := map[string]int{} // session id -> index into report.Sessions
-	currentSession := -1           // index into report.Sessions the NEXT turn attributes to, or -1
-
-	// compactedTexts is every distinct compacted-turn text already counted
-	// in THIS file, so a session compacted more than once (which re-embeds
-	// its full prior history each time) does not inflate
-	// CompactedUserTurnsDistinct.
-	compactedTexts := map[string]bool{}
-
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
-	lineNo := 0
-	for scanner.Scan() {
-		lineNo++
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-		var rec rawRecord
-		if err := json.Unmarshal(line, &rec); err != nil {
-			return FileReport{}, fmt.Errorf("line %d: %w", lineNo, err)
-		}
-		report.LineCount++
-		report.RecordTypeCounts[rec.Type]++
-
-		switch rec.Type {
-		case "response_item":
-			var p responseItemPayload
-			if err := json.Unmarshal(rec.Payload, &p); err != nil {
-				return FileReport{}, fmt.Errorf("line %d: response_item payload: %w", lineNo, err)
-			}
-			if p.Type != "message" || p.Role == "" {
-				// reasoning / function_call / function_call_output payloads
-				// carry no role at all -- not a role to tally, and never
-				// counted as an operator turn.
-				continue
-			}
-			report.RoleCounts[p.Role]++
-			if p.Role == "user" {
-				ct := "(missing)"
-				if len(p.Content) > 0 {
-					ct = p.Content[0].Type
-				}
-				report.UserContentTypeCounts[ct]++
-			}
-			if genuineOperatorTurn(p) {
-				report.OperatorTurns++
-				if currentSession >= 0 {
-					report.Sessions[currentSession].OperatorTurns++
-				}
-			}
-		case "session_meta":
-			var p sessionMetaPayload
-			if err := json.Unmarshal(rec.Payload, &p); err != nil {
-				return FileReport{}, fmt.Errorf("line %d: session_meta payload: %w", lineNo, err)
-			}
-			if p.ID != "" {
-				report.SessionMetaRecords++
-				if !seenSession[p.ID] {
-					seenSession[p.ID] = true
-					sessionIdx[p.ID] = len(report.Sessions)
-					report.SessionIDs = append(report.SessionIDs, p.ID)
-					report.Sessions = append(report.Sessions, SessionAttribution{SessionID: p.ID})
-				}
-				currentSession = sessionIdx[p.ID]
-			}
-		case "compacted":
-			var p compactedPayload
-			if err := json.Unmarshal(rec.Payload, &p); err != nil {
-				return FileReport{}, fmt.Errorf("line %d: compacted payload: %w", lineNo, err)
-			}
-			report.CompactedRecords++
-			for _, item := range p.ReplacementHistory {
-				if item.Type != "message" || item.Role != "user" {
-					continue
-				}
-				if len(item.Content) == 0 || item.Content[0].Type != "input_text" {
-					continue
-				}
-				text := item.Content[0].Text
-				report.CompactedUserTurnsRaw++
-				if compactedTexts[text] {
-					continue
-				}
-				compactedTexts[text] = true
-				report.CompactedUserTurnsDistinct++
-				if responseItemTexts[text] {
-					report.CompactedOverlapWithResponseItem++
-				} else {
-					report.CompactedOnlyInCompacted++
-				}
-			}
-		default:
-			// event_msg, turn_context, world_state,
-			// inter_agent_communication_metadata, and anything else: counted
-			// above by RecordTypeCounts already, nothing further to extract.
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return FileReport{}, fmt.Errorf("scan: %w", err)
-	}
-	return report, nil
-}
-
-// collectResponseItemTexts is analyzeFile's first pass: every genuine
-// operator turn's own text found ANYWHERE in f, read top to bottom once. It
-// exists as a separate full pass (rather than folded into analyzeFile's main
-// loop) specifically so the compacted/response_item overlap check tests
-// against the WHOLE file, not just the text seen before a given compacted
-// record -- see analyzeFile's own doc comment for why that distinction is
-// load-bearing. f must be positioned at the start of the file on entry; the
-// caller is responsible for seeking it back before its own pass.
-func collectResponseItemTexts(f *os.File) (map[string]bool, error) {
-	texts := map[string]bool{}
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
-	lineNo := 0
-	for scanner.Scan() {
-		lineNo++
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-		var rec rawRecord
-		if err := json.Unmarshal(line, &rec); err != nil {
-			return nil, fmt.Errorf("line %d: %w", lineNo, err)
-		}
-		if rec.Type != "response_item" {
-			continue
-		}
-		var p responseItemPayload
-		if err := json.Unmarshal(rec.Payload, &p); err != nil {
-			return nil, fmt.Errorf("line %d: response_item payload: %w", lineNo, err)
-		}
-		if p.Type != "message" || p.Role == "" {
-			continue
-		}
-		if genuineOperatorTurn(p) {
-			texts[p.Content[0].Text] = true
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("scan: %w", err)
-	}
-	return texts, nil
-}
-
-// walkRolloutFiles returns every *.jsonl path under root, sorted, so a report
-// run twice over an unchanged tree lists files in the same order.
-func walkRolloutFiles(root string) ([]string, error) {
-	var files []string
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			return nil
-		}
-		if filepath.Ext(path) == ".jsonl" {
-			files = append(files, path)
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	sort.Strings(files)
-	return files, nil
+	return FileReport{
+		Path:                             path,
+		SessionIDs:                       fa.SessionIDs,
+		SessionMetaRecords:               fa.SessionMetaRecords,
+		Sessions:                         fa.Sessions,
+		OperatorTurns:                    fa.OperatorTurns,
+		CompactedRecords:                 fa.CompactedRecords,
+		CompactedUserTurnsRaw:            fa.CompactedUserTurnsRaw,
+		CompactedUserTurnsDistinct:       fa.CompactedUserTurnsDistinct,
+		CompactedOverlapWithResponseItem: fa.CompactedOverlapWithResponseItem,
+		CompactedOnlyInCompacted:         fa.CompactedOnlyInCompacted,
+		RecordTypeCounts:                 fa.RecordTypeCounts,
+		RoleCounts:                       fa.RoleCounts,
+		UserContentTypeCounts:            fa.UserContentTypeCounts,
+		LineCount:                        fa.LineCount,
+	}, nil
 }
 
 // buildReport is the whole tool's read-only core: list files, analyze each,
 // aggregate. It never writes to root or to any file under it.
 func buildReport(root string) (Report, error) {
-	files, err := walkRolloutFiles(root)
+	files, err := rollout.WalkRolloutFiles(root)
 	if err != nil {
 		return Report{}, err
 	}
