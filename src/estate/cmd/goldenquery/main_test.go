@@ -270,6 +270,82 @@ func TestPublishableReachableLineAccountsForEveryCase(t *testing.T) {
 	}
 }
 
+// corpusGrowthDriftLineNumber extracts the one integer corpusGrowthDriftLine
+// prints -- the same number twice in the sentence ("...on all N cases...")
+// -- by matching the literal digits after "on all ".
+var corpusGrowthDriftLineRe = regexp.MustCompile(`on all (\d+) cases`)
+
+func corpusGrowthDriftLineNumber(t *testing.T, line string) int {
+	t.Helper()
+	m := corpusGrowthDriftLineRe.FindStringSubmatch(line)
+	if m == nil {
+		t.Fatalf("corpus-growth-drift line %q does not match the expected shape", line)
+	}
+	n, err := strconv.Atoi(m[1])
+	if err != nil {
+		t.Fatalf("corpus-growth-drift line %q: could not parse %q as int: %v", line, m[1], err)
+	}
+	return n
+}
+
+// TestCorpusGrowthDriftLineReflectsGivenTotalNotScopedTotal is
+// agent-estate#1218's value test for corpusGrowthDriftLine, replacing the
+// old AST-only guard's blind spot (see main.go's own doc comment on
+// corpusGrowthDriftLine, and ratchet_disclosure_test.go's
+// TestMainCallsCorpusGrowthDriftLineWithNlTotal, for the fuller argument on
+// why both tests are kept).
+//
+// This builds a case set with a genuine UnscopedExempt divergence -- an
+// exempt case MISSES unscoped top-3 (so it is excluded from the unscoped
+// tally) but HITS scoped top-3 (so it counts fully in the scoped tally) --
+// derives nlTotal and nlScopedTotal through main()'s own code path
+// (tallyNatural, the same function runNaturalStratum calls), confirms the
+// two totals genuinely differ because of that case, and then asserts
+// corpusGrowthDriftLine(nlTotal) prints nlTotal, not nlScopedTotal. Feeding
+// this test nlScopedTotal instead must fail it -- that is exactly the
+// regression agent-estate#1215 fixed and agent-estate#1218 was filed
+// because the OLD test could not catch a value-only version of it.
+func TestCorpusGrowthDriftLineReflectsGivenTotalNotScopedTotal(t *testing.T) {
+	exempt := goldenset.Case{ID: "nl-exempt", UnscopedExempt: true, ExemptReason: "misses unscoped top-3, hits scoped top-3"}
+	ordinary1 := goldenset.Case{ID: "nl-1"}
+	ordinary2 := goldenset.Case{ID: "nl-2"}
+
+	unscopedResults := []naturalResult{
+		{c: exempt, rank: 10, ran: true},   // MISS top-3 unscoped -- excluded from nlTotal by the exclude func
+		{c: ordinary1, rank: 1, ran: true}, // ordinary hit, counted
+		{c: ordinary2, rank: 0, ran: true}, // ordinary miss, counted
+	}
+	scopedResults := []naturalResult{
+		{c: exempt, rank: 2, ran: true}, // HIT top-3 scoped -- counts fully here, nothing excluded
+		{c: ordinary1, rank: 1, ran: true},
+		{c: ordinary2, rank: 0, ran: true},
+	}
+
+	// Same code path runNaturalStratum uses: unscoped excludes
+	// UnscopedExempt cases, scoped excludes nothing.
+	excludeUnscopedExempt := func(c goldenset.Case) bool { return c.UnscopedExempt }
+	_, _, nlTotal := tallyNatural(unscopedResults, excludeUnscopedExempt)
+	_, _, nlScopedTotal := tallyNatural(scopedResults, nil)
+
+	if nlTotal == nlScopedTotal {
+		t.Fatalf("nlTotal (%d) == nlScopedTotal (%d) -- this fixture must make them diverge (the exempt case is required to be excluded from one and counted in the other) or this test cannot tell the two apart", nlTotal, nlScopedTotal)
+	}
+	if nlTotal != 2 {
+		t.Fatalf("nlTotal = %d, want 2 (the exempt case excluded, two ordinary cases counted)", nlTotal)
+	}
+	if nlScopedTotal != 3 {
+		t.Fatalf("nlScopedTotal = %d, want 3 (nothing excluded from the scoped tally)", nlScopedTotal)
+	}
+
+	got := corpusGrowthDriftLineNumber(t, corpusGrowthDriftLine(nlTotal))
+	if got != nlTotal {
+		t.Fatalf("corpusGrowthDriftLine(nlTotal) printed %d, want %d (nlTotal)", got, nlTotal)
+	}
+	if got == nlScopedTotal {
+		t.Fatalf("corpusGrowthDriftLine(nlTotal) printed %d, which equals nlScopedTotal -- this fixture's nlTotal and nlScopedTotal must differ for this comparison to mean anything", got)
+	}
+}
+
 // agent-estate#1066: buildRatchets/ratchetFailures are the regression-ratchet
 // primitives -- a ratcheted line that drops below its recorded floor must
 // be reported as a failure, and every ratchet's reason must be non-empty so

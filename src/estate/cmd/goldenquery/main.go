@@ -677,6 +677,27 @@ func publishableReachableLine(totalCases, excludedPrivate, noneCount, reachableH
 		excludedPrivate, totalCases, noneCount, totalCases, reachableHits, reachableTotal)
 }
 
+// corpusGrowthDriftLine formats the agent-estate#1112 "not ratcheted, known
+// corpus-growth drift" disclosure line, following agent-estate#1214's
+// publishableReachableLine as the model: a pure function taking the count
+// the line needs, so the value it prints can be tested directly rather than
+// only inspected as an inline Fprintf argument.
+//
+// agent-estate#1218: the ONE argument this function takes must always be
+// nlTotal (the unscoped natural-language stratum's own, exemption-excluded
+// total), never nlScopedTotal (the scoped stratum's total, which excludes
+// nothing). The sentence claims the scoped top-10 line is rank-identical to
+// the unscoped top-10 line "on all N cases" -- the set that claim covers is
+// the non-exempt cases, i.e. nlTotal. checkExemptions only allows an
+// exemption when a case misses unscoped top-3 and hits scoped top-3, so an
+// UnscopedExempt case is REQUIRED to diverge between the two lines, not stay
+// rank-identical -- nlScopedTotal would wrongly fold those cases into a
+// claim the exemption mechanism itself proves false for exactly them
+// (agent-estate#1214 review, finding 3; agent-estate#1215's fix pass).
+func corpusGrowthDriftLine(nlTotal int) string {
+	return fmt.Sprintf("  not ratcheted, known corpus-growth drift (agent-estate#1112): natural-language stratum top-10, unscoped (public); not ratcheted, rank-identical to that unscoped line on all %d cases and so inherits its corpus-growth drift wholesale (agent-estate#1112, agent-estate#1162): natural-language stratum top-10, private scoped source:repo-docs", nlTotal)
+}
+
 // ratchet is one agent-estate#1066 regression guard: a named measurement
 // already printed elsewhere in this report, the number of misses it
 // tolerates against the CURRENT total, and the reason that tolerance is
@@ -1067,18 +1088,13 @@ func main() {
 	// agent-estate#1214: "21 cases" used to be a stored literal here, naming
 	// the natural-language fixture's size as it stood when agent-estate#1112
 	// made this comparison. natural_cases.json has since grown past 21 (like
-	// cases.json's 17->22, agent-estate#1214's own finding). agent-estate#1215's
-	// fix pass: the live replacement is nlTotal (the unscoped stratum's own,
-	// exemption-excluded total), never nlScopedTotal (the scoped stratum's
-	// total, which excludes nothing). The sentence claims the scoped top-10
-	// line is rank-identical to the unscoped top-10 line "on all N cases" --
-	// the set that claim covers is the non-exempt cases, i.e. nlTotal.
-	// checkExemptions only allows an exemption when a case misses unscoped
-	// top-3 and hits scoped top-3, so an UnscopedExempt case is REQUIRED to
-	// diverge between the two lines, not stay rank-identical -- nlScopedTotal
-	// would wrongly fold those cases into a claim the exemption mechanism
-	// itself proves false for exactly them.
-	fmt.Fprintf(w, "  not ratcheted, known corpus-growth drift (agent-estate#1112): natural-language stratum top-10, unscoped (public); not ratcheted, rank-identical to that unscoped line on all %d cases and so inherits its corpus-growth drift wholesale (agent-estate#1112, agent-estate#1162): natural-language stratum top-10, private scoped source:repo-docs\n", nlTotal)
+	// cases.json's 17->22, agent-estate#1214's own finding). agent-estate#1218
+	// factored the line itself into corpusGrowthDriftLine (see its own doc
+	// comment for why the argument must be nlTotal, never nlScopedTotal) --
+	// this call site is now the one place left that can get that choice
+	// wrong, and it is a single argument name rather than a value buried
+	// inside an inline format string.
+	fmt.Fprintln(w, corpusGrowthDriftLine(nlTotal))
 	fmt.Fprintln(w, "  not ratcheted, measures fixture honesty not quality (agent-estate#1066, agent-estate#1115): term overlap, github-stars and natural-language")
 	// agent-estate#1209: guardrail 2 -- the exempt bucket's own size,
 	// printed unconditionally alongside the ratchet lines above (even when
