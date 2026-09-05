@@ -716,6 +716,31 @@ func buildRatchets(nlTop3, nlTotal, nlScopedTop3, nlScopedTotal, privateHits, pr
 	// constant makes that impossible by construction, and
 	// TestBuildRatchetsReasonsStateTheirOwnMissBudget below still asserts it,
 	// the same belt-and-suspenders shape #1121 used.
+	//
+	// agent-estate#1155, closing comment (audited on 0140ec1, staying open
+	// until this landed): the issue's literal clause was "3 of 7 reasons do
+	// not state their own floor." Audited again after this fix, 4 of 7 name
+	// no numeric floor at all -- they name the miss budget instead, which is
+	// the actually-enforced, actually-pinned constant (see the paragraph
+	// above and TestBuildRatchetsMaxMissesArePinned). That is not the three
+	// still failing the literal clause; it is a deliberate supersession this
+	// comment records rather than leaving implicit: STATING THE MISS BUDGET
+	// SUPERSEDES STATING THE FLOOR. A reason that names both a budget and a
+	// floor has two numbers to keep in sync instead of one, which is the
+	// exact defect class #1152 fixed for the enforcement itself; naming the
+	// floor a second time in prose would reintroduce it in prose instead.
+	//
+	// The one line the audit found still short of even the four-of-seven
+	// pattern was github-stars stratum top-10: its reason named `8-of-8` --
+	// the value it moved FROM -- twice, and named no current number at all,
+	// which is the one case where the original issue's complaint still read
+	// true. Fixed here by making that line match the four budget-only lines
+	// (retrieval score, publishable-reachable, github-stars top-3, none-01),
+	// not by adding today's floor (7) to its prose: the printed
+	// `(floor N)` on the report line already carries that number, derived,
+	// never hand-typed (ratchet.floor), and a reader who wants it reads it
+	// there. Declining to also duplicate it in prose is the point of this
+	// decision, not an oversight -- see the ratchet's own reason string.
 	const (
 		nlTop3MaxMisses    = 8 // floor 4 of 12 (agent-estate#1140), now 13 of 21 -- agent-estate#1169 added nl-13..nl-21 (per-file coverage), all nine pass, this constant did not move
 		retrievalMaxMisses = 1 // floor 16 of 17 pre-#1150, now 21 of 22 -- agent-estate#1152
@@ -736,7 +761,7 @@ func buildRatchets(nlTop3, nlTotal, nlScopedTop3, nlScopedTotal, privateHits, pr
 		{"github-stars stratum top-3", starTop3, starTotal, starTop3MaxMisses,
 			fmt.Sprintf("agent-estate#1066: tolerates at most %d miss(es) out of the current total -- floor at the value measured on add887e", starTop3MaxMisses)},
 		{"github-stars stratum top-10", starTop10, starTotal, starTop10MaxMisses,
-			fmt.Sprintf("agent-estate#1066: tolerates at most %d miss(es) out of the current total -- accepted regression from a prior 8-of-8, agent-estate#1138 re-authored github-stars questions from need rather than target-description overlap, which cost one hit; this is the post-#1138 value, never the pre-#1138 8-of-8", starTop10MaxMisses)},
+			fmt.Sprintf("agent-estate#1066: tolerates at most %d miss(es) out of the current total -- accepted cost of agent-estate#1138's re-authoring, which traded target-description overlap for need-based questions and cost one hit against full marks; the miss budget above is the enforced, pinned constant (agent-estate#1152), and agent-estate#1155 records that stating it supersedes stating any specific historical or current floor value in this prose -- the printed report line's own (floor N) already carries that number, derived from this same constant, never hand-typed", starTop10MaxMisses)},
 	}
 	if noneResult != nil {
 		got := 0
