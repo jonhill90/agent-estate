@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -198,6 +200,73 @@ func TestSplitPublishableExcludesPrivateSourcesFromReachableDenominator(t *testi
 	}
 	if none == nil || none.c.ID != "n1" {
 		t.Fatalf("splitPublishable() none = %+v, want the SourceNone case (n1)", none)
+	}
+}
+
+// publishableLineNumbers pulls every integer the "publishable-reachable
+// score" line prints, in order: excludedPrivate, the total it is "of",
+// the none-count, the total it is "of" (second occurrence), the score's
+// hits, and the score's total. Both "of N" totals and the score's own
+// total are captured separately on purpose -- agent-estate#1214's bug was
+// exactly that these three could disagree (two hardcoded to 17, one
+// computed live as 5), and a test that only reads one of them back could
+// not have caught it.
+var publishableLineRe = regexp.MustCompile(`(\d+) of (\d+) cases excluded.*?(\d+) of (\d+) \(none-01\).*?: (\d+)/(\d+)`)
+
+func publishableLineNumbers(t *testing.T, line string) (excluded, total1, none, total2, hits, scoredTotal int) {
+	t.Helper()
+	m := publishableLineRe.FindStringSubmatch(line)
+	if m == nil {
+		t.Fatalf("publishable-reachable line %q does not match the expected shape", line)
+	}
+	nums := make([]int, 6)
+	for i, s := range m[1:] {
+		n, err := strconv.Atoi(s)
+		if err != nil {
+			t.Fatalf("publishable-reachable line %q: could not parse %q as int: %v", line, s, err)
+		}
+		nums[i] = n
+	}
+	return nums[0], nums[1], nums[2], nums[3], nums[4], nums[5]
+}
+
+// TestPublishableReachableLineAccountsForEveryCase is agent-estate#1214's
+// regression test: the line's own excluded/separately-reported/scored
+// figures must sum to the actual number of cases this run measured, an
+// identity check derived from the case set rather than a hardcoded
+// expectation of any particular total (a hardcoded 22 here would go stale
+// exactly the way the hardcoded 17 did -- see agent-estate#1214). The
+// fixture below deliberately does NOT match cases.json's current size, so
+// this test cannot pass by accident from a literal that happens to equal
+// today's case count.
+func TestPublishableReachableLineAccountsForEveryCase(t *testing.T) {
+	results := []result{
+		{c: goldenset.Case{ID: "cd1", ExpectedSource: goldenset.SourceCorpusDirective}, pass: false},
+		{c: goldenset.Case{ID: "cd2", ExpectedSource: goldenset.SourceCorpusDirective}, pass: false},
+		{c: goldenset.Case{ID: "vf1", ExpectedSource: goldenset.SourceVaultFact}, pass: false},
+		{c: goldenset.Case{ID: "vf2", ExpectedSource: goldenset.SourceVaultFact}, pass: false},
+		{c: goldenset.Case{ID: "cp1", ExpectedSource: goldenset.SourceCorpusParameter}, pass: false},
+		{c: goldenset.Case{ID: "lr1", ExpectedSource: goldenset.SourceLoopsResearch}, pass: false},
+		{c: goldenset.Case{ID: "n1", ExpectedSource: goldenset.SourceNone}, pass: true},
+		{c: goldenset.Case{ID: "g1", ExpectedSource: goldenset.SourceGithubStars}, pass: true},
+		{c: goldenset.Case{ID: "g2", ExpectedSource: goldenset.SourceGithubStars}, pass: true},
+		{c: goldenset.Case{ID: "r1", ExpectedSource: goldenset.SourceRepoDocs}, pass: true},
+	}
+	totalCases := len(results)
+	reachableHits, reachableTotal, excludedPrivate, noneResult := splitPublishable(results)
+	noneCount := 0
+	if noneResult != nil {
+		noneCount = 1
+	}
+
+	line := publishableReachableLine(totalCases, excludedPrivate, noneCount, reachableHits, reachableTotal)
+	excluded, total1, none, total2, _, scoredTotal := publishableLineNumbers(t, line)
+
+	if total1 != totalCases || total2 != totalCases {
+		t.Fatalf("publishable-reachable line %q: denominators = %d, %d, want both %d (agent-estate#1214: they must track the actual case count, never a stored literal)", line, total1, total2, totalCases)
+	}
+	if excluded+none+scoredTotal != totalCases {
+		t.Fatalf("publishable-reachable line %q: excluded(%d) + separately-reported(%d) + scored-total(%d) = %d, want %d (every case must be accounted for exactly once)", line, excluded, none, scoredTotal, excluded+none+scoredTotal, totalCases)
 	}
 }
 

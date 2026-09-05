@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -207,4 +208,74 @@ func TestExemptCountLineAlwaysPrintsAndCitesItsIssue(t *testing.T) {
 	if !issueCitation.MatchString(elseLit) {
 		t.Errorf("exempt-count else-branch carries no issue citation: %q", elseLit)
 	}
+}
+
+// TestCorpusGrowthDriftLineIsFedUnscopedTotal is agent-estate#1215's fix-pass
+// regression test. The agent-estate#1112 corpus-growth-drift disclosure line
+// (the first line ratchetDisclosureLines collects) claims the scoped top-10
+// line is "rank-identical to that unscoped line on all N cases" -- the case
+// set that claim covers is the non-exempt cases, i.e. nlTotal (the unscoped
+// stratum's own, exemption-excluded total), never nlScopedTotal (the scoped
+// stratum's total, which excludes nothing). checkExemptions only allows an
+// exemption when a case misses unscoped top-3 and hits scoped top-3, so an
+// UnscopedExempt case is REQUIRED to diverge between the two lines -- feeding
+// nlScopedTotal here would fold those cases into a rank-identity claim the
+// exemption mechanism itself proves false for exactly them (agent-estate#1214
+// review, finding 3).
+//
+// Like the rest of this file, this reads main.go's own source via go/parser
+// rather than running main(): the line is a bare fmt.Fprintf(w, ...) inline
+// in main(), not factored into a callable helper (agent-estate#1208's own
+// constraint on this test file), so the only way to check WHICH variable
+// feeds it without running a live `estate knowledge query` index is to
+// inspect the call's own argument list.
+func TestCorpusGrowthDriftLineIsFedUnscopedTotal(t *testing.T) {
+	stmts := mainFuncBody(t)
+
+	const wantSubstr = "not ratcheted, known corpus-growth drift (agent-estate#1112)"
+	for _, stmt := range stmts {
+		expr, ok := stmt.(*ast.ExprStmt)
+		if !ok {
+			continue
+		}
+		call, ok := expr.X.(*ast.CallExpr)
+		if !ok {
+			continue
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			continue
+		}
+		pkg, ok := sel.X.(*ast.Ident)
+		if !ok || pkg.Name != "fmt" || sel.Sel.Name != "Fprintf" {
+			continue
+		}
+		if len(call.Args) < 2 {
+			continue
+		}
+		lit, ok := call.Args[1].(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			continue
+		}
+		s, err := strconv.Unquote(lit.Value)
+		if err != nil || !strings.Contains(s, wantSubstr) {
+			continue
+		}
+
+		// Found the corpus-growth-drift Fprintf. Its last argument must be
+		// the plain identifier nlTotal, never nlScopedTotal.
+		if len(call.Args) < 3 {
+			t.Fatalf("corpus-growth-drift Fprintf has no format argument: %q", s)
+		}
+		lastArg := call.Args[len(call.Args)-1]
+		ident, ok := lastArg.(*ast.Ident)
+		if !ok {
+			t.Fatalf("corpus-growth-drift Fprintf's last argument is a %T, want a plain *ast.Ident", lastArg)
+		}
+		if ident.Name != "nlTotal" {
+			t.Fatalf("corpus-growth-drift disclosure line is fed %q, want nlTotal -- nlScopedTotal wrongly includes the UnscopedExempt cases checkExemptions requires to diverge from the unscoped line (agent-estate#1215)", ident.Name)
+		}
+		return
+	}
+	t.Fatal("main() no longer contains the agent-estate#1112 corpus-growth-drift disclosure Fprintf -- test could not locate the line it guards")
 }
