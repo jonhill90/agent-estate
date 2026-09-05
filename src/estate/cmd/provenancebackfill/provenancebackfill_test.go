@@ -521,3 +521,67 @@ func TestRefuseLivePathIdentityBypasses(t *testing.T) {
 		}
 	})
 }
+
+// TestRefuseLivePathLiveSideResolutionErrorRefuses locks the fourth instance
+// of the same family PR #1233's second review found at 917823e: the
+// candidate side already refused when ITS OWN resolveForCompare call
+// errored, but the live-reference side did not -- if corpus.Path()'s value
+// could not be resolved (a permission-denied directory somewhere in the
+// live corpus's own parent chain, here), refuseLivePath fell through
+// silently to the weaker fallback checks and could return live=false for a
+// candidate that is, by os.SameFile identity, the exact same file as the
+// live corpus.
+//
+// This locks the reviewer's own repro: a hardlink to the live file, taken
+// BEFORE the live path's parent directory is locked down, then the parent
+// is chmod 0 so resolveForCompare(livePath) itself fails with a permission
+// error (not ENOENT, so it cannot take the "doesn't exist yet" path). The
+// candidate (the hardlink, under a name sharing nothing with the live path)
+// must still refuse -- an unresolvable live reference is not evidence the
+// candidate is safe.
+func TestRefuseLivePathLiveSideResolutionErrorRefuses(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("running as root ignores directory permission bits, so the repro cannot deny Lstat")
+	}
+
+	dir := t.TempDir()
+	restricted := filepath.Join(dir, "real-data")
+	if err := os.MkdirAll(restricted, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	livePath := filepath.Join(restricted, "ledger.sqlite3")
+	if err := os.WriteFile(livePath, []byte("live"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Hardlink created BEFORE the directory is locked down -- this is a
+	// throwaway fixture file, never the real corpus.
+	aliasDir := filepath.Join(dir, "attacker-copy")
+	if err := os.MkdirAll(aliasDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	hardlinkPath := filepath.Join(aliasDir, "sneaky.sqlite3")
+	if err := os.Link(livePath, hardlinkPath); err != nil {
+		t.Skipf("hardlinks unsupported on this filesystem: %v", err)
+	}
+
+	t.Setenv("ESTATE_CORPUS", livePath)
+
+	// Lock down the live path's own parent chain so resolveForCompare
+	// (called on livePath, not on the candidate) fails with a permission
+	// error rather than the "doesn't exist yet" ENOENT case.
+	if err := os.Chmod(restricted, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(restricted, 0o755)
+
+	t.Chdir(dir)
+
+	reason, live := refuseLivePath(hardlinkPath)
+	if !live {
+		t.Errorf("refuseLivePath(%q) = live false (reason=%q), want true: the live corpus path's own resolution failed, which must refuse rather than permit", hardlinkPath, reason)
+	}
+	if reason == "" {
+		t.Error("refuseLivePath returned no reason alongside live=true")
+	}
+}

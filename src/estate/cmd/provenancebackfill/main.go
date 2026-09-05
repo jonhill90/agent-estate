@@ -164,20 +164,36 @@ func refuseLivePath(dbPath string) (string, bool) {
 	}
 
 	if livePath, err := corpus.Path(); err == nil {
-		if live, err := resolveForCompare(livePath); err == nil {
-			if candidate.info != nil && live.info != nil && os.SameFile(candidate.info, live.info) {
-				return fmt.Sprintf("is the same file as the live corpus (%s), by device+inode identity", livePath), true
-			}
-			if candidate.clean == live.clean {
-				return fmt.Sprintf("matches the live corpus path (%s)", livePath), true
-			}
+		live, liveErr := resolveForCompare(livePath)
+		if liveErr != nil {
+			// The candidate side already refuses when ITS OWN resolution
+			// fails; the live reference side must refuse identically when
+			// IT cannot be resolved, rather than silently falling through
+			// to the weaker fallback checks below with nothing to compare
+			// against. An unresolvable live path is not evidence the
+			// candidate is safe -- it is the one case where identity
+			// cannot be established at all, and uncertainty here refuses
+			// exactly as it does for the candidate.
+			return fmt.Sprintf("cannot resolve live corpus path %s: %v -- refusing rather than guessing whether %s names it", livePath, liveErr, dbPath), true
+		}
+		if candidate.info != nil && live.info != nil && os.SameFile(candidate.info, live.info) {
+			return fmt.Sprintf("is the same file as the live corpus (%s), by device+inode identity", livePath), true
+		}
+		if candidate.clean == live.clean {
+			return fmt.Sprintf("matches the live corpus path (%s)", livePath), true
 		}
 	}
 	// Fallback in case corpus.Path() errored (e.g. HOME unset): the
-	// well-known suffix, still resolved and case-folded the same way. The
-	// literal "corpus/ledger.sqlite3" fragment being compared here never
-	// itself exists as a standalone path, so it always resolves cleanly.
-	if fallbackSuffix, err := resolveForCompare(filepath.Join("corpus", "ledger.sqlite3")); err == nil &&
+	// well-known suffix, still resolved and case-folded the same way,
+	// anchored under $HOME explicitly rather than left to resolve relative
+	// to cwd -- corpus.Path() itself resolves against $HOME, and a fallback
+	// standing in for it must anchor the same way or it stops matching any
+	// -db value that isn't already cwd-relative to the same directory.
+	homeSuffix := filepath.Join("corpus", "ledger.sqlite3")
+	if home, homeErr := os.UserHomeDir(); homeErr == nil {
+		homeSuffix = filepath.Join(home, "corpus", "ledger.sqlite3")
+	}
+	if fallbackSuffix, err := resolveForCompare(homeSuffix); err == nil &&
 		fallbackSuffix.clean != "" && strings.HasSuffix(candidate.clean, fallbackSuffix.clean) {
 		return "matches the live corpus path (~/corpus/ledger.sqlite3)", true
 	}
