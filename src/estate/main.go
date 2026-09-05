@@ -225,12 +225,14 @@ func prHeadBranch(pr int) (string, error) {
 // structural, not fixture-dependent). A reader who wants today's number
 // runs `go run ./src/estate/cmd/goldenquery` or reads
 // `docs/knowledge-system.md`'s own scoping section; neither number is
-// restated here to go stale a second time. (Independently re-verified on
-// this same head while writing this comment: public unscoped and public
-// scoped both 13/21 top-3, 17/21 top-10; `--private` scoped 13/21 top-3,
-// 17/21 top-10; `--private` unscoped 10/21 top-3, 14/21 top-10 -- the
-// qualitative claim still holds on the current fixture, which is exactly
-// the number this comment declines to put in the paragraph below.)
+// restated here to go stale a second time. (Independently re-verified
+// against `goldenquery`'s current output while writing this comment:
+// `--private` scoped still beats `--private` unscoped at both top-3 and
+// top-10, and public scoped still ties public unscoped at both ranks --
+// the qualitative claim this paragraph makes still holds against the
+// current fixture. That verification is itself unstamped and will go
+// stale the moment the fixture next changes; it is recorded here only as
+// "checked before merge," not as a number anyone should cite later.)
 func knowledgeGrounding() string {
 	return "\n\n## Knowledge retrieval exists (agent-estate#1049)\n" +
 		"A fresh dispatch worktree starts with no index at all -- `knowledge query` " +
