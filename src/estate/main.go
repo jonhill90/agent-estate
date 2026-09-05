@@ -1255,6 +1255,32 @@ func printBuildCommitMismatch(generatedBy knowledge.GeneratedBy, current string)
 		shortCommit(indexCommit), shortCommit(current))
 }
 
+// foldProvenanceIntoCoverage folds agent-estate#1191's permanent backstop --
+// whether the compiled index's own GeneratedBy could have enforced the
+// shared-write acknowledgement guard (agent-estate#1185, 2a6117f) -- into
+// qr's own Coverage, the same fold-in shape foldGeneratedByIntoCoverage
+// already established for the index-vs-binary comparison just above.
+// Report, never repair: this never blocks or regenerates anything, only
+// discloses. cfg is passed in (rather than re-resolved here) so a caller
+// that could not resolve it at all folds in CoverageUnknownFreshness itself
+// -- see this function's one caller in the "knowledge query" case.
+func foldProvenanceIntoCoverage(cov knowledge.Coverage, cfg knowledge.Config, generatedBy knowledge.GeneratedBy) knowledge.Coverage {
+	switch knowledge.ResolveGuardProvenance(cfg, generatedBy.Commit, knowledge.GuardCommit) {
+	case knowledge.ProvenancePreGuard:
+		return cov.WithFreshnessReason(knowledge.CoveragePreGuardCommit, "",
+			fmt.Sprintf("index built by %s, which predates the shared-write acknowledgement guard (%s, agent-estate#1185) -- this index could have been written by a binary with no way to refuse an unacknowledged shared write; see agent-estate#1191",
+				shortCommit(generatedBy.Commit), shortCommit(knowledge.GuardCommit)))
+	case knowledge.ProvenanceAbsent:
+		return cov.WithFreshnessReason(knowledge.CoverageUnknownFreshness, "",
+			"index carries no generated_by.commit at all (built before that field existed, agent-estate#1082) -- cannot check its provenance against the shared-write acknowledgement guard")
+	case knowledge.ProvenanceUnknown:
+		return cov.WithFreshnessReason(knowledge.CoverageUnknownFreshness, "",
+			"could not be determined whether the index's build commit predates the shared-write acknowledgement guard -- no repository resolved, or git could not answer; never reported as clean when unresolved")
+	default: // knowledge.ProvenanceClean
+		return cov
+	}
+}
+
 // formatAge renders a duration the way a human reading terminal output
 // wants it -- one unit, rounded down, never a Go-native
 // "3h24m10.001s". A negative duration (a source's clock skewed ahead of
@@ -1370,6 +1396,19 @@ func main() {
 			// the same way -- detection, not prevention or refusal (see
 			// foldGeneratedByIntoCoverage's own doc comment).
 			qr.Coverage = foldGeneratedByIntoCoverage(qr.Coverage, qr.IndexGeneratedBy, currentBuildCommit())
+			// agent-estate#1191's permanent backstop: disclose when the
+			// index's own GeneratedBy predates the shared-write ack guard
+			// (2a6117f, agent-estate#1185) -- a binary that could not have
+			// refused the write this issue exists because of. A cfg
+			// resolution failure folds in as CoverageUnknownFreshness
+			// itself, never silently skipped (see foldProvenanceIntoCoverage's
+			// own doc comment).
+			if provCfg, provErr := knowledge.DefaultConfig(); provErr != nil {
+				qr.Coverage = qr.Coverage.WithFreshnessReason(knowledge.CoverageUnknownFreshness, "",
+					"could not resolve a repository to check the index's provenance against the shared-write acknowledgement guard: "+provErr.Error())
+			} else {
+				qr.Coverage = foldProvenanceIntoCoverage(qr.Coverage, provCfg, qr.IndexGeneratedBy)
+			}
 			if asJSON {
 				printKnowledgeQueryJSON(qr)
 			} else {

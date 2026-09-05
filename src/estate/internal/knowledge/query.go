@@ -339,6 +339,17 @@ const (
 	// directly -- a caller with access to its own running checkout folds
 	// it in via WithFreshnessReason, passing this state.
 	CoverageBinaryMismatch CoverageState = "binary_mismatch"
+	// CoveragePreGuardCommit means the compiled index's own GeneratedBy
+	// commit was positively confirmed to predate the shared-write
+	// acknowledgement guard (agent-estate#1185, 2a6117f) -- agent-estate#1191's
+	// permanent backstop. This index could have been written by a binary
+	// with no way to refuse an unacknowledged shared write at all. Like
+	// CoverageBinaryMismatch, this is detection, never prevention or
+	// refusal: report, never regenerate or repair anything on the strength
+	// of it. Not set by this package directly -- a caller with access to
+	// its own repository folds it in via WithFreshnessReason, using
+	// knowledge.ResolveGuardProvenance to determine whether it applies.
+	CoveragePreGuardCommit CoverageState = "pre_guard_commit"
 	// CoverageNotApplicable means there was no compiled index to have a
 	// coverage opinion about at all -- StateIndexMissing or
 	// StateIndexUnreadable, agent-estate#1141. Deliberately distinct from

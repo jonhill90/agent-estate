@@ -321,6 +321,39 @@ index built by a different commit is often fine (a doc-only commit landed
 since), so `binary_mismatch` is something to know, not something a query
 refuses on.
 
+## How do I tell if the shared index was written by a binary that couldn't refuse the write?
+
+Every `estate knowledge query` also compares the index's own
+`generated_by.commit` against the commit that introduced the shared-write
+acknowledgement guard (`2a6117f`, agent-estate#1185, "require explicit ack
+before writing the shared index") using `git merge-base --is-ancestor`
+(`internal/knowledge/provenance.go`'s `ResolveGuardProvenance`,
+agent-estate#1191's permanent backstop). If the index's own commit
+positively predates that guard, `coverage` folds in `pre_guard_commit`,
+naming both commits — this index could have been written by a binary with
+no way to refuse an unacknowledged shared write at all, regardless of
+whether the write it actually performed was into the shared path.
+
+This is a disclosure, never a refusal or a repair: it does not block the
+query, and nothing regenerates or rewrites the index on the strength of it,
+the same posture `tick check`'s reclaimable-ledger line already takes.
+Absence is typed the same way `generated_by.commit == "unknown"` already is
+elsewhere in this doc: a commit that could not be resolved as ancestor or
+non-ancestor of the guard (no repository resolved, git unavailable, either
+commit unresolvable in this checkout's history — e.g. a shallow clone) folds
+in as `coverage.state: unknown` with a detail saying so explicitly, **never**
+as a silent clean read; and an index with no `generated_by.commit` at all
+(built before that field existed, agent-estate#1082) folds in as a
+distinctly-worded `unknown` reason of its own, since that is strictly LESS
+information than a commit that positively fails the check.
+
+**What this does not cover.** The immutable-flag half of #1191's design
+(`chflags uchg` / `chattr +i` on the shared index itself) remains an
+explicit operator decision, not built here — see the issue for why. This
+check is also purely after-the-fact: it does not stop an unauthorized write
+from happening, only surfaces one that already did, on the next `knowledge
+query` against the resulting index.
+
 ## What does `--json` give me that the prose output doesn't?
 
 `--json` on either `query` or `get` emits the full result as JSON on stdout
