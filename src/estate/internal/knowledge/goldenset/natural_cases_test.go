@@ -14,8 +14,8 @@ func TestLoadNaturalParsesEmbeddedCases(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadNatural() error: %v", err)
 	}
-	if len(cases) != 12 {
-		t.Fatalf("len(cases) = %d, want 12 -- #1073's own recorded twelve-case set", len(cases))
+	if len(cases) != 21 {
+		t.Fatalf("len(cases) = %d, want 21 -- #1073's original twelve-case set plus agent-estate#1169's nine per-file cases (nl-13..nl-21)", len(cases))
 	}
 }
 
