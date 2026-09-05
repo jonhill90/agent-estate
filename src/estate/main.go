@@ -194,19 +194,45 @@ func prHeadBranch(pr int) (string, error) {
 // vocabulary; the doc stays the explainer, pointed at rather than
 // duplicated here.
 //
-// The scoped-vs-unscoped benefit named below is `--private`-only, at a
-// stated rank (agent-estate#1168 fix pass): on the checked-in stratum,
-// public mode is IDENTICAL at every rank (4/12 top-3, 8/12 top-10, scoped
-// and unscoped alike) -- scoping there narrows nothing measurable, it only
-// changes whether a wrong guess surfaces as `no_match`/`withheld_private`.
-// Under `--private`, scoped beats unscoped at both ranks measured: 4/12 vs
-// 1/12 at top-3, 8/12 vs 5/12 at top-10 (three independent measurements on
-// this same head: this PR's own reviewer, and agent-estate#1167's author
-// and reviewer). The original text here compared 8/12 (top-10, scoped)
-// against 4/12 (top-3, unscoped) -- a rank-mismatched pair, the same shape
-// of error #1167 removed from docs/knowledge-system.md as agent-estate#1081's
-// unreproducible "scoping doubles retrieval" claim. Do not restate a
-// cross-rank pair as if it were one comparison.
+// The scoped-vs-unscoped benefit named below used to be stated as a
+// stratum hit-rate pair (agent-estate#1168 fix pass: "4/12 vs 1/12 at
+// top-3, 8/12 vs 5/12 at top-10"). agent-estate#1166 found those four
+// numbers stale -- agent-estate#1172 grew the natural-language stratum
+// 12 -> 21 cases after they were written, and two of the four no longer
+// matched `goldenquery`'s own output at all. agent-estate#1173 had already
+// settled the identical question for docs/knowledge-system.md's own
+// scoping section: it removed that doc's stratum table rather than
+// re-measuring and re-stamping it, arguing that re-stamping fixes today's
+// staleness and does nothing about tomorrow's -- nothing tells a doc (or
+// this paragraph) when the fixture it quotes has moved.
+//
+// That argument transfers here, and applies MORE strongly, not equally:
+// docs/knowledge-system.md at least carried a "Measured on <sha>" stamp, so
+// a reader could date it; this paragraph carried no stamping convention at
+// all, so the same staleness was both unbounded and silent, and it reaches
+// every dispatched turn rather than every reader who happens to follow a
+// link. One difference cuts the other way -- the doc could tell a human
+// reader to go run `go run ./src/estate/cmd/goldenquery` and let them judge
+// whether that's worth their time; telling a dispatched lane, mid-task, to
+// go run a benchmark is a cost this paragraph should not impose on every
+// turn. So the fix below is not "point at the same command instead" -- it
+// drops the stratum numbers entirely and keeps only the two claims that do
+// not move when the fixture grows: which sources are reachable in each mode
+// (structural: public mode has exactly two publishable sources and
+// `github-stars` has never outranked `repo-docs` on a repo-oriented
+// question, so `source:repo-docs` scoping there removes nothing that would
+// have won anyway) and which direction a wrong guess costs you (also
+// structural, not fixture-dependent). A reader who wants today's number
+// runs `go run ./src/estate/cmd/goldenquery` or reads
+// `docs/knowledge-system.md`'s own scoping section; neither number is
+// restated here to go stale a second time. (Independently re-verified
+// against `goldenquery`'s current output while writing this comment:
+// `--private` scoped still beats `--private` unscoped at both top-3 and
+// top-10, and public scoped still ties public unscoped at both ranks --
+// the qualitative claim this paragraph makes still holds against the
+// current fixture. That verification is itself unstamped and will go
+// stale the moment the fixture next changes; it is recorded here only as
+// "checked before merge," not as a number anyone should cite later.)
 func knowledgeGrounding() string {
 	return "\n\n## Knowledge retrieval exists (agent-estate#1049)\n" +
 		"A fresh dispatch worktree starts with no index at all -- `knowledge query` " +
@@ -238,11 +264,21 @@ func knowledgeGrounding() string {
 		"off-topic, prefix the query with `source:<name>` -- e.g. `source:repo-docs` " +
 		"for how this repo works, `source:corpus-directive` for what the operator " +
 		"has decided -- to narrow to one source. Under `--private`, do so whenever " +
-		"you already know which source holds the answer: on the checked-in " +
-		"stratum scoped beats unscoped at both ranks measured (4/12 vs 1/12 at " +
-		"top-3, 8/12 vs 5/12 at top-10). In public mode this comparison does not " +
-		"exist -- scoped and unscoped score identically at every rank (4/12 " +
-		"top-3, 8/12 top-10) -- so scoping there buys nothing measurable. A wrong " +
+		"you already know which source holds the answer: `--private` mode has " +
+		"several competing sources, and scoping to the right one measurably " +
+		"improves the hit rate there (agent-estate#1162; run " +
+		"`go run ./src/estate/cmd/goldenquery`, or see `docs/knowledge-system.md`'s " +
+		"own scoping section, for the current number -- neither is restated here " +
+		"on purpose, agent-estate#1166: the checked-in fixture this would-be " +
+		"number is measured against grows over time, and a figure quoted in this " +
+		"paragraph would go stale silently, on every dispatched turn, with no " +
+		"stamp to date it by). In public mode this comparison does not exist: " +
+		"only two of the index's sources are publishable (`repo-docs`, " +
+		"`github-stars`), and `github-stars` has never outranked `repo-docs` on a " +
+		"repo-oriented question, so `source:repo-docs` scoping there can only " +
+		"ever remove a source that was not going to outrank the answer anyway -- " +
+		"structurally inert, not measurably inert, so this claim does not drift " +
+		"with the fixture the way a number would. A wrong " +
 		"guess is a different cost by mode. In public mode it is cheap: a wrong scope surfaces as `no_match` or " +
 		"`withheld_private`, visibly, and is fixed by re-running the same question " +
 		"unscoped. Under `--private` it is not cheap: a wrong scope can instead " +
