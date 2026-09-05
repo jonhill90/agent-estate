@@ -187,17 +187,23 @@ func (claude) Start(ctx context.Context, dir, prompt string) (*Turn, error) {
 	cmd.Stdin = strings.NewReader(prompt)
 	return &Turn{
 		Cmd:       cmd,
-		Result:    claudeResult,
-		Spend:     claudeSpend,
-		SessionID: claudeSessionID,
+		Result:    ClaudeResult,
+		Spend:     ClaudeSpend,
+		SessionID: ClaudeSessionID,
 		Cleanup:   func() {},
 	}, nil
 }
 
-// claudeResult reads claude -p --output-format json's envelope. Exiting 0
+// ClaudeResult reads claude -p --output-format json's envelope. Exiting 0
 // with output we cannot parse is not a clean completion, so it errors rather
 // than returning an empty result that would read as a successful empty turn.
-func claudeResult(stdout []byte) (string, error) {
+//
+// Exported (agent-estate#1222) so internal/worker's persistent stream-json
+// child can reuse this exact parser against one "result"-typed JSONL line
+// at a time, rather than a second parser being written for the same
+// envelope shape. See ClaudeSpend's doc comment for why the envelope is the
+// same regardless of which output format produced the line.
+func ClaudeResult(stdout []byte) (string, error) {
 	var parsed map[string]any
 	if err := json.Unmarshal(stdout, &parsed); err != nil {
 		return "", fmt.Errorf("claude: exit 0 but result was not parseable JSON: %w", err)
@@ -252,7 +258,22 @@ type claudeSpendEnvelope struct {
 	} `json:"modelUsage"`
 }
 
-func claudeSpend(stdout []byte) (Spend, error) {
+//
+// ClaudeSpend and the two functions beside it are exported (agent-estate#1222)
+// for internal/worker, which drives a long-lived
+// `claude --print --verbose --input-format stream-json --output-format
+// stream-json ...` child across many turns rather than one `claude -p
+// --output-format json` process per turn. That child's stdout is JSONL, one
+// event per line, but its final "result"-typed line carries exactly this
+// same envelope shape -- total_cost_usd, usage, modelUsage, session_id,
+// result -- verified directly against a real `claude --input-format
+// stream-json --output-format stream-json` run (see internal/worker's own
+// package doc for the captured line). So a caller that isolates that one
+// line and hands its bytes to ClaudeResult/ClaudeSpend/ClaudeSessionID reuses
+// this exact parser; internal/worker must never parse that envelope a second
+// way, which is the whole reason these three are exported rather than
+// reimplemented.
+func ClaudeSpend(stdout []byte) (Spend, error) {
 	var e claudeSpendEnvelope
 	if err := json.Unmarshal(stdout, &e); err != nil {
 		return Spend{}, fmt.Errorf("claude: spend envelope not parseable JSON: %w", err)
@@ -279,13 +300,13 @@ func claudeSpend(stdout []byte) (Spend, error) {
 	return s, nil
 }
 
-// claudeSessionID reads the same envelope claudeResult and claudeSpend
+// ClaudeSessionID reads the same envelope ClaudeResult and ClaudeSpend
 // already parse for its "session_id" field -- the handle
 // docs/spend-observation.md's captured payload shows sitting right beside
 // "result" and "total_cost_usd" in claude -p --output-format json's single
 // JSON object. Absent or blank is an error, never an empty string, so the
 // caller records this turn's handle as genuinely unreported rather than "".
-func claudeSessionID(stdout []byte) (string, error) {
+func ClaudeSessionID(stdout []byte) (string, error) {
 	var e claudeSpendEnvelope
 	if err := json.Unmarshal(stdout, &e); err != nil {
 		return "", fmt.Errorf("claude: session id envelope not parseable JSON: %w", err)
