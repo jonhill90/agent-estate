@@ -225,10 +225,17 @@ func knowledgeGrounding() string {
 		"still works when the index is missing. If results look noisy or " +
 		"off-topic, prefix the query with `source:<name>` -- e.g. `source:repo-docs` " +
 		"for how this repo works, `source:corpus-directive` for what the operator " +
-		"has decided -- to narrow to one source. A wrong guess is cheap: it returns " +
-		"`no_match`, not a worse ranking, and is recoverable in one step by " +
-		"re-running the same question unscoped (agent-estate#1081; see " +
-		"`docs/knowledge-system.md` for the full scoping rules).\n"
+		"has decided -- to narrow to one source, and do so whenever you already " +
+		"know which source holds the answer: scoped beats unscoped there (8/12 " +
+		"vs 4/12 on the checked-in stratum). A wrong guess is a different cost by " +
+		"mode. In public mode it is cheap: a wrong scope surfaces as `no_match` or " +
+		"`withheld_private`, visibly, and is fixed by re-running the same question " +
+		"unscoped. Under `--private` it is not cheap: a wrong scope can instead " +
+		"return ranked, cited, scored results from the WRONG source that look " +
+		"exactly like a right answer, with nothing in the score to tell them apart " +
+		"(agent-estate#1099, agent-estate#1166) -- so only scope a `--private` " +
+		"query against a source you already know is correct (agent-estate#1081; " +
+		"see `docs/knowledge-system.md` for the full scoping rules).\n"
 }
 
 // roleGrounding is what dispatch appends to the prompt based on role alone
