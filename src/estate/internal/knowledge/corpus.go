@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -130,6 +131,32 @@ func corpusSource(dbPath string) (SourceResult, []Item) {
 		return res, nil
 	}
 
+	// tier3Path is the handle every corpus-derived item's Tier3 cites --
+	// agent-estate#1153: the other three tier3 shapes (vault-fact, repo-docs,
+	// github-stars) each resolve to something a caller can follow (a path, a
+	// path plus a root note, a URL); this one used to give only an item id
+	// and a disclaimer, unfollowable by a caller who does not already know
+	// ~/corpus/ledger.sqlite3. dbPath is used here rather than a fresh call
+	// to internal/corpus.Path(): dbPath is the exact file this function just
+	// stat'd and is about to query below, so citing it can never diverge from
+	// where the item actually came from -- a second, independent resolution
+	// could (a fixture corpus under a test's t.TempDir() does not live at
+	// internal/corpus.Path()'s answer, and a caller with ESTATE_CORPUS set
+	// between two resolutions could see either literally never actually
+	// queried). filepath.Abs resolves dbPath the same way vault-fact's own
+	// absolute vault paths are resolved (usable over portable, matching that
+	// precedent); its own error is the only unresolvable case here -- dbPath
+	// itself is already known non-empty and stat-able by this point, so that
+	// error is not a realistic one, but the failure is still stated as a
+	// typed absence in the pointer text, never silently dropped or defaulted
+	// (agent-estate#1141/#1143: an absent value must say so, not disappear).
+	tier3Path := dbPath
+	if abs, err := filepath.Abs(dbPath); err == nil {
+		tier3Path = abs
+	} else {
+		tier3Path = fmt.Sprintf("%s (path could not be resolved: %v)", dbPath, err)
+	}
+
 	placeholders := make([]string, len(corpusKinds))
 	kindArgs := make([]string, len(corpusKinds))
 	for i, k := range corpusKinds {
@@ -192,7 +219,7 @@ func corpusSource(dbPath string) (SourceResult, []Item) {
 			StructuralTags: structural,
 			Tier1:          truncate(tier1, 200),
 			Tier2:          truncate(body, 400),
-			Tier3:          "the corpus's own item " + id + " (kind=" + kind + ") -- not this file",
+			Tier3:          "the corpus's own item " + id + " (kind=" + kind + ") in " + tier3Path + " -- not this file",
 			Publishable:    publishable,
 			PublishBasis:   basis,
 			PromptID:       promptID,
