@@ -219,7 +219,7 @@ func corpusSource(dbPath string) (SourceResult, []Item) {
 			StructuralTags: structural,
 			Tier1:          truncate(tier1, 200),
 			Tier2:          truncate(body, 400),
-			Tier3:          "the corpus's own item " + id + " (kind=" + kind + ") in " + tier3Path + " -- not this file",
+			Tier3:          corpusTier3(id, kind, weight, status, resolvedTo, body, tier3Path),
 			Publishable:    publishable,
 			PublishBasis:   basis,
 			PromptID:       promptID,
@@ -233,4 +233,37 @@ func corpusSource(dbPath string) (SourceResult, []Item) {
 	res.OK = true
 	res.Count = len(items)
 	return res, items
+}
+
+// corpusTier3 is the third disclosure rung for a corpus-derived item --
+// agent-estate#1139 defect B: the pointer this used to return ("the
+// corpus's own item <id> (kind=<kind>) in <path> -- not this file") named
+// where to look but carried no more material than Tier2's own
+// truncate(body, 400). Tier3 here is the item's UNTRUNCATED body plus its
+// weight/status/resolved_to metadata (none of which Tier1/Tier2 carry in
+// full) -- the deepest material the publish boundary permits: this package
+// never reads prompts.text_raw or prompts.text_clean anywhere (see
+// corpusSource's own doc comment), so body -- the items table's own
+// column, the same field Tier2 already truncates -- is the ceiling here,
+// not a floor being lifted. The traceability the old pointer carried
+// (id, kind, tier3Path) is kept, trailing the body rather than replacing
+// it, so a caller can still resolve back to the corpus row itself.
+func corpusTier3(id, kind, weight, status, resolvedTo, body, tier3Path string) string {
+	var meta []string
+	meta = append(meta, "kind="+kind)
+	if weight != "" {
+		meta = append(meta, "weight="+weight)
+	}
+	if status != "" {
+		meta = append(meta, "status="+status)
+	}
+	if resolvedTo != "" {
+		meta = append(meta, "resolved_to="+resolvedTo)
+	}
+	text := body
+	if text == "" {
+		text = "(no body recorded on this item)"
+	}
+	return fmt.Sprintf("corpus item %s (%s)\n\n%s\n\n(source: %s -- not this file)",
+		id, strings.Join(meta, ", "), text, tier3Path)
 }

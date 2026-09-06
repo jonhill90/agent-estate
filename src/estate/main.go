@@ -1030,6 +1030,20 @@ type indexSourceMtime struct {
 	mtime  time.Time
 	known  bool
 	reason string
+	// checkable is true when this source TYPE has a local path concept to
+	// stat at all -- agent-memory-vault, corpus-db and loops-research are
+	// all directories or files on disk, so known==false for one of them
+	// means a stat was attempted and failed (unconfigured or genuinely
+	// missing), never that no check was possible in principle. github-stars
+	// is the one entry with checkable==false (its zero value): it is read
+	// live via `gh api user/starred`, with no local file ever to stat, so
+	// known==false there is a standing, by-design fact, not a finding about
+	// this particular run. freshnessFindings (agent-estate#1139 defect C)
+	// is the one reader of this field: it is what lets a positively-missing
+	// source (checkable, known==false) report louder than one that can
+	// never be checked at all (!checkable, known==false) -- both used to
+	// fold into the exact same "unknown" bucket.
+	checkable bool
 }
 
 // indexSourceMtimes reads this stat is a read, nothing more, matching
@@ -1043,11 +1057,11 @@ type indexSourceMtime struct {
 func indexSourceMtimes(cfg knowledge.Config) []indexSourceMtime {
 	statNewest := func(name, dir string) indexSourceMtime {
 		if dir == "" {
-			return indexSourceMtime{name: name, reason: "path not configured"}
+			return indexSourceMtime{name: name, reason: "path not configured", checkable: true}
 		}
 		fi, err := os.Stat(dir)
 		if err != nil {
-			return indexSourceMtime{name: name, reason: err.Error()}
+			return indexSourceMtime{name: name, reason: err.Error(), checkable: true}
 		}
 		newest := fi.ModTime()
 		// A directory's own mtime only moves when an entry is added or
@@ -1088,42 +1102,53 @@ func indexSourceMtimes(cfg knowledge.Config) []indexSourceMtime {
 // read -- never a zero time standing in silently for "unknown".
 func statFile(name, path string) indexSourceMtime {
 	if path == "" {
-		return indexSourceMtime{name: name, reason: "path not configured"}
+		return indexSourceMtime{name: name, reason: "path not configured", checkable: true}
 	}
 	fi, err := os.Stat(path)
 	if err != nil {
-		return indexSourceMtime{name: name, reason: err.Error()}
+		return indexSourceMtime{name: name, reason: err.Error(), checkable: true}
 	}
 	return indexSourceMtime{name: name, mtime: fi.ModTime(), known: true}
 }
 
 // freshnessFindings compares generatedAt against every source
 // knowledge.Generate reads (indexSourceMtimes) and splits the result into
-// sources demonstrably newer than the index (stale) and sources whose
-// freshness could not be determined at all (unknown, e.g. github-stars --
-// no local file to stat). This is the single read-only measurement both
-// printIndexFreshness's prose (agent-estate#1036) and
-// foldFreshnessIntoCoverage's structure (agent-estate#1080) are derived
-// from, so the two can never disagree about what was actually observed --
-// one measurement, two renderings, never a second copy of the comparison.
+// three buckets: sources demonstrably newer than the index (stale),
+// sources whose freshness could never be determined AT ALL, by design
+// (unknown -- github-stars is read live via `gh api user/starred`, with no
+// local file ever to stat), and sources that DO have a local path concept
+// but could not be found or read THIS TIME (missing -- agent-estate#1139
+// defect C: a source whose own reading just failed, whether never
+// configured or genuinely vanished since the index was built, is a
+// stronger, louder claim than "there was never anything to check" and must
+// not fold into the same bucket as one). This is the single read-only
+// measurement printIndexFreshness's prose (agent-estate#1036),
+// foldFreshnessIntoCoverage's structure (agent-estate#1080), and the
+// missing-source finding (#1139) are all derived from, so none of the
+// three can ever disagree about what was actually observed -- one
+// measurement, three renderings, never a second copy of the comparison.
 // cfgErr non-nil means the comparison could not run at all (source paths
-// themselves could not be resolved); both callers treat that as its own
+// themselves could not be resolved); every caller treats that as its own
 // finding, not a silent skip.
-func freshnessFindings(generatedAt time.Time) (stale, unknown []indexSourceMtime, cfgErr error) {
+func freshnessFindings(generatedAt time.Time) (stale, unknown, missing []indexSourceMtime, cfgErr error) {
 	cfg, err := knowledge.DefaultConfig()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	for _, s := range indexSourceMtimes(cfg) {
 		if !s.known {
-			unknown = append(unknown, s)
+			if s.checkable {
+				missing = append(missing, s)
+			} else {
+				unknown = append(unknown, s)
+			}
 			continue
 		}
 		if s.mtime.After(generatedAt) {
 			stale = append(stale, s)
 		}
 	}
-	return stale, unknown, nil
+	return stale, unknown, missing, nil
 }
 
 // printIndexFreshness prints the compiled index's own age, then names any
@@ -1139,10 +1164,26 @@ func printIndexFreshness(generatedAt time.Time) {
 	}
 	fmt.Printf("index built %s ago (%s)\n", formatAge(time.Since(generatedAt)), generatedAt.Format(time.RFC3339))
 
-	stale, unknown, err := freshnessFindings(generatedAt)
+	stale, unknown, missing, err := freshnessFindings(generatedAt)
 	if err != nil {
 		fmt.Printf("note: could not resolve source paths to check staleness against: %s\n", err)
 		return
+	}
+
+	if len(missing) > 0 {
+		// agent-estate#1139 defect C: unmissable on purpose -- a "*** ***"
+		// banner, the same visibility class printKnowledgeQuery already
+		// uses for StateMatchedWithheldMajority, never a "note:" line like
+		// the softer unknown-freshness case below. This is what a source
+		// that has POSITIVELY GONE MISSING since the index was built looks
+		// like: distinct wording, distinct visual weight, and (via
+		// foldFreshnessIntoCoverage) a distinct machine-readable
+		// CoverageState from github-stars' standing "unknown" -- the two
+		// used to be indistinguishable except by reading Detail's free text.
+		for _, s := range missing {
+			fmt.Printf("*** SOURCE GONE -- %s could not be read at all (%s), though the compiled index depends on it: any answer drawn from it may be built on material that no longer exists; regenerate with `estate knowledge` once the source is reachable again ***\n",
+				s.name, s.reason)
+		}
 	}
 
 	if len(stale) > 0 {
@@ -1177,10 +1218,19 @@ func foldFreshnessIntoCoverage(cov knowledge.Coverage, generatedAt time.Time) kn
 	if generatedAt.IsZero() {
 		return cov
 	}
-	stale, unknown, err := freshnessFindings(generatedAt)
+	stale, unknown, missing, err := freshnessFindings(generatedAt)
 	if err != nil {
 		return cov.WithFreshnessReason(knowledge.CoverageUnknownFreshness, "",
 			"could not resolve source paths to check staleness against: "+err.Error())
+	}
+	// Folded in before stale/unknown, same "loudest finding first" ordering
+	// printIndexFreshness's own prose above now uses -- agent-estate#1139
+	// defect C: CoverageSourceMissing is its own state (see the const's own
+	// doc comment in query.go), never collapsed into CoverageUnknownFreshness
+	// even though both arrive via WithFreshnessReason.
+	for _, s := range missing {
+		cov = cov.WithFreshnessReason(knowledge.CoverageSourceMissing, s.name,
+			"could not be read at all, though the compiled index depends on it: "+s.reason)
 	}
 	for _, s := range stale {
 		cov = cov.WithFreshnessReason(knowledge.CoverageStale, s.name,

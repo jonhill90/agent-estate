@@ -49,6 +49,26 @@ second step of progressive disclosure: it returns that one item's full
 Tier1/Tier2/Tier3 body. A caller is expected to `query` first, then `get`
 only the ids it actually needs — never the reverse.
 
+**Tier3 is a genuinely deeper rung, not a repeat of Tier2 or a bare pointer
+(agent-estate#1139).** Before this, Tier3 for three of the five sources was
+only a pointer string ("open `<path>` for the full fact/note", "the
+corpus's own item `<id>` … -- not this file") that carried *less* material
+than Tier2 already did — a reader following the ladder from Tier2 to Tier3
+got less, not more. Per source, Tier3 now returns:
+
+| source | Tier2 | Tier3 |
+|---|---|---|
+| `vault-fact` | the fact's full body (agent-estate#1027) | the ENTIRE fact file verbatim, frontmatter fence included — structural fields (`type`/`title`/`description`/`created`) a reader gets nowhere else |
+| `loops-research` | the note's first paragraph, truncated to 400 chars | the ENTIRE note file verbatim |
+| `corpus-*` (parameter/directive/question/correction/thought) | `truncate(body, 400)` | the item's UNTRUNCATED body plus its `weight`/`status`/`resolved_to` metadata — still only the `items` table's own `body` column, never `prompts.text_raw`/`text_clean` (see "What are the two disclosure rules" below) |
+| `github-stars` | the repo's own description | unchanged — the repo's own URL, the same as Tier3 before this change. No deeper LOCAL material exists to surface for a starred repo; this is a documented exception, not an oversight |
+| `repo-docs` | the section's own body, truncated to 800 chars | unchanged by this PR — out of scope; still a repo-relative pointer |
+
+Measured on a freshly built index (this PR's own evidence): Tier3's median
+length across the four sources this PR touched went from *at or below*
+Tier2's own median to materially above it — see the PR body for the exact
+before/after figures per source.
+
 Ranking is Okapi BM25 (k1=1.2, b=0.75) over stemmed, stop-word-filtered
 question terms against an item's Tier1, Tier2, and both tag classes — Tier1
 and tags weighted 3x Tier2 as a BM25 field weight (tier1FieldWeight=3,
@@ -237,7 +257,8 @@ trustworthy right now.
 | `limited` | the query itself withheld eligible material by policy (private items, default mode) | rerun with `--private` if you're entitled to see them |
 | `degraded` | a source the index depends on could not be read when it was built | fix the source, regenerate the index |
 | `stale` | a source has been *observed* to have changed since the index was built | regenerate the index |
-| `unknown` | a source's freshness could not be determined at all — e.g. GitHub stars are read live with no local file to stat against | no fix; a caveat, not an actionable finding |
+| `unknown` | a source's freshness could not be determined **at all, by design** — e.g. GitHub stars are read live with no local file to stat against, standingly | no fix; a caveat, not an actionable finding |
+| `source_missing` | a source the index depends on read successfully at build time but, at QUERY time, could not be found or read at all — e.g. `$AGENT_MEMORY_VAULT` pointing nowhere (agent-estate#1139) | treat any answer drawn from that source as suspect; regenerate once the source is reachable again |
 | `mixed` | more than one of the above applied to the same result | read `coverage.reasons` for each contributing cause |
 | `not_applicable` | there was no compiled index to have a coverage opinion about (`state: index_missing` or `index_unreadable`) | fix `reason` on the result, not `coverage` -- nothing to regenerate here yet |
 
@@ -245,6 +266,25 @@ trustworthy right now.
 withholding private material in default mode is the boundary working as
 intended, not a malfunction; a source failing to read at build time *is* a
 malfunction. Conflating them would train a caller to ignore a real failure.
+
+`unknown` and `source_missing` are likewise deliberately different words,
+not two spellings of the same caveat (agent-estate#1139). `unknown` is a
+**standing** fact about a source that never has a local file to check —
+github-stars, always, regardless of this run. `source_missing` is a
+**positive finding about this run**: a source that WAS read successfully
+when the index was built can no longer be found or read right now, e.g. the
+vault directory `$AGENT_MEMORY_VAULT` points at has vanished since. Before
+this distinction existed, both cases folded into the same `unknown` bucket,
+indistinguishable except by reading `coverage.reasons[].detail`'s free text
+— a caller reading only `coverage.state` could not tell "nothing to check,
+as always" from "something that used to be there is now gone." Prose mode
+prints `source_missing` as a `*** SOURCE GONE ***` banner, at the same
+visual weight as the `*** MOSTLY WITHHELD ***` banner below — never a quiet
+`note:` line like the `unknown` case gets. Neither the exit code table
+below nor `coverage.state: unknown`'s own meaning changed to make room for
+this: `source_missing` is a new, additive arm, not a repurposing of an
+existing one.
+
 `coverage.reasons` always names which source (if any) and why, whenever
 `coverage.state` is not `complete`.
 
