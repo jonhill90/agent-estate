@@ -33,7 +33,7 @@ func fixtureEntry() RegisterEntry {
 
 func TestGenerateSourceView_HasOKFFrontmatterAndGeneratedMarker(t *testing.T) {
 	out := GenerateSourceView(fixtureEntry(), time.Date(2026, 9, 6, 2, 0, 0, 0, time.UTC))
-	if !strings.HasPrefix(out, "---\ntype: Source Record\n") {
+	if !strings.HasPrefix(out, "---\ntype: Source\n") {
 		t.Fatalf("view does not open with OKF 0.2 frontmatter: %q", out[:min(60, len(out))])
 	}
 	if !strings.Contains(out, "generated:\n  by: agent-estate-sourcecatalogue/v1\n") {
@@ -66,7 +66,7 @@ func TestWriteViewsStaging_WritesOneFilePerEntry(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("n = %d, want 1", n)
 	}
-	path := filepath.Join(dir, "01 - Sources", "src-abcdef0123456789.md")
+	path := filepath.Join(dir, "05 - Sources", "SRC-2026-09-06-001.md")
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("expected view file at %s: %v", path, err)
 	}
@@ -74,16 +74,16 @@ func TestWriteViewsStaging_WritesOneFilePerEntry(t *testing.T) {
 
 func TestWriteViewsStaging_RerunIsConsistentAfterPartialState(t *testing.T) {
 	dir := t.TempDir()
-	stagingSources := filepath.Join(dir, "01 - Sources")
+	stagingSources := filepath.Join(dir, "05 - Sources")
 	os.MkdirAll(stagingSources, 0o755)
 	// Simulate a leftover partial write from an interrupted prior run.
-	os.WriteFile(filepath.Join(stagingSources, "src-abcdef0123456789.md.tmp"), []byte("garbage"), 0o644)
+	os.WriteFile(filepath.Join(stagingSources, "SRC-2026-09-06-001.md.tmp"), []byte("garbage"), 0o644)
 
 	entries := []RegisterEntry{fixtureEntry()}
 	if _, err := WriteViewsStaging(entries, dir, time.Now()); err != nil {
 		t.Fatalf("WriteViewsStaging: %v", err)
 	}
-	data, err := os.ReadFile(filepath.Join(stagingSources, "src-abcdef0123456789.md"))
+	data, err := os.ReadFile(filepath.Join(stagingSources, "SRC-2026-09-06-001.md"))
 	if err != nil {
 		t.Fatalf("reading regenerated view: %v", err)
 	}

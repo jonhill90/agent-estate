@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -18,6 +19,8 @@ import (
 // opens it). Both are correct for what each package is; they are not the
 // same constraint.
 type vaultFact struct {
+	ReviewState    string
+	Status         string
 	MemoryStatus   string
 	MemoryRevision string
 	Slug           string
@@ -67,13 +70,29 @@ func vaultSource(vaultDir string) (SourceResult, []Item) {
 		return res, nil
 	}
 
-	var items []Item
+	var paths []string
 	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".md") {
+			paths = append(paths, filepath.Join(factsDir, e.Name()))
+		}
+	}
+	notes, _ := filepath.Glob(filepath.Join(vaultDir, "01 - Notes", "*.md"))
+	for _, p := range notes {
+		if regexp.MustCompile(`^\d{12}\.md$`).MatchString(filepath.Base(p)) {
+			paths = append(paths, p)
+		}
+	}
+	var items []Item
+	for _, path := range paths {
+		e, err := os.Stat(path)
+		if err != nil {
+			continue
+		}
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
 			continue
 		}
 		slug := strings.TrimSuffix(e.Name(), ".md")
-		path := filepath.Join(factsDir, e.Name())
+
 		data, err := os.ReadFile(path)
 		if err != nil {
 			continue // one unreadable fact does not fail the source
@@ -83,7 +102,7 @@ func vaultSource(vaultDir string) (SourceResult, []Item) {
 			continue // frontmatter this package cannot parse -- skipped, not fabricated
 		}
 		f.Slug = slug
-		if f.MemoryStatus != "" && f.MemoryStatus != "promoted" {
+		if f.ReviewState == "needs_review" || (f.Status != "" && f.Status != "stable") || (f.MemoryStatus != "" && f.MemoryStatus != "promoted") {
 			continue
 		}
 		title := f.Title
@@ -183,6 +202,10 @@ func parseVaultFact(data string) (vaultFact, error) {
 		key = strings.TrimSpace(key)
 		val = strings.TrimSpace(strings.Trim(strings.TrimSpace(val), `"`))
 		switch key {
+		case "review_state":
+			f.ReviewState = val
+		case "status":
+			f.Status = val
 		case "memory_status":
 			f.MemoryStatus = val
 		case "memory_revision":
@@ -230,5 +253,5 @@ func currentMemoryItem(it Item) bool {
 		return false
 	}
 	live, err := parseVaultFact(string(raw))
-	return err == nil && (live.MemoryStatus == "" || live.MemoryStatus == "promoted") && live.MemoryRevision == cached.MemoryRevision && it.Tier3 == vaultTier3(it.Permalink, string(raw))
+	return err == nil && live.ReviewState != "needs_review" && (live.Status == "" || live.Status == "stable") && (live.MemoryStatus == "" || live.MemoryStatus == "promoted") && live.MemoryRevision == cached.MemoryRevision && it.Tier3 == vaultTier3(it.Permalink, string(raw))
 }

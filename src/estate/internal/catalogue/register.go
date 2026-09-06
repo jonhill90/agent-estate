@@ -39,6 +39,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
@@ -125,6 +126,7 @@ const (
 // comment for the two fields (ExtractionKind, Status) that are this
 // package's own.
 type RegisterEntry struct {
+	ViewID string `json:"view_id,omitempty"` // Stable INMAPS view identity; ID retains existing catalogue references.
 	// ID realizes contract `id`. Derived from Locator (identityFor) --
 	// stable across repeated registrations of the same source, never
 	// reassigned, never reused after a record is deleted (contract §1's
@@ -258,6 +260,7 @@ func LoadRegister(dir string) (*Register, error) {
 	if err := json.Unmarshal(data, &reg); err != nil {
 		return nil, err
 	}
+	assignViewIDs(reg.Entries)
 	return &reg, nil
 }
 
@@ -270,6 +273,7 @@ func SaveRegister(dir string, reg *Register) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
+	assignViewIDs(reg.Entries)
 	data, err := json.MarshalIndent(reg, "", "  ")
 	if err != nil {
 		return err
@@ -338,6 +342,7 @@ func (in RegisterInput) applyDefaults() RegisterInput {
 // reg itself was loaded from, but every call in this package's own CLI
 // passes the same value for both.
 func (reg *Register) Register(registerDir string, rawIn RegisterInput, now time.Time) (entry RegisterEntry, created bool) {
+	assignViewIDs(reg.Entries)
 	in := rawIn.applyDefaults()
 	id := identityFor(in.Locator)
 	revision, extractionStatus, cachePath := observe(in.ExtractionKind, in.Locator, cacheDir(registerDir, id))
@@ -396,7 +401,8 @@ func (reg *Register) Register(registerDir string, rawIn RegisterInput, now time.
 		LastRefreshedAt:     now,
 	}
 	reg.Entries = append(reg.Entries, e)
-	return e, true
+	assignViewIDs(reg.Entries)
+	return reg.Entries[len(reg.Entries)-1], true
 }
 
 // driftStatus is the one place this package decides whether a
@@ -472,4 +478,29 @@ func (reg *Register) List() []RegisterEntry {
 	out := make([]RegisterEntry, len(reg.Entries))
 	copy(out, reg.Entries)
 	return out
+}
+
+// Preserve hash identities and citations. Allocate dated view addresses once,
+// in register insertion order, and persist them with the operational register.
+func assignViewIDs(entries []RegisterEntry) {
+	used := map[string]bool{}
+	for _, e := range entries {
+		if e.ViewID != "" {
+			used[e.ViewID] = true
+		}
+	}
+	for i := range entries {
+		if entries[i].ViewID != "" {
+			continue
+		}
+		day := entries[i].RegisteredAt.UTC().Format("2006-01-02")
+		for n := 1; ; n++ {
+			id := fmt.Sprintf("SRC-%s-%03d", day, n)
+			if !used[id] {
+				entries[i].ViewID = id
+				used[id] = true
+				break
+			}
+		}
+	}
 }
