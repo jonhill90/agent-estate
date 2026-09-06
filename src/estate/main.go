@@ -1014,6 +1014,65 @@ func decisionOrUndecided(status string) string {
 	return status
 }
 
+// runCandidatesDerive gives Derive the same live-corpus write gate its
+// siblings (candidates decide, cmd/codexingest) already carry
+// (agent-estate#1251) -- bare `estate candidates` used to resolve the
+// default corpus path (the live ~/corpus/ledger.sqlite3) and write to it
+// unconditionally, with no -apply and no RefuseLivePath check anywhere on
+// this path. This reuses internal/livepath.RefuseLivePath rather than
+// writing a second identity check: the SAME "refuse unless
+// -authorized-live-write AND -db explicitly names the live path" logic, the
+// SAME banner before any write, mirroring runCandidatesDecide exactly.
+func runCandidatesDerive(args []string) {
+	fs := flag.NewFlagSet("candidates", flag.ExitOnError)
+	dbPath := fs.String("db", "", "path to a corpus copy or the live corpus (default: the live corpus)")
+	apply := fs.Bool("apply", false, "write the derived candidates; default is a zero-write dry run")
+	authorizedLiveWrite := fs.Bool("authorized-live-write", false,
+		"explicit human authorization to run -apply against the live corpus. Default false, never inferable from "+
+			"any other flag or environment variable. Only takes effect when -db ALSO explicitly names the live "+
+			"path -- it never causes a default or inferred path to be treated as live-authorized.")
+	fs.Parse(args)
+	if fs.NArg() != 0 {
+		fmt.Fprintf(os.Stderr, "estate: unrecognised argument %q for candidates -- valid: -db <path>, -apply, -authorized-live-write, or a list/show/decide/memory subcommand\n", fs.Arg(0))
+		os.Exit(2)
+	}
+	resolvedDB := resolveCandidatesDBPath(*dbPath)
+
+	liveReason, live := livepath.RefuseLivePath(resolvedDB)
+	if live && !*authorizedLiveWrite {
+		mode := "dry-run"
+		if *apply {
+			mode = "-apply"
+		}
+		fmt.Fprintf(os.Stderr, "estate candidates: refusing %s against %s: %s\n", mode, resolvedDB, liveReason)
+		os.Exit(1)
+	}
+	if live && *authorizedLiveWrite && *apply {
+		fmt.Fprintln(os.Stderr, "================================================================================")
+		fmt.Fprintln(os.Stderr, "AUTHORIZED LIVE-CORPUS WRITE -- -authorized-live-write was passed explicitly")
+		fmt.Fprintf(os.Stderr, "  path:   %s\n", resolvedDB)
+		fmt.Fprintf(os.Stderr, "  reason: %s\n", liveReason)
+		fmt.Fprintln(os.Stderr, "================================================================================")
+	}
+
+	res, err := candidates.Derive(resolvedDB, *apply)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "estate:", err)
+		os.Exit(1)
+	}
+	if !res.Applied {
+		tableState := "does not exist yet"
+		if res.TableExists {
+			tableState = "exists"
+		}
+		fmt.Printf("dry run: %d codex_provenance rows; knowledge_candidates %s with %d rows; would insert %d new (pass -apply to write)\n",
+			res.ProvenanceRows, tableState, res.TotalCandidates, res.WouldInsert)
+		return
+	}
+	fmt.Printf("%d codex_provenance rows; %d knowledge_candidates total (%d new this run), all status=candidate kind=unclassified\n",
+		res.ProvenanceRows, res.TotalCandidates, res.Inserted)
+}
+
 func runCandidatesDecide(args []string) {
 	fs := flag.NewFlagSet("candidates decide", flag.ExitOnError)
 	dbPath := fs.String("db", "", "path to a corpus copy or the live corpus (default: the live corpus)")
@@ -1691,34 +1750,7 @@ func main() {
 			return
 		}
 
-		dbPath := ""
-		for i := 2; i < len(os.Args); i++ {
-			switch {
-			case os.Args[i] == "-db" && i+1 < len(os.Args):
-				dbPath = os.Args[i+1]
-				i++
-			case strings.HasPrefix(os.Args[i], "-db="):
-				dbPath = strings.TrimPrefix(os.Args[i], "-db=")
-			default:
-				fmt.Fprintf(os.Stderr, "estate: unrecognised argument %q for candidates -- valid: -db <path>, or a list/show/decide subcommand\n", os.Args[i])
-				os.Exit(2)
-			}
-		}
-		if dbPath == "" {
-			p, err := corpus.Path()
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "estate: resolving default corpus path:", err)
-				os.Exit(2)
-			}
-			dbPath = p
-		}
-		res, err := candidates.Derive(dbPath)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "estate:", err)
-			os.Exit(1)
-		}
-		fmt.Printf("%d codex_provenance rows; %d knowledge_candidates total (%d new this run), all status=candidate kind=unclassified\n",
-			res.ProvenanceRows, res.TotalCandidates, res.Inserted)
+		runCandidatesDerive(os.Args[2:])
 
 	case "knowledge":
 		if len(os.Args) > 2 && os.Args[2] == "query" {

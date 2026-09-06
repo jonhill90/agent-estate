@@ -83,8 +83,11 @@ func TestCandidatesDecideRefusesLiveWriteWithoutAuthorization(t *testing.T) {
 	env := append(os.Environ(), "ESTATE_CORPUS="+livePath)
 
 	// Derive first (against the "live" fixture, standing in for the real
-	// live corpus) so knowledge_candidates and a real id exist.
-	if _, _, exit := runEstateCapture(t, bin, env, "candidates"); exit != 0 {
+	// live corpus) so knowledge_candidates and a real id exist. Bare derive
+	// is itself live-gated now (agent-estate#1251), so this setup call must
+	// carry the same authorization the write it's building fixtures for
+	// would need.
+	if _, _, exit := runEstateCapture(t, bin, env, "candidates", "-apply", "-authorized-live-write"); exit != 0 {
 		t.Fatalf("derive against fixture: exit = %d", exit)
 	}
 	id := candidateIDIn(t, livePath)
@@ -121,7 +124,7 @@ func TestCandidatesDecideAuthorizedLiveWriteSucceeds(t *testing.T) {
 	livePath := candidatesFixtureDB(t, dir)
 	env := append(os.Environ(), "ESTATE_CORPUS="+livePath)
 
-	if _, _, exit := runEstateCapture(t, bin, env, "candidates"); exit != 0 {
+	if _, _, exit := runEstateCapture(t, bin, env, "candidates", "-apply", "-authorized-live-write"); exit != 0 {
 		t.Fatalf("derive against fixture: exit = %d", exit)
 	}
 	id := candidateIDIn(t, livePath)
@@ -165,7 +168,7 @@ func TestCandidatesDecideAuthorizationDoesNotLeakToNonLivePath(t *testing.T) {
 	otherLive := candidatesFixtureDB(t, filepath.Join(dir, "other"))
 	env := append(os.Environ(), "ESTATE_CORPUS="+otherLive)
 
-	if _, _, exit := runEstateCapture(t, bin, env, "candidates", "-db", nonLive); exit != 0 {
+	if _, _, exit := runEstateCapture(t, bin, env, "candidates", "-db", nonLive, "-apply"); exit != 0 {
 		t.Fatalf("derive against non-live fixture: exit = %d", exit)
 	}
 	id := candidateIDIn(t, nonLive)
@@ -192,7 +195,7 @@ func TestCandidatesDecideDryRunIsZeroWriteByDefault(t *testing.T) {
 	dir := t.TempDir()
 	db := candidatesFixtureDB(t, dir)
 
-	if _, _, exit := runEstateCapture(t, bin, os.Environ(), "candidates", "-db", db); exit != 0 {
+	if _, _, exit := runEstateCapture(t, bin, os.Environ(), "candidates", "-db", db, "-apply"); exit != 0 {
 		t.Fatalf("derive: exit != 0")
 	}
 	id := candidateIDIn(t, db)

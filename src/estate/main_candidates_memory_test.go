@@ -21,7 +21,7 @@ func TestCandidatesMemoryCLI(t *testing.T) {
 		}
 		return out
 	}
-	if _, err := candidates.Derive(db); err != nil {
+	if _, err := candidates.Derive(db, true); err != nil {
 		t.Fatal(err)
 	}
 	id := candidateIDIn(t, db)
