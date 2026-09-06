@@ -900,11 +900,10 @@ func minMatchedTerms(source string, queryTermCount int) int {
 // landing in the item's own TITLE (tier1, never tier2 body text) is let
 // through minMatchedTerms' floor even when the term count alone would not
 // clear it -- agent-estate#1134's follow-up narrowing (see its own PR
-// thread, "the cost is not yet shown to be minimal"). Scoped to repo-docs
-// only, not vault-fact or loops-research: only repo-docs carries the
-// tier1/tier2 split (agent-estate#1113's leaf-heading-as-tier1) that makes
-// "this term is the item's own heading" a distinct, checkable signal
-// separate from term count.
+// thread, "the cost is not yet shown to be minimal"). Originally scoped to
+// repo-docs only: only repo-docs carried the tier1/tier2 split (agent-
+// estate#1113's leaf-heading-as-tier1) that makes "this term is the item's
+// own heading" a distinct, checkable signal separate from term count.
 //
 // Measured, not assumed, against a real freshly built index: every one of
 // none-01's residual repo-docs single-term coincidences (8 candidates,
@@ -922,9 +921,90 @@ func minMatchedTerms(source string, queryTermCount int) int {
 // with that change), so nl-04's regression is accepted rather than traded
 // for none-01 reporting matched again. See #1134's PR body for the
 // measured before/after this exemption produces.
+//
+// vault-fact ADDED, agent-estate#1255 (the K3 gate). Every vault fact
+// already has a title-shaped Tier1 ("<title> -- <description>", vault.go),
+// so the same "this term is the item's own heading, not incidental body
+// text" signal repo-docs uses applies to it unchanged -- no new field, no
+// new scoring path. Root cause measured directly against a real index
+// (see #1255's PR body): a published fact's Tier1 shares exactly one term
+// ("estate") with a topically-related but lexically-different question
+// ("where should I take the estate next"); every other query term (next,
+// should, take, prioritise, month, direction, recommendation) appears
+// nowhere in the fact's own text (checked via `knowledge get`), so this is
+// a genuine single-title-term match, not a body coincidence -- and
+// minMatchedTerms' floor of 2 was discarding it before BM25's own idf
+// weighting ever got a chance to rank it. Reusing the existing,
+// already-measured title-exemption mechanism (rather than a new synonym
+// list, an embedding model, or hand-tuning the floor itself) costs
+// nothing new to build and changes no other source's behaviour. Measured
+// cost against cmd/goldenquery's live run (see #1255's PR body for the
+// full before/after): no line regressed; none-01 (the no_match case) was
+// unaffected because it names no term shared with any vault fact's own
+// title. loops-research is deliberately NOT added here -- its own Tier1
+// is a bare filename, not an authored title, so the same "this term is
+// the item's own heading" claim does not hold for it, and adding it was
+// never measured.
 var titleFloorExemptSources = map[string]bool{
-	"repo-docs": true,
+	"repo-docs":  true,
+	"vault-fact": true,
 }
+
+// vaultFactTitleBonus is a FLAT addition to a vault-fact item's own BM25
+// score, applied once matchesTitle is already true (so this never widens
+// which items are candidates -- titleFloorExemptSources/minMatchedTerms
+// already decided that; this only changes where a candidate that cleared
+// them RANKS). agent-estate#1255 (the K3 gate): fixing candidacy alone
+// (titleFloorExemptSources' vault-fact addition) was not enough, because
+// BM25's own k1 saturation caps a single term occurrence's contribution
+// near idf*(k1+1) regardless of field weight -- see bm25.go's own
+// "measured and rejected" comment for the swept alternative (a per-source
+// tier1 field weight) that tried to fix this proportionally and could
+// not, by construction, ever out-score a multi-term coincidence's summed
+// contributions. A flat, non-saturating addition is the only lever left
+// that can. Bonus is added AFTER minMatchedTerms/titleFloorExemptSources
+// have already decided candidacy, so a coincidental single-term title hit
+// none-01-style is not affected by whether the bonus exists -- it was
+// already excluded (or not) before this line runs; the bonus only moves a
+// candidate ALREADY admitted higher in the ranking.
+//
+// SCOPE MATTERS as much as the number: an earlier attempt applied this
+// bonus to every vault-fact item where matchesTitle held, including items
+// that already cleared minMatchedTerms on their own (2+ distinct terms,
+// needing no rescue at all) -- measured against cmd/goldenquery, that
+// version regressed retrieval score (private) from 20/22 to 17/22 (three
+// cases broke: unrelated vault facts sharing one ordinary word with their
+// own titles, e.g. "should"/"next"/"where", all got the same flat bonus
+// and outranked their own correct targets). Moving the addition inside
+// the SAME branch titleFloorExemptSources already gates -- applied only
+// to the item titleFloorExemptSources's exemption itself just rescued,
+// never to an item that would have cleared the floor unaided -- removed
+// that regression entirely while leaving the K3 fix intact; see #1255's
+// PR body for both measurements side by side.
+//
+// 4.0 is the smallest value swept (4/6/8/10/12 against a real freshly
+// built index, with the branch correctly scoped as above) that puts
+// #1255's own published fact inside QueryLimit's top 10 for all three of
+// the gate's lexically-different queries at once -- it was already
+// sufficient for all three at the first value tried; 6/8/10/12 raise its
+// rank further but were not needed to clear the top-10 threshold and so
+// are not the smaller, equally-effective choice. Checked against
+// cmd/goldenquery's full run at 4.0: no line moved -- natural-language
+// top-3/top-10 (unscoped and scoped), retrieval score (private),
+// publishable-reachable, github-stars, and none-01 (the no-match guard,
+// still correctly StateNoMatch/exit 1) are all bit-for-bit identical
+// before and after. See #1255's PR body for the full sweep table and the
+// goldenquery before/after this comment summarises. This is a coarser
+// lever than BM25's own idf/tf weighting --
+// it does not rank one title-matching vault fact against another by
+// relevance, only against everything else -- and it is scoped to
+// vault-fact alone (118 curated, individually-authored items) precisely
+// because that coarseness is a cost worth paying only for this package's
+// smallest, highest-precision, standing-constraint source: a false
+// positive here costs one extra citation shown; a false negative is
+// #1255's own bug, a published constraint that never reaches an agent
+// whose task it governs.
+const vaultFactTitleBonus = 4.0
 
 // matchesTitle reports whether any of matched (terms already scored
 // nonzero against it by BM25Scorer.Score) is present in it's own tier1
@@ -967,9 +1047,9 @@ const rankingBasisText = "score = Okapi BM25 (k1=1.2, b=0.75) over stemmed, " +
 	"those two source families are large and fragmented enough that a " +
 	"single ordinary word reliably coincides with something unrelated -- " +
 	"see minMatchedTerms and sparseMatchSources in query.go; a repo-docs " +
-	"item is let through that floor on a single matched term anyway when " +
-	"the term is the item's own TITLE (tier1), not merely body text -- " +
-	"see titleFloorExemptSources and matchesTitle in query.go; " +
+	"or vault-fact item is let through that floor on a single matched term " +
+	"anyway when the term is the item's own TITLE (tier1), not merely body " +
+	"text -- see titleFloorExemptSources and matchesTitle in query.go; " +
 	"the printed score is BM25's own figure rounded to the nearest integer " +
 	"for display; ties on the unrounded figure broken by item id, oldest " +
 	"first -- each Match's tied_on_score (agent-estate#1046) states how " +
@@ -1114,6 +1194,25 @@ func Query(indexPath, question string, limit int, includePrivate bool) QueryResu
 			// measured before adding this and what it costs.
 			if !(titleFloorExemptSources[it.Source] && matchesTitle(it, matched)) {
 				continue
+			}
+			if it.Source == VaultItemSourceTag {
+				// vaultFactTitleBonus -- see its own doc comment for why a
+				// flat addition, not a field weight, is what this needed.
+				// SCOPED TO EXACTLY THIS BRANCH, not every vault-fact title
+				// match: a vault fact that already clears minMatchedTerms
+				// on its own (2+ distinct terms) needs no rescue and keeps
+				// #1054/#1134's existing, already-measured ranking exactly
+				// as it was -- applying it unconditionally to every
+				// matchesTitle vault-fact was tried and measured to
+				// regress cmd/goldenquery's retrieval score (private) from
+				// 20/22 to 17/22 (three cases broke: other vault facts
+				// sharing an ordinary word in their own titles, e.g.
+				// "should"/"next"/"where", all got the same flat bonus and
+				// outranked their own correct targets). Confined to the
+				// single-term-rescue population only, that regression
+				// disappears entirely -- see #1255's PR body for both
+				// measurements.
+				score += vaultFactTitleBonus
 			}
 		}
 		if !includePrivate && !it.Publishable {
