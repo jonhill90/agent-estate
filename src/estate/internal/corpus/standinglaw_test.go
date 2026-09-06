@@ -237,3 +237,41 @@ func TestGroundingOmitsStandingLawSectionWhenNoneDeclared(t *testing.T) {
 		t.Fatalf("standing-law section rendered with nothing declared:\n%s", g)
 	}
 }
+
+// TestGroundingIncludesAttributionInstructionWhenStandingLawPresent is
+// agent-estate#1255's re-measurement requirement: attribution must be part
+// of the standing-law contract, not a hoped-for behaviour, so the rendered
+// preamble must actually carry the instruction whenever a member is
+// injected, and must not carry it when the set is empty.
+func TestGroundingIncludesAttributionInstructionWhenStandingLawPresent(t *testing.T) {
+	standing := []StandingLawEntry{
+		{Slug: "member-fact", Reason: "fixture reason", Body: "member body text"},
+	}
+	g := Grounding("some task", nil, nil, standing)
+	if !strings.Contains(g, StandingLawAttributionInstruction) {
+		t.Fatalf("Grounding() with a standing-law member did not render the attribution instruction:\n%s", g)
+	}
+
+	empty := Grounding("some task", nil, nil, nil)
+	if strings.Contains(empty, StandingLawAttributionInstruction) {
+		t.Fatalf("Grounding() with no standing-law members rendered the attribution instruction anyway:\n%s", empty)
+	}
+}
+
+// TestStandingLawByteCapCountsAttributionInstruction proves the fixed
+// attribution instruction counts against MaxStandingLawBytes like a
+// member's own body -- it is not free just because it is not a vault fact.
+func TestStandingLawByteCapCountsAttributionInstruction(t *testing.T) {
+	vault := t.TempDir()
+	// Body sized to fit alone under the cap, but not alongside the fixed
+	// attribution instruction.
+	body := strings.Repeat("x", MaxStandingLawBytes-len(StandingLawAttributionInstruction)+1)
+	h := writeFixtureFact(t, vault, "snug-fact", body)
+	withStandingLawSet(t, []StandingLawMember{
+		{Slug: "snug-fact", HashPrefix: h[:12], Reason: "fixture reason"},
+	})
+
+	if _, err := StandingLaw(vault); err == nil {
+		t.Fatal("StandingLaw() accepted a member whose body fits alone but overflows once the attribution instruction is counted")
+	}
+}
