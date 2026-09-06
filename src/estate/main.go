@@ -25,6 +25,7 @@ import (
 
 	"github.com/jonhill90/agent-estate/estate/internal/corpus"
 	"github.com/jonhill90/agent-estate/estate/internal/dispatchid"
+	"github.com/jonhill90/agent-estate/estate/internal/features"
 	"github.com/jonhill90/agent-estate/estate/internal/gate"
 	"github.com/jonhill90/agent-estate/estate/internal/harness"
 	"github.com/jonhill90/agent-estate/estate/internal/isolate"
@@ -534,6 +535,13 @@ func fixPassGrounding(pr int, branch string) string {
 func usage() {
 	fmt.Fprint(os.Stderr, `estate -- the supervisor
 
+  estate features                       the feature-completion ledger -- a
+                                        checked-in, hand-maintained table of
+                                        operator-visible capabilities, each
+                                        with a status (delivered/in-progress/
+                                        not-started) and, for delivered rows,
+                                        evidence naming a PR. Never inferred
+                                        from activity; see internal/features
   estate pressure                       report whether the host can take work
   estate dispatch [--harness=NAME] <issue> <brief-file>
                                         run one agent turn (role=author), gated and recorded.
@@ -1304,6 +1312,12 @@ func main() {
 	}
 
 	switch os.Args[1] {
+	case "features":
+		// The feature-completion ledger: a checked-in, hand-maintained
+		// record of what has actually shipped, never inferred from
+		// activity. See internal/features's package comment.
+		fmt.Print(features.Render(features.Registry))
+
 	case "pressure":
 		v := pressure.Check(l, pressure.Default())
 		// Swapouts and worktrees print on the PASSING path too. Reasons only
