@@ -20,12 +20,24 @@
 // ~/.claude/projects/*/*.jsonl. Neither existing on this machine is not this
 // package's problem to paper over -- a missing root is recorded as
 // HealthMissing with the exact path looked for, never silently omitted.
+//
+// A fourth-and-fifth pair of records cover a task handed to a prior turn:
+// add catalogue records for "both seed PDFs". That prior turn could not
+// resolve which two PDFs were meant -- see PDFSearchLocations below for
+// every place this package's own re-run of that search looked, all of it
+// empty. Per agent-estate#1139's own instruction ("if you cannot identify
+// the two PDFs, record them as Missing with the paths you searched and a
+// detail saying the referent is unresolved"), BuildUnresolvedPDFSource
+// records exactly that: an honest HealthMissing row, never an invented
+// filename and never a substituted, unrelated PDF standing in for the real
+// one.
 package catalogue
 
 import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jonhill90/agent-estate/estate/internal/rollout"
@@ -142,14 +154,83 @@ func DefaultClaudeRoot() string {
 	return filepath.Join(home, ".claude", "projects")
 }
 
-// Build returns the catalogue seeded with the estate's two real sources,
-// each read once, read-only, right now.
+// Build returns the catalogue seeded with the estate's two real
+// conversation-transcript sources plus the two seed-PDF records
+// agent-estate#1139 asked for, each read once, read-only, right now.
 func Build() Catalogue {
 	return Catalogue{
 		Sources: []Source{
 			BuildCodexSource(DefaultCodexRoot()),
 			BuildClaudeSource(DefaultClaudeRoot()),
+			BuildUnresolvedPDFSource("seed-pdf-a"),
+			BuildUnresolvedPDFSource("seed-pdf-b"),
 		},
+	}
+}
+
+// PDFSearchLocations is every place this package's own search for "both seed
+// PDFs" (agent-estate#1139) looked before concluding the referent is
+// unresolved. Kept as an exported var, not restated prose, so a later
+// re-search starts from the same list rather than a paraphrase of it, and so
+// BuildUnresolvedPDFSource's Detail and any test asserting on it read from
+// one source of truth.
+//
+// Every location below was re-checked directly by this package's own author
+// (not merely inherited from a prior turn's report): git history search
+// across every commit reachable from any ref in this repository, this
+// repository's docs/ and AGENTS.md, GitHub issue search, a corpus query
+// (bounded by the corpus's 2026-09-02T19:09:37Z ingestion watermark -- an
+// empty result there is not conclusive for anything said after that
+// instant), ~/source/repos/Personal/Loops-Research's full git history (PDFs
+// appear there only as external arxiv/openai.com URLs cited in prose, never
+// as a local file), and a filesystem sweep for *.pdf under
+// ~/source (excluding ~/Documents, ~/Downloads and ~/Desktop, which are the
+// operator's personal documents and out of bounds for this task). That sweep
+// found PDFs, but none referenced anywhere as a "seed PDF" for this project:
+// personal career CVs (out of bounds on content, not merely unrelated),
+// two malformed-fixture PDFs belonging to an unrelated powerpoint skill's
+// test suite, and two more (a theme showcase, a browser preview) belonging
+// to unrelated repos. None was substituted in as a guess.
+var PDFSearchLocations = []string{
+	"git log --all -p | grep -i '.pdf' (this repository, every commit reachable from any ref)",
+	"git rev-list --all | xargs git grep -i '.pdf' (this repository, same scope, tree contents rather than diffs)",
+	"docs/ and AGENTS.md in this repository (grep -rniE '\\.pdf|seed pdf|pdfs')",
+	"gh issue list --search pdf (this repository's GitHub issues)",
+	"~/corpus/ledger.sqlite3: items where body like '%pdf%' (0 rows; ingestion watermark 2026-09-02T19:09:37Z bounds this, does not settle it)",
+	"~/source/repos/Personal/Loops-Research (full git history; .md only, PDFs referenced only as external URLs, never a local file)",
+	"~/source/**/*.pdf, excluding ~/Documents, ~/Downloads and ~/Desktop (filesystem sweep; found PDFs, none referenced as a seed PDF for this project)",
+}
+
+// BuildUnresolvedPDFSource returns a Source record for a seed PDF this
+// package could not identify. name distinguishes the two records
+// (agent-estate#1139 asked for "both seed PDFs") without claiming to know
+// which document either one actually is.
+//
+// Health is always HealthMissing and ObservedAt is always the zero value --
+// consistent with BuildCodexSource/BuildClaudeSource's own convention that a
+// source never successfully read carries no observed instant. UnitCount is
+// not meaningful here for the same reason a Missing root's UnitCount never
+// is: there is nothing to have counted.
+func BuildUnresolvedPDFSource(name string) Source {
+	return Source{
+		Name:    name,
+		Harness: "pdf",
+		// No root path: there is no candidate filename or directory to
+		// point one at. The exact locations searched are in Detail, per
+		// agent-estate#1139's own instruction for this case.
+		RootPath: "",
+		IdentityFields: []string{
+			"filename (unresolved -- referent not found)",
+			"page or section number within the document (unresolved)",
+		},
+		Health:    HealthMissing,
+		UnitCount: 0,
+		Detail: "referent unresolved: no PDF matching \"" + name + "\" (one of \"both seed PDFs\", " +
+			"agent-estate#1139) could be identified anywhere searched. Searched: " +
+			strings.Join(PDFSearchLocations, "; ") + ". Not recorded as any of the unrelated PDFs " +
+			"this search did turn up (personal career documents, out-of-scope test fixtures, unrelated " +
+			"repos' assets) -- an unresolved source and an absent one must not look the same, and a " +
+			"substituted filename would be indistinguishable from the real one to any later reader.",
 	}
 }
 

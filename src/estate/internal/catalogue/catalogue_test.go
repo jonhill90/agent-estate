@@ -3,6 +3,7 @@ package catalogue
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -170,18 +171,50 @@ func TestBuildClaudeSource_Empty(t *testing.T) {
 }
 
 // TestBuild_ReturnsBothSources is the seeding contract: exactly the two real
-// sources, never invented ones, regardless of what this machine happens to
-// have on disk.
+// transcript sources plus the two seed-PDF records, never invented ones,
+// regardless of what this machine happens to have on disk.
 func TestBuild_ReturnsBothSources(t *testing.T) {
 	cat := Build()
-	if len(cat.Sources) != 2 {
-		t.Fatalf("len(Sources) = %d, want 2", len(cat.Sources))
+	if len(cat.Sources) != 4 {
+		t.Fatalf("len(Sources) = %d, want 4", len(cat.Sources))
 	}
 	names := map[string]bool{}
 	for _, s := range cat.Sources {
 		names[s.Name] = true
 	}
-	if !names["codex-rollouts"] || !names["claude-transcripts"] {
-		t.Fatalf("Sources = %v, want codex-rollouts and claude-transcripts", cat.Sources)
+	if !names["codex-rollouts"] || !names["claude-transcripts"] || !names["seed-pdf-a"] || !names["seed-pdf-b"] {
+		t.Fatalf("Sources = %v, want codex-rollouts, claude-transcripts, seed-pdf-a and seed-pdf-b", cat.Sources)
+	}
+}
+
+// TestBuildUnresolvedPDFSource_MissingWithSearchEvidence is the contract for
+// the seed-PDF case specifically: HealthMissing, zero ObservedAt (nothing
+// was successfully read), no RootPath guessed, and a Detail that both names
+// the requesting issue and cites where this package looked -- never a
+// filename invented to fill the gap.
+func TestBuildUnresolvedPDFSource_MissingWithSearchEvidence(t *testing.T) {
+	src := BuildUnresolvedPDFSource("seed-pdf-a")
+	if src.Health != HealthMissing {
+		t.Fatalf("Health = %v, want HealthMissing", src.Health)
+	}
+	if src.Harness != "pdf" {
+		t.Fatalf("Harness = %q, want \"pdf\"", src.Harness)
+	}
+	if src.RootPath != "" {
+		t.Fatalf("RootPath = %q, want empty -- no candidate path was ever identified", src.RootPath)
+	}
+	if !src.ObservedAt.IsZero() {
+		t.Fatalf("ObservedAt = %v, want zero value for an unresolved source", src.ObservedAt)
+	}
+	if src.UnitCount != 0 {
+		t.Fatalf("UnitCount = %d, want 0", src.UnitCount)
+	}
+	if !strings.Contains(src.Detail, "referent unresolved") {
+		t.Fatalf("Detail = %q, want it to say the referent is unresolved", src.Detail)
+	}
+	for _, loc := range PDFSearchLocations {
+		if !strings.Contains(src.Detail, loc) {
+			t.Fatalf("Detail does not contain searched location %q", loc)
+		}
 	}
 }
