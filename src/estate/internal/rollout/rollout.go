@@ -27,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 )
 
 // RawRecord is the top-level shape shared by every rollout JSONL line:
@@ -126,6 +127,56 @@ type Turn struct {
 	// is a coarser approximation a caller should treat as "roughly when this
 	// history was captured", not "when the operator actually typed it".
 	CapturedAt string `json:"captured_at,omitempty"`
+
+	// PriorAssistantText is the text of the assistant turn immediately
+	// preceding this one, in the SAME chronological stream this Turn was
+	// found in -- "" is a real, typed value meaning no assistant turn
+	// precedes it (this turn opens the session, or opens the recovered
+	// history), never a parse failure (agent-estate#1139's own contract:
+	// internal/provenance.UnitProvenance.PriorAssistantContext is metadata,
+	// never operator text, and absence here must stay absence rather than
+	// being coerced to a placeholder).
+	//
+	// For a response_item turn, "the same stream" is this file's own top to
+	// bottom record order: PriorAssistantText is the most recently seen
+	// role=="assistant" message response_item ANYWHERE earlier in the file,
+	// skipping role-less payloads (reasoning/function_call/
+	// function_call_output -- see GenuineOperatorTurn's own doc comment for
+	// why those carry no role at all) and role=="developer" turns, neither
+	// of which is an assistant turn.
+	//
+	// For a CompactedOnlyInCompacted turn, "the same stream" is instead that
+	// turn's OWN compacted record's replacement_history array, walked in
+	// its own order -- not the outer file's record order, which the
+	// compacted record's position in the file does not reflect (a
+	// compaction event can be recorded long after the history it
+	// summarizes). An assistant entry in replacement_history is tracked
+	// exactly as it appears there, independent of whether that same
+	// assistant text also appears as an ordinary response_item elsewhere in
+	// the file.
+	PriorAssistantText string `json:"prior_assistant_text,omitempty"`
+}
+
+// assistantMessageText reports the joined text of an assistant message
+// payload, and whether it had any output_text content to join at all. A
+// role=="assistant" message with no output_text parts (content entirely of
+// some other type) reports ok=false -- callers must leave the running
+// "last assistant text" state unchanged in that case, not overwrite it with
+// an empty string that would then read as "no prior assistant turn".
+func assistantMessageText(p ResponseItemPayload) (string, bool) {
+	if p.Type != "message" || p.Role != "assistant" {
+		return "", false
+	}
+	var parts []string
+	for _, c := range p.Content {
+		if c.Type == "output_text" {
+			parts = append(parts, c.Text)
+		}
+	}
+	if len(parts) == 0 {
+		return "", false
+	}
+	return strings.Join(parts, "\n\n"), true
 }
 
 // FileAnalysis is one rollout file's full parse: every aggregate
@@ -189,6 +240,16 @@ func AnalyzeFile(path string) (FileAnalysis, error) {
 	currentSession := -1           // index into fa.Sessions the NEXT turn attributes to, or -1
 	currentSessionID := ""
 
+	// lastAssistantText is the most recently seen assistant message's text,
+	// in this FILE's own top-to-bottom record order -- what a response_item
+	// operator turn's own Turn.PriorAssistantText is set from at the moment
+	// that turn is appended. "" means no qualifying assistant message has
+	// been seen yet in this file (this turn opens the session, or every
+	// assistant turn so far had no output_text content -- see
+	// assistantMessageText's own doc comment for why that case leaves this
+	// unchanged rather than resetting it to "").
+	lastAssistantText := ""
+
 	// compactedTexts is every distinct compacted-turn text already counted in
 	// THIS file, so a session compacted more than once (which re-embeds its
 	// full prior history each time) does not inflate CompactedUserTurnsDistinct.
@@ -222,8 +283,12 @@ func AnalyzeFile(path string) (FileAnalysis, error) {
 			}
 			if p.Type != "message" || p.Role == "" {
 				// reasoning / function_call / function_call_output payloads
-				// carry no role at all -- not a role to tally, and never
-				// counted as an operator turn.
+				// carry no role at all -- not a role to tally, never
+				// counted as an operator turn, and never treated as an
+				// assistant turn either: lastAssistantText is left exactly
+				// as it was, so a reasoning step interleaved between an
+				// assistant reply and the operator's next turn does not
+				// erase that reply.
 				continue
 			}
 			fa.RoleCounts[p.Role]++
@@ -240,12 +305,16 @@ func AnalyzeFile(path string) (FileAnalysis, error) {
 					fa.Sessions[currentSession].OperatorTurns++
 				}
 				fa.Turns = append(fa.Turns, Turn{
-					LineNo:     lineNo,
-					SessionID:  currentSessionID,
-					Source:     "response_item",
-					Text:       p.Content[0].Text,
-					CapturedAt: rec.Timestamp,
+					LineNo:             lineNo,
+					SessionID:          currentSessionID,
+					Source:             "response_item",
+					Text:               p.Content[0].Text,
+					CapturedAt:         rec.Timestamp,
+					PriorAssistantText: lastAssistantText,
 				})
+			}
+			if text, ok := assistantMessageText(p); ok {
+				lastAssistantText = text
 			}
 		case "session_meta":
 			var p SessionMetaPayload
@@ -269,7 +338,21 @@ func AnalyzeFile(path string) (FileAnalysis, error) {
 				return FileAnalysis{}, fmt.Errorf("line %d: compacted payload: %w", lineNo, err)
 			}
 			fa.CompactedRecords++
+			// localLastAssistant tracks the most recently seen assistant
+			// message WITHIN THIS COMPACTED RECORD's own replacement_history
+			// array, walked in its own order -- deliberately independent of
+			// lastAssistantText above. replacement_history is a recovered
+			// slice of EARLIER conversation history; its own internal order
+			// is what reflects "what preceded this turn when it actually
+			// happened", not this record's position in the outer file (a
+			// compaction event can be logged long after the history it
+			// summarizes -- see Turn.PriorAssistantText's own doc comment).
+			localLastAssistant := ""
 			for _, item := range p.ReplacementHistory {
+				if text, ok := assistantMessageText(item); ok {
+					localLastAssistant = text
+					continue
+				}
 				if item.Type != "message" || item.Role != "user" {
 					continue
 				}
@@ -288,11 +371,12 @@ func AnalyzeFile(path string) (FileAnalysis, error) {
 				} else {
 					fa.CompactedOnlyInCompacted++
 					compactedOnly = append(compactedOnly, Turn{
-						LineNo:     lineNo,
-						SessionID:  currentSessionID,
-						Source:     "compacted",
-						Text:       text,
-						CapturedAt: rec.Timestamp,
+						LineNo:             lineNo,
+						SessionID:          currentSessionID,
+						Source:             "compacted",
+						Text:               text,
+						CapturedAt:         rec.Timestamp,
+						PriorAssistantText: localLastAssistant,
 					})
 				}
 			}
