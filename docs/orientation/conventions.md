@@ -14,27 +14,18 @@
   infer the role later from what a lane or a PR comment claims about itself.
 - **A reviewer's verdict must exist in TWO places, not one: the PR comment
   AND the reviewing turn's own final returned text — identical `Verdict:`
-  lines in both.** The second place is not documentation convenience; the
-  turn's own returned text is what the dispatch process writes as that
-  lane's ledger `Result`, and `internal/gate` cross-checks the PR comment
-  against it as a second, independent source before allowing a merge
-  (`resolveResultVerdict` in `gate.go`/`verdict.go`). A comment carrying no
-  matching `Verdict:` line in its own `Result` refuses with "reviewer
-  \<lane\>'s ledger record carries no parsable Verdict: line in its own
-  Result" — this is not a hypothetical: it cost a full extra review turn on
-  PR #1219 (agent-estate#1220) when a reviewer posted a correct verdict
-  comment and then only *summarised* its findings in its returned text. **Do
-  not treat this as redundant with the PR comment and drop it** —
-  `gate_test.go`'s `TestBypass_ForgedVerdictCommentImpersonatesReviewer`
-  (agent-estate#934) is the reason it exists: every lane in this repo pushes
-  through the same shared GitHub login, so a PR comment alone is not proof
-  of who wrote it, and a forged `Review-Lane:`/`Verdict: APPROVE` comment
-  can otherwise override a lane's real `REQUEST CHANGES` — the ledger
-  `Result`, written locally by the dispatch process from the reviewer
-  subprocess's own output, is the one thing that comment forgery cannot also
-  forge. For a review turn, this means: after posting the PR comment, make
-  the verdict block (`Verdict:`/`Review-Lane:`/`Reviewed-SHA:`) the last
-  thing your own turn returns too, not a prose summary of what you found.
+  lines in both.** The turn's own returned text is what the dispatch process
+  writes as that lane's ledger `Result`, and `internal/gate` cross-checks the
+  PR comment against it as a second, independent source before allowing a
+  merge (`resolveResultVerdict` in `gate.go`/`verdict.go`) — this is not
+  redundant with the PR comment and must not be dropped as such. For a review
+  turn: after posting the PR comment, make the verdict block
+  (`Verdict:`/`Review-Lane:`/`Reviewed-SHA:`) the last thing your own turn
+  returns too, not a prose summary of what you found. For the incident that
+  motivated this (PR #1219/agent-estate#1220), the forgery this closes
+  (`gate_test.go`'s `TestBypass_ForgedVerdictCommentImpersonatesReviewer`,
+  agent-estate#934), and the cost/benefit case for review generally, see
+  [`docs/reviewer-value.md`](../reviewer-value.md).
 - This is checked at merge, not just at dispatch — but read the command's name
   as a question, not an action. **`estate merge <repo> <pr> <reviewer-lane>`
   evaluates and exits; it does not merge anything.** It decides whether the PR
