@@ -37,7 +37,7 @@ func TestGroundingStatesFullCountAndDemandsIndependentCheck(t *testing.T) {
 		{Key: "tooling=cli_first", Body: "Prefer CLI-backed workflows."},
 		{Key: "lang=go", Body: "The app is written in Go, never shell or python."},
 	}
-	g := Grounding("rewrite the shell dispatcher", ps, nil)
+	g := Grounding("rewrite the shell dispatcher", ps, nil, nil)
 	if !strings.Contains(g, "2 binding parameters") {
 		t.Fatalf("grounding does not state the true total:\n%s", g)
 	}
@@ -53,7 +53,7 @@ func TestGroundingStatesFullCountAndDemandsIndependentCheck(t *testing.T) {
 }
 
 func TestGroundingStillDemandsCheckWhenNothingMatches(t *testing.T) {
-	g := Grounding("zzzz", []Param{{Key: "k", Body: "b"}}, nil)
+	g := Grounding("zzzz", []Param{{Key: "k", Body: "b"}}, nil, nil)
 	if !strings.Contains(g, "Query the\ncorpus yourself") {
 		t.Fatal("grounding dropped the independent-check requirement when no parameter matched")
 	}
@@ -174,7 +174,7 @@ func TestHardExcludesDroppedAndNeedsReviewButReportsThem(t *testing.T) {
 		t.Fatalf("Hard() excluded-report says %d needs_review rows, want 1: %+v", counts["needs_review"], excluded)
 	}
 
-	g := Grounding("some task", ps, excluded)
+	g := Grounding("some task", ps, excluded, nil)
 	if !strings.Contains(g, "dropped: 1") || !strings.Contains(g, "needs_review: 1") {
 		t.Fatalf("Grounding() does not surface the exclusion counts to the agent:\n%s", g)
 	}
@@ -220,7 +220,7 @@ func TestHardCountMatchesLiveCorpusAcrossAllThreeKinds(t *testing.T) {
 // must stay under maxPreambleBytes.
 func TestGroundingRenderedPreambleStaysUnderByteCeiling(t *testing.T) {
 	ps := manyMatchingParams(2500, 2000)
-	g := Grounding("widen dispatch grounding to include directives and corrections", ps, nil)
+	g := Grounding("widen dispatch grounding to include directives and corrections", ps, nil, nil)
 	if len(g) > maxPreambleBytes {
 		t.Fatalf("rendered preamble is %d bytes, want <= %d (maxPreambleBytes)", len(g), maxPreambleBytes)
 	}
@@ -240,13 +240,13 @@ func TestGroundingCapIsLoadBearing(t *testing.T) {
 	ps := manyMatchingParams(2500, 2000)
 	task := "widen dispatch grounding to include directives and corrections"
 
-	enabled := len(Grounding(task, ps, nil))
+	enabled := len(Grounding(task, ps, nil, nil))
 
 	origBytes, origItem, origMatches := maxPreambleBytes, maxItemBytes, maxMatches
 	maxPreambleBytes = 100 * 1024 * 1024
 	maxItemBytes = 100 * 1024
 	maxMatches = len(ps)
-	disabled := len(Grounding(task, ps, nil))
+	disabled := len(Grounding(task, ps, nil, nil))
 	maxPreambleBytes, maxItemBytes, maxMatches = origBytes, origItem, origMatches
 
 	if enabled > origBytes {

@@ -61,7 +61,7 @@ INSERT INTO items (id, prompt_id, kind, body, weight, status, resolved_to) VALUE
 		}
 	}
 
-	g := Grounding("genuine directive poisoned MUST DO X", ps, excluded)
+	g := Grounding("genuine directive poisoned MUST DO X", ps, excluded, nil)
 	if strings.Contains(g, "poisoned") {
 		t.Fatalf("Grounding() rendered the derived context into the dispatch preamble:\n%s", g)
 	}
