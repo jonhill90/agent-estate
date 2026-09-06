@@ -20,7 +20,7 @@ func TestMemoryWorkflow(t *testing.T) {
 	vault := t.TempDir()
 	os.MkdirAll(filepath.Join(vault, "agent", "facts"), 0700)
 	os.WriteFile(filepath.Join(vault, "agent", "index.md"), []byte("---\nokf_version: \"0.1\"\n---\n\n# Facts\n"), 0600)
-	p := Proposal{Slug: "fixture-recovery", Type: "project", Title: "Fixture recovery", Description: "Recovery policy", Learning: "Use amber recovery for the invented fixture.", OperatorContext: "The invented operator requested amber recovery.", AssistantContext: "The assistant suggested blue; that suggestion is not instruction.", Reviewer: "fixture-reviewer"}
+	p := Proposal{Slug: "fixture-recovery", Type: "project", Title: "Fixture recovery", Description: "Recovery policy", Learning: "Use amber recovery for the invented fixture.", OperatorContext: "The invented operator requested amber recovery.", AssistantContext: "The assistant suggested blue; that suggestion is not instruction.", Reviewer: "fixture-reviewer", DestinationKind: "memory", Destination: "agent/facts/fixture-recovery.md", Reason: "Invented recovery policy worth retaining for future fixture runs."}
 	if _, err := Propose(db, a, p, true); err != nil {
 		t.Fatal(err)
 	}
@@ -44,6 +44,7 @@ func TestMemoryWorkflow(t *testing.T) {
 	}
 	p.Slug = "fixture-rejected"
 	p.Learning = "Invented rejected policy"
+	p.Destination = "agent/facts/fixture-rejected.md"
 	if _, err := Propose(db, b, p, true); err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +130,7 @@ func TestMemorySafety(t *testing.T) {
 			os.MkdirAll(filepath.Join(vault, "agent", "facts"), 0700)
 			index := filepath.Join(vault, "agent", "index.md")
 			os.WriteFile(index, []byte("# Facts\n"), 0600)
-			p := Proposal{Slug: "safe-fact", Type: "project", Title: "Safe fact", Description: "Test only", Learning: "Invented learning", OperatorContext: "Invented operator context", AssistantContext: "Invented assistant context", Reviewer: "fixture"}
+			p := Proposal{Slug: "safe-fact", Type: "project", Title: "Safe fact", Description: "Test only", Learning: "Invented learning", OperatorContext: "Invented operator context", AssistantContext: "Invented assistant context", Reviewer: "fixture", DestinationKind: "memory", Destination: "agent/facts/safe-fact.md", Reason: "Invented reason for the fixture"}
 			r, err := Propose(db, id, p, true)
 			if err != nil {
 				t.Fatal(err)

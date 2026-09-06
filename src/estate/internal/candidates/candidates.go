@@ -81,17 +81,47 @@ type Result struct {
 	Applied         bool
 }
 
+// candidateDDL is the CURRENT shape, used only to CREATE a brand-new table
+// (CREATE TABLE IF NOT EXISTS: a no-op against a table that already exists,
+// migrated or not). It generalizes the original agent-estate#1244 shape
+// (prompt_id/provenance_id NOT NULL, inline UNIQUE(prompt_id)) to let a
+// SECOND kind of citation -- a catalogue source (this task's own
+// generalization, run/execution-plan.md's knowledge-architecture run) -- coexist in the same queue without EITHER kind
+// fabricating a row it doesn't have:
+//
+//   - source_kind distinguishes the two: 'conversation' (the original
+//     prompt_id/provenance_id citation into codex_provenance/prompts) or
+//     'catalogue' (a citation into Lane B's source catalogue, held directly
+//     on this row -- see CatalogueSource/RegisterCatalogueSource below).
+//   - prompt_id/provenance_id are now NOT NULL DEFAULT (empty string) rather
+//     than plain NOT NULL: a catalogue-sourced row leaves them empty, never a fabricated
+//     prompts-table reference.
+//   - the inline UNIQUE(prompt_id) constraint is gone. SQLite unique
+//     constraints treat two repeated empty strings as a collision (unlike NULL,
+//     where every NULL is distinct), so two catalogue rows sharing an empty prompt_id would
+//     have collided under the old constraint. A PARTIAL unique index
+//     (WHERE column is non-empty) expresses "unique among real values, unlimited
+//     empties" -- which an inline column-level UNIQUE cannot -- for BOTH
+//     prompt_id and the new catalogue_source_id.
+//
+// A table already created under the old shape is upgraded in place by
+// migrateToSourceKindSchema below; this constant is never used to alter an
+// existing table.
 const candidateDDL = `CREATE TABLE IF NOT EXISTS knowledge_candidates (
 	id TEXT PRIMARY KEY,
-	prompt_id TEXT NOT NULL,
-	provenance_id TEXT NOT NULL,
+	source_kind TEXT NOT NULL DEFAULT 'conversation',
+	prompt_id TEXT NOT NULL DEFAULT '',
+	provenance_id TEXT NOT NULL DEFAULT '',
+	catalogue_source_id TEXT NOT NULL DEFAULT '',
+	catalogue_locator TEXT NOT NULL DEFAULT '',
 	content_hash TEXT NOT NULL,
 	source TEXT NOT NULL,
 	kind TEXT NOT NULL,
 	status TEXT NOT NULL,
-	created_at TEXT NOT NULL,
-	UNIQUE(prompt_id)
-);`
+	created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS knowledge_candidates_prompt_uq ON knowledge_candidates(prompt_id) WHERE prompt_id != '';
+CREATE UNIQUE INDEX IF NOT EXISTS knowledge_candidates_catalogue_uq ON knowledge_candidates(catalogue_source_id) WHERE catalogue_source_id != '';`
 
 func sqlEscape(s string) string {
 	return strings.ReplaceAll(s, "'", "''")
@@ -140,6 +170,169 @@ func tableExists(dbPath, name string) (bool, error) {
 		return false, err
 	}
 	return strings.TrimSpace(out) != "", nil
+}
+
+// migrateToSourceKindSchema upgrades a knowledge_candidates table created
+// under the pre-catalogue shape (inline UNIQUE(prompt_id), prompt_id/
+// provenance_id plain NOT NULL, no source_kind/catalogue_* columns) to the
+// current shape. A table that doesn't exist yet, or already has a
+// source_kind column, needs no migration -- candidateDDL's own CREATE TABLE
+// IF NOT EXISTS already produces the current shape for a brand-new database.
+//
+// SQLite cannot ALTER a column's NOT NULL-ness or drop an inline UNIQUE
+// constraint, so the only honest fix is a full rebuild: create the
+// new-shape table under a temporary name, copy every existing row across
+// (whichever of decide.go/memory.go's own lazily-added decision/decided_at/
+// memory_review columns this particular database actually has -- a given
+// corpus copy may have none, some, or all of them), drop the old table, and
+// rename -- all inside one BEGIN/COMMIT so a mid-migration crash leaves the
+// original table untouched rather than half-renamed.
+//
+// apply=false performs the same existence/shape checks and reports whether
+// a migration is needed, without writing -- the same dry-run contract every
+// other write path in this package keeps.
+func migrateToSourceKindSchema(dbPath string, apply bool) (migrated bool, err error) {
+	exists, err := tableExists(dbPath, "knowledge_candidates")
+	if err != nil {
+		return false, fmt.Errorf("checking for knowledge_candidates table: %w", err)
+	}
+	if !exists {
+		return false, nil
+	}
+	hasSourceKind, err := columnExists(dbPath, "knowledge_candidates", "source_kind")
+	if err != nil {
+		return false, fmt.Errorf("checking for source_kind column: %w", err)
+	}
+	if hasSourceKind {
+		return false, nil
+	}
+	if !apply {
+		return true, nil
+	}
+
+	selectCols := "id, prompt_id, provenance_id, content_hash, source, kind, status, created_at"
+	insertCols := selectCols
+	defaults := map[string]string{"decision": "''", "decided_at": "''", "memory_review": "''"}
+	for _, col := range []string{"decision", "decided_at", "memory_review"} {
+		has, e := columnExists(dbPath, "knowledge_candidates", col)
+		if e != nil {
+			return false, fmt.Errorf("checking for %s column: %w", col, e)
+		}
+		insertCols += ", " + col
+		if has {
+			selectCols += ", " + col
+		} else {
+			selectCols += ", " + defaults[col]
+		}
+	}
+
+	migration := fmt.Sprintf(`BEGIN;
+CREATE TABLE knowledge_candidates_v2 (
+	id TEXT PRIMARY KEY,
+	source_kind TEXT NOT NULL DEFAULT 'conversation',
+	prompt_id TEXT NOT NULL DEFAULT '',
+	provenance_id TEXT NOT NULL DEFAULT '',
+	catalogue_source_id TEXT NOT NULL DEFAULT '',
+	catalogue_locator TEXT NOT NULL DEFAULT '',
+	content_hash TEXT NOT NULL,
+	source TEXT NOT NULL,
+	kind TEXT NOT NULL,
+	status TEXT NOT NULL,
+	created_at TEXT NOT NULL,
+	decision TEXT NOT NULL DEFAULT '',
+	decided_at TEXT NOT NULL DEFAULT '',
+	memory_review TEXT NOT NULL DEFAULT ''
+);
+INSERT INTO knowledge_candidates_v2 (%s, source_kind, catalogue_source_id, catalogue_locator)
+SELECT %s, 'conversation', '', ''
+FROM knowledge_candidates;
+DROP TABLE knowledge_candidates;
+ALTER TABLE knowledge_candidates_v2 RENAME TO knowledge_candidates;
+CREATE UNIQUE INDEX knowledge_candidates_prompt_uq ON knowledge_candidates(prompt_id) WHERE prompt_id != '';
+CREATE UNIQUE INDEX knowledge_candidates_catalogue_uq ON knowledge_candidates(catalogue_source_id) WHERE catalogue_source_id != '';
+COMMIT;`, insertCols, selectCols)
+
+	if err := runWrite(dbPath, migration, "migrate knowledge_candidates to source-kind schema"); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// CatalogueSource is the minimal citation shape this package needs from Lane
+// B's frozen catalogue API (run/source-api.md, version 1, frozen
+// 2026-09-06): field names below are chosen to match run/contract.md's
+// source-record fields exactly (`id`, `locator`, `revision`/`hash`) rather
+// than inventing parallel names, so integrating Lane B's real
+// internal/catalogue.RegisterEntry (once its PR merges and this package
+// rebases) is a rename of the call site in main.go, not a reshaping of this
+// struct. There is deliberately no "title" field: neither contract.md nor
+// source-api.md's RegisterEntry defines one.
+type CatalogueSource struct {
+	ID          string // contract `id` -- Lane B's Register assigns this as sha256(Locator)[:8], "src-" prefixed
+	Locator     string // contract `locator` -- where the original actually is (path/URL/owner/repo)
+	ContentHash string // contract `revision`/`hash` -- RegisterEntry.ObservedRevision once integrated
+}
+
+// RegisterResult reports what one RegisterCatalogueSource call found and
+// did. Existed distinguishes "already registered, this call changed
+// nothing" from a fresh insert, mirroring Derive's own
+// Inserted/WouldInsert idempotence contract so a caller can print "already
+// registered" instead of a misleading "registered" on a rerun.
+type RegisterResult struct {
+	ID      string // the candidate id this source registers as: "catalogue:" + CatalogueSource.ID
+	Existed bool
+	Applied bool
+}
+
+// RegisterCatalogueSource derives ONE candidate from a catalogue source
+// citation -- the catalogue-sourced counterpart to Derive's bulk
+// conversation-sourced derivation. It never writes a prompts or
+// codex_provenance row: prompt_id/provenance_id stay empty on this row, which
+// is this task's own required contract -- external sources never require a
+// fabricated prompt row. apply=false performs the same
+// existence/validation checks and reports what a real run would do, with
+// zero writes, mirroring every other write path in this package.
+func RegisterCatalogueSource(dbPath string, src CatalogueSource, apply bool) (RegisterResult, error) {
+	if strings.TrimSpace(src.ID) == "" || strings.TrimSpace(src.Locator) == "" || strings.TrimSpace(src.ContentHash) == "" {
+		return RegisterResult{}, fmt.Errorf("catalogue source id, locator and content hash are all required")
+	}
+	if _, err := os.Stat(dbPath); err != nil {
+		return RegisterResult{}, fmt.Errorf("corpus database not found at %s: %w", dbPath, err)
+	}
+	id := "catalogue:" + src.ID
+
+	exists, err := tableExists(dbPath, "knowledge_candidates")
+	if err != nil {
+		return RegisterResult{}, fmt.Errorf("checking for knowledge_candidates table: %w", err)
+	}
+	already := false
+	if exists {
+		n, err := readCount(dbPath, fmt.Sprintf("select count(*) from knowledge_candidates where id='%s';", sqlEscape(id)))
+		if err != nil {
+			return RegisterResult{}, fmt.Errorf("checking for existing catalogue candidate: %w", err)
+		}
+		already = n > 0
+	}
+
+	res := RegisterResult{ID: id, Existed: already, Applied: apply}
+	if !apply {
+		return res, nil
+	}
+
+	if _, err := migrateToSourceKindSchema(dbPath, true); err != nil {
+		return RegisterResult{}, fmt.Errorf("migrating knowledge_candidates to source-kind schema: %w", err)
+	}
+	if err := runWrite(dbPath, candidateDDL, "create knowledge_candidates table"); err != nil {
+		return RegisterResult{}, err
+	}
+	insertSQL := fmt.Sprintf(`INSERT OR IGNORE INTO knowledge_candidates
+	(id, source_kind, catalogue_source_id, catalogue_locator, content_hash, source, kind, status, created_at)
+VALUES ('%s', 'catalogue', '%s', '%s', '%s', 'catalogue', 'unclassified', 'candidate', '%s');`,
+		sqlEscape(id), sqlEscape(src.ID), sqlEscape(src.Locator), sqlEscape(src.ContentHash), sqlEscape(nowFunc()))
+	if err := runWrite(dbPath, insertSQL, "insert catalogue candidate"); err != nil {
+		return RegisterResult{}, err
+	}
+	return res, nil
 }
 
 // nowFunc is overridable in tests so a fixture's created_at is deterministic.

@@ -29,7 +29,7 @@ func TestCandidatesMemoryCLI(t *testing.T) {
 	os.MkdirAll(filepath.Join(vault, "agent", "facts"), 0700)
 	os.WriteFile(filepath.Join(vault, "agent", "index.md"), []byte("# Facts\n"), 0600)
 	proposal := filepath.Join(t.TempDir(), "proposal.json")
-	os.WriteFile(proposal, []byte(`{"slug":"cli-fixture","type":"project","title":"CLI fixture","description":"Invented test","learning":"Invented learning","operator_context":"Invented operator","assistant_context":"Invented assistant","reviewer":"fixture"}`), 0600)
+	os.WriteFile(proposal, []byte(`{"slug":"cli-fixture","type":"project","title":"CLI fixture","description":"Invented test","learning":"Invented learning","operator_context":"Invented operator","assistant_context":"Invented assistant","reviewer":"fixture","destination_kind":"memory","destination":"agent/facts/cli-fixture.md","reason":"Invented reason for the CLI fixture"}`), 0600)
 	args := []string{"candidates", "memory", "-db", db, "-id", id, "-action", "propose", "-proposal", proposal, "-apply"}
 	if _, _, code := runEstateCapture(t, bin, env, args...); code == 0 {
 		t.Fatal("live write lacked acknowledgement")

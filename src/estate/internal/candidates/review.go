@@ -61,14 +61,25 @@ func runReadOnlySep(dbPath, sql string) (string, error) {
 
 // Summary is one row of a List result -- enough to pick a candidate to
 // `show`, never the prompt text itself.
+//
+// SourceKind distinguishes the two citation shapes a row can carry
+// (this task's own generalization): "conversation" (the original
+// prompt_id/provenance_id citation) or "catalogue" (a citation into Lane
+// B's source catalogue, held directly on this row -- see CatalogueSourceID
+// etc. below). ProvenanceGone/PromptGone-style absence tracking only
+// applies to "conversation" rows: a catalogue row's citation is the data
+// itself, not a join that can go stale independently of this table.
 type Summary struct {
-	ID             string
-	PromptID       string
-	ProvenanceID   string
-	Decision       string // "", "promoted", or "discarded" -- see decide.go
-	SourceFile     string // "" exactly when ProvenanceGone
-	RecordIndex    int    // -1 exactly when ProvenanceGone
-	ProvenanceGone bool
+	ID                string
+	SourceKind        string // "conversation" or "catalogue"
+	PromptID          string
+	ProvenanceID      string
+	Decision          string // "", "promoted", or "discarded" -- see decide.go
+	SourceFile        string // "" exactly when ProvenanceGone (conversation rows only)
+	RecordIndex       int    // -1 exactly when ProvenanceGone (conversation rows only)
+	ProvenanceGone    bool
+	CatalogueSourceID string // "" for conversation rows; contract `id` for catalogue rows
+	CatalogueLocator  string // contract `locator` -- "" for conversation rows
 }
 
 // ListFilter narrows a queue of thousands to what a reviewer can actually
@@ -105,7 +116,7 @@ type ListResult struct {
 // them lazily, under an -apply write, from decide.go. A read path must
 // never write those columns into existence just to read from them, so it
 // asks first (a read-only pragma_table_info check, not a write) and selects
-// a literal '' in place of a column that isn't there yet, rather than
+// a literal empty string in place of a column that isn't there yet, rather than
 // erroring or silently requiring a write first.
 func decisionColumnExprs(dbPath string) (decisionExpr, decidedAtExpr string, err error) {
 	hasDecision, err := columnExists(dbPath, "knowledge_candidates", "decision")
@@ -125,6 +136,23 @@ func decisionColumnExprs(dbPath string) (decisionExpr, decidedAtExpr string, err
 		decidedAtExpr = "k.decided_at"
 	}
 	return decisionExpr, decidedAtExpr, nil
+}
+
+// catalogueColumnExprs mirrors decisionColumnExprs' own read-only,
+// select-a-literal-if-missing shape for the source_kind/catalogue_* columns
+// this task's generalization adds: a knowledge_candidates table derived
+// before this change (or a live corpus nobody has run RegisterCatalogueSource
+// against yet) has none of them, and a read path must never write columns
+// into existence just to read from them.
+func catalogueColumnExprs(dbPath string) (sourceKindExpr, sourceIDExpr, locatorExpr string, err error) {
+	has, err := columnExists(dbPath, "knowledge_candidates", "source_kind")
+	if err != nil {
+		return "", "", "", fmt.Errorf("checking for source_kind column: %w", err)
+	}
+	if !has {
+		return "'conversation'", "''", "''", nil
+	}
+	return "k.source_kind", "k.catalogue_source_id", "k.catalogue_locator", nil
 }
 
 // List reads a page of the candidate queue. It never returns an error for
@@ -168,13 +196,17 @@ func List(dbPath string, filter ListFilter) (ListResult, error) {
 	if err != nil {
 		return ListResult{}, err
 	}
+	sourceKindExpr, sourceIDExpr, locatorExpr, err := catalogueColumnExprs(dbPath)
+	if err != nil {
+		return ListResult{}, err
+	}
 
 	q := fmt.Sprintf(`select k.id, k.prompt_id, k.provenance_id, %s,
-	coalesce(cp.source_file,''), coalesce(cp.record_index,-1)
+	coalesce(cp.source_file,''), coalesce(cp.record_index,-1), %s, %s, %s
 from knowledge_candidates k
 left join codex_provenance cp on cp.id = k.provenance_id%s
 order by k.rowid asc
-limit %d offset %d;`, decisionExpr, where, limit, offset)
+limit %d offset %d;`, decisionExpr, sourceKindExpr, sourceIDExpr, locatorExpr, where, limit, offset)
 
 	out, err := runReadOnlySep(dbPath, q)
 	if err != nil {
@@ -187,21 +219,26 @@ limit %d offset %d;`, decisionExpr, where, limit, offset)
 			continue
 		}
 		parts := strings.Split(line, rowSep)
-		if len(parts) != 6 {
+		if len(parts) != 9 {
 			return ListResult{}, fmt.Errorf("unexpected column count (%d) in list row %q", len(parts), line)
 		}
 		ri, _ := strconv.Atoi(parts[5])
 		s := Summary{
-			ID:           parts[0],
-			PromptID:     parts[1],
-			ProvenanceID: parts[2],
-			Decision:     parts[3],
-			SourceFile:   parts[4],
-			RecordIndex:  ri,
+			ID:                parts[0],
+			PromptID:          parts[1],
+			ProvenanceID:      parts[2],
+			Decision:          parts[3],
+			SourceFile:        parts[4],
+			RecordIndex:       ri,
+			SourceKind:        parts[6],
+			CatalogueSourceID: parts[7],
+			CatalogueLocator:  parts[8],
 		}
-		s.ProvenanceGone = s.SourceFile == ""
-		if s.ProvenanceGone {
-			s.RecordIndex = -1
+		if s.SourceKind == "conversation" {
+			s.ProvenanceGone = s.SourceFile == ""
+			if s.ProvenanceGone {
+				s.RecordIndex = -1
+			}
 		}
 		items = append(items, s)
 	}
@@ -246,16 +283,21 @@ func Get(dbPath, id string) (Detail, error) {
 	if err != nil {
 		return Detail{}, err
 	}
+	sourceKindExpr, sourceIDExpr, locatorExpr, err := catalogueColumnExprs(dbPath)
+	if err != nil {
+		return Detail{}, err
+	}
 
 	q := fmt.Sprintf(`select k.id, k.prompt_id, k.provenance_id, %s, k.created_at,
 	%s,
 	coalesce(cp.source_file,''), coalesce(cp.record_index,-1), coalesce(cp.harness,''),
 	coalesce(cp.session_id,''), coalesce(cp.content_hash,''),
-	coalesce(p.id,''), coalesce(p.context,''), coalesce(p.text_clean,''), coalesce(p.text_raw,'')
+	coalesce(p.id,''), coalesce(p.context,''), coalesce(p.text_clean,''), coalesce(p.text_raw,''),
+	%s, %s, %s, k.content_hash
 from knowledge_candidates k
 left join codex_provenance cp on cp.id = k.provenance_id
 left join prompts p on p.id = k.prompt_id
-where k.id = '%s';`, decisionExpr, decidedAtExpr, sqlEscape(id))
+where k.id = '%s';`, decisionExpr, decidedAtExpr, sourceKindExpr, sourceIDExpr, locatorExpr, sqlEscape(id))
 
 	out, err := runReadOnlySep(dbPath, q)
 	if err != nil {
@@ -266,19 +308,22 @@ where k.id = '%s';`, decisionExpr, decidedAtExpr, sqlEscape(id))
 		return Detail{}, fmt.Errorf("%w: %s", ErrCandidateNotFound, id)
 	}
 	parts := strings.Split(line, rowSep)
-	if len(parts) != 15 {
+	if len(parts) != 19 {
 		return Detail{}, fmt.Errorf("unexpected column count (%d) reading candidate %s", len(parts), id)
 	}
 
 	ri, _ := strconv.Atoi(parts[7])
 	d := Detail{
 		Summary: Summary{
-			ID:           parts[0],
-			PromptID:     parts[1],
-			ProvenanceID: parts[2],
-			Decision:     parts[3],
-			SourceFile:   parts[6],
-			RecordIndex:  ri,
+			ID:                parts[0],
+			PromptID:          parts[1],
+			ProvenanceID:      parts[2],
+			Decision:          parts[3],
+			SourceFile:        parts[6],
+			RecordIndex:       ri,
+			SourceKind:        parts[15],
+			CatalogueSourceID: parts[16],
+			CatalogueLocator:  parts[17],
 		},
 		CreatedAt:     parts[4],
 		DecidedAt:     parts[5],
@@ -290,6 +335,18 @@ where k.id = '%s';`, decisionExpr, decidedAtExpr, sqlEscape(id))
 	promptRowID := parts[11]
 	textClean := parts[13]
 	textRaw := parts[14]
+	ownContentHash := parts[18] // k.content_hash -- the row's own citation hash, distinct from cp.content_hash above
+
+	if d.SourceKind == "catalogue" {
+		// A catalogue row's citation is data held directly on this row, not
+		// a join that can go stale independently of it: ContentHash is the
+		// row's own column (RegisterCatalogueSource writes it from
+		// CatalogueSource.ContentHash), never cp.content_hash (always ''
+		// here, since there is no codex_provenance row to join). There is
+		// no prompt/provenance to resolve or report gone for this kind.
+		d.ContentHash = ownContentHash
+		return d, nil
+	}
 
 	d.ProvenanceGone = d.SourceFile == ""
 	if d.ProvenanceGone {

@@ -6,6 +6,33 @@ and revision observable through the existing knowledge query.
 Scope: candidates, a CLI entry point, and current-fact filtering in knowledge.
 No mining, new store, scheduler, model, tmux, or Second Brain changes.
 
+## Source-backed candidates (2026-09-06 knowledge-architecture run)
+
+A candidate now cites one of two source kinds, distinguished by
+`source_kind` on `knowledge_candidates`: `conversation` (the original
+prompt_id/provenance_id citation into `codex_provenance`/`prompts`,
+unchanged) or `catalogue` (a citation into Lane B's source catalogue,
+registered via `RegisterCatalogueSource`/`estate candidates
+register-source -id -locator -hash`). A catalogue row never fabricates a
+prompts row: prompt_id/provenance_id stay empty. `CatalogueSource`'s field
+names (`ID`, `Locator`, `ContentHash`) match `run/contract.md`'s
+source-record fields exactly (`id`, `locator`, `revision`/`hash`) so
+integrating Lane B's real `internal/catalogue.RegisterEntry`, once its PR
+merges, is a rename at the `register-source` call site, not a reshape of
+this package.
+
+A `Proposal` now also names `destination_kind` (`memory` or `repo`),
+`destination` (the intended canonical path), and `reason` (why this
+citation belongs there) -- all required. Accepting a `memory`-destination
+proposal is unchanged (`Publish`, writes the vault fact). Accepting a
+`repo`-destination proposal calls `PublishRepo` instead: it never writes
+the repo file itself, only records a receipt (exact path match against
+what was proposed, plus a commit SHA) after the patch has already been
+integrated elsewhere. The CLI's `candidates memory -action accept/reject`
+routes to whichever function the saved proposal's own `destination_kind`
+names -- never a flag the caller could set inconsistently with what was
+reviewed.
+
 Test matrix: `TestMemoryWorkflow` covers approval versus publication, rejection,
 supersession, citation preservation, stale-index refusal and duplicate-free reruns.
 `TestMemorySafety` covers missing evidence, slug collisions and stale revisions.

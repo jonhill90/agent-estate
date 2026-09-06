@@ -244,6 +244,45 @@ var Registry = []Feature{
 			"that measurement.",
 	},
 	{
+		ID:     "source-backed-candidates",
+		Name:   "Source-backed candidates: catalogue citations, generalized proposal shape, repo-publication receipts",
+		Status: InProgress,
+		Evidence: "This dispatch (run/execution-plan.md's knowledge-architecture run, Lane C): " +
+			"internal/candidates now derives TWO citation shapes into the same knowledge_candidates " +
+			"queue -- 'conversation' (the original prompt_id/provenance_id citation, unchanged) and " +
+			"'catalogue' (a new RegisterCatalogueSource entry point, wired as `estate candidates " +
+			"register-source`) -- without either fabricating a row it doesn't have: a catalogue row's " +
+			"prompt_id/provenance_id stay empty rather than pointing at an invented prompts row, which " +
+			"required rebuilding the table's inline UNIQUE(prompt_id) constraint into two partial " +
+			"unique indexes (SQLite cannot loosen an inline NOT NULL/UNIQUE via ALTER TABLE); a lazy " +
+			"migration (migrateToSourceKindSchema) upgrades a live corpus's existing old-shape table on " +
+			"first catalogue use, proven by TestRegisterCatalogueSourceMigratesOldShapeTable. The " +
+			"Proposal shape gained required destination_kind/destination/reason fields (a proposal now " +
+			"names WHERE it lands and WHY, not just what it says); acceptance either publishes through " +
+			"the existing Agent Memory mechanism (Publish, unchanged for destination_kind=memory) or " +
+			"records a repo/docs/skill patch receipt (new PublishRepo, destination_kind=repo) -- the " +
+			"receipt requires an exact path match against what was proposed and only records AFTER " +
+			"integration, never writing the repo file itself. Integrated fixture: " +
+			"TestIntegratedSourceBackedWorkflow proposes a conversation candidate (A) and a catalogue " +
+			"candidate (B), accepts A, rejects B, revises/supersedes A, and asserts retrieval returns " +
+			"only A's current revision with zero duplicates on rerun -- entirely against a t.TempDir() " +
+			"corpus/vault/index, never the real vault. Mutation check performed and reverted (not " +
+			"committed): disabling internal/knowledge's currentMemoryItem staleness gate entirely " +
+			"turned this fixture RED (`stale index (generated before the supersede) served A's " +
+			"superseded revision`); restoring the gate returned it to PASS -- see " +
+			"docs/knowledge-workflow-evidence.md for the full command transcript. Re-verify: `go test " +
+			"./internal/candidates/... . -count=1` from src/estate.",
+		Caveats: "Lane B's catalogue API was not yet frozen/merged when this shipped: CatalogueSource " +
+			"is this package's own stub shape (id/title/location/content_hash), populated by " +
+			"main.go from operator-supplied flags, not from a real catalogue lookup -- integrating " +
+			"Lane B's actual exported functions once merged is follow-up work, expected to change only " +
+			"the register-source call site, not internal/candidates itself. PublishRepo records a " +
+			"receipt only; it has not yet been exercised against a REAL repo integration (only the " +
+			"isolated fixture in TestPublishRepoRecordsReceiptOnlyOnExactDestinationMatch and the CLI " +
+			"round-trip in TestCandidatesMemoryRepoDestinationCLI). Does not change or depend on " +
+			"candidate-knowledge-inbox's own remaining gaps below.",
+	},
+	{
 		ID:     "agents-md-progressive-disclosure",
 		Name:   "AGENTS.md progressive-disclosure split",
 		Status: Delivered,
