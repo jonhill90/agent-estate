@@ -401,6 +401,19 @@ func buildReport(dbPath, root string, watermark time.Time, apply bool) (Report, 
 	// A dry run instead asks attributionTableExists, a plain SELECT, and treats
 	// "table not there yet" as before=0/already-empty: the same numbers a
 	// genuinely-untouched table would report, without ever creating one.
+	//
+	// "A plain SELECT" was not, on its own, enough to make that true: the
+	// bare sqlite3 CLI opens read-write by default and creates its target
+	// even for a SELECT, so against a -db path that had never been `cp`'d
+	// into place, this SELECT alone still left an empty, no-schema file
+	// behind (agent-estate#1237, PR #1237's second review -- the fourth
+	// overclaiming comment in this family before this one). Every read-only
+	// call site reachable from this function -- attributionTableExists,
+	// countAttributionRows, alreadyAttributedIDs, fetchPromptsForFile -- now
+	// opens via runSQLiteReadOnly (`sqlite3 -readonly`), which fails to open
+	// rather than creating a file when nothing is there yet; see attribute.go's
+	// dbFileMissing for how each caller tells that expected case apart from a
+	// real error.
 	if apply {
 		if err := ensureAttributionTable(dbPath); err != nil {
 			return r, fmt.Errorf("ensuring claude_provenance table: %w", err)

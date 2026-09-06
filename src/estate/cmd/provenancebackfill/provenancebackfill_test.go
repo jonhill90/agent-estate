@@ -370,6 +370,46 @@ func TestDryRunAgainstNonLivePathUnchanged(t *testing.T) {
 	}
 }
 
+// TestDryRunAgainstNonexistentPathCreatesNoFile locks the defect PR #1237's
+// second review found: attributionTableExists (and every other read-only
+// call site reachable from a -dry-run run) used to shell out to the plain
+// `sqlite3` CLI with no `-readonly` flag, which opens its target read-write
+// by default and CREATES an empty, no-schema file even to run a bare
+// SELECT. -db here names a path that has never been `cp`'d into place --
+// exactly the state a dry run against a fresh corpus copy starts from -- so
+// this asserts the strongest form of "a dry run must never write to dbPath":
+// not merely unchanged content, but no file at all.
+func TestDryRunAgainstNonexistentPathCreatesNoFile(t *testing.T) {
+	sqliteAvailable(t)
+	claudeDir := t.TempDir()
+	writeClaudeFixture(t, claudeDir, "proj", "row-abc.jsonl", []string{
+		`{"type":"user","sessionId":"sess-1","message":{"role":"user","content":"row-text-row-abc"}}`,
+	})
+	dbDir := t.TempDir()
+	dbPath := filepath.Join(dbDir, "does-not-exist.sqlite3")
+	watermarkArg := time.Now().Add(time.Hour).Format(time.RFC3339)
+
+	if _, err := os.Stat(dbPath); !os.IsNotExist(err) {
+		t.Fatalf("precondition failed: %s already exists (err=%v)", dbPath, err)
+	}
+
+	stdout, stderr, exit := runCapture(t, []string{
+		"-db", dbPath, "-dry-run", "-watermark", watermarkArg, "-claude-root", claudeDir,
+	})
+	if exit != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", exit, stderr)
+	}
+	if !strings.Contains(stdout, "rows examined: 0") {
+		t.Errorf("stdout = %q, want zero rows examined against a db that was never created", stdout)
+	}
+
+	if _, err := os.Stat(dbPath); !os.IsNotExist(err) {
+		t.Errorf("a -dry-run against a nonexistent -db path created a file at %s (err=%v) -- "+
+			"the sqlite3 CLI opens read-write by default and creates its target even for a bare SELECT "+
+			"unless every read-only call site passes -readonly", dbPath, err)
+	}
+}
+
 // TestAuthorizedLiveWriteBannerPrintsResolvedPath locks the second defect
 // PR #1237's review found: the banner used to print filepath.Abs(*dbPath),
 // the UNRESOLVED spelling, while writing through refuseLivePath's RESOLVED

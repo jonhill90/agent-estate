@@ -20,6 +20,7 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"os"
 	"os/exec"
 	"sort"
 	"strconv"
@@ -55,6 +56,48 @@ func runSQLite(dbPath string, args ...string) (string, error) {
 		return "", fmt.Errorf("sqlite3 %v: %w", args, err)
 	}
 	return string(out), nil
+}
+
+// runSQLiteReadOnly is runSQLite's read-only twin, for every call site that
+// only ever issues a SELECT. The plain sqlite3 CLI opens its target
+// read-write by default -- including for a bare SELECT -- and CREATES the
+// file if it doesn't exist yet (agent-estate#1139, PR #1237's second
+// review): a -dry-run run against a -db path that has never been `cp`'d into
+// place would otherwise leave an empty, no-schema file behind, which is
+// itself a write the dry-run contract promises never to make. `-readonly`
+// closes that: it still serves a SELECT against an existing database
+// correctly, and against a path with nothing there yet it fails to open
+// rather than creating one.
+//
+// Because opening read-only against a nonexistent path is a hard failure,
+// every caller here that must also tolerate "the db doesn't exist yet" as a
+// legitimate state (a fresh corpus copy, not yet `cp`'d into place) checks
+// dbFileMissing itself, before calling this, rather than trying to
+// distinguish "doesn't exist" from any other sqlite3 error after the fact.
+func runSQLiteReadOnly(dbPath string, args ...string) (string, error) {
+	full := append([]string{"-readonly", dbPath}, args...)
+	cmd := exec.Command("sqlite3", full...)
+	out, err := cmd.Output()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			return "", fmt.Errorf("sqlite3 %v: %s", args, strings.TrimSpace(string(ee.Stderr)))
+		}
+		return "", fmt.Errorf("sqlite3 %v: %w", args, err)
+	}
+	return string(out), nil
+}
+
+// dbFileMissing reports whether dbPath does not exist yet on disk. This is
+// the one case a read-only call site is expected to see and must not treat
+// as an error: a fresh corpus copy that hasn't been `cp`'d into place is a
+// legitimate "nothing here yet" state for a -dry-run run, and each read-only
+// caller below returns its own zero value for that case rather than letting
+// -readonly's open failure propagate as a fatal error. Any other os.Stat
+// failure (permission denied, for instance) is not this case and is left
+// for the caller's own sqlite3 invocation to report.
+func dbFileMissing(dbPath string) bool {
+	_, err := os.Stat(dbPath)
+	return os.IsNotExist(err)
 }
 
 // ensureAttributionTable creates the attribution table if it does not exist
@@ -94,7 +137,10 @@ func ensureAttributionTable(dbPath string) error {
 // would be true if the table really were absent -- it just never creates it
 // to find that out.
 func attributionTableExists(dbPath string) (bool, error) {
-	out, err := runSQLite(dbPath, "select name from sqlite_master where type='table' and name='claude_provenance';")
+	if dbFileMissing(dbPath) {
+		return false, nil
+	}
+	out, err := runSQLiteReadOnly(dbPath, "select name from sqlite_master where type='table' and name='claude_provenance';")
 	if err != nil {
 		return false, err
 	}
@@ -107,10 +153,13 @@ func attributionTableExists(dbPath string) (bool, error) {
 // Unit's ContentHash without this process ever holding the raw text longer
 // than one hash computation.
 func fetchPromptsForFile(dbPath, basename string) ([]promptRow, error) {
+	if dbFileMissing(dbPath) {
+		return nil, nil
+	}
 	q := fmt.Sprintf(
 		`select id, text_raw from prompts where source_file = '%s' order by at asc;`,
 		sqlEscape(basename))
-	out, err := runSQLite(dbPath, "-separator", sep, q)
+	out, err := runSQLiteReadOnly(dbPath, "-separator", sep, q)
 	if err != nil {
 		return nil, err
 	}
@@ -135,7 +184,10 @@ func fetchPromptsForFile(dbPath, basename string) ([]promptRow, error) {
 // already_attributed" count is exact, not inferred from an INSERT OR IGNORE
 // row-count side effect.
 func alreadyAttributedIDs(dbPath string) (map[string]bool, error) {
-	out, err := runSQLite(dbPath, "select id from claude_provenance;")
+	if dbFileMissing(dbPath) {
+		return map[string]bool{}, nil
+	}
+	out, err := runSQLiteReadOnly(dbPath, "select id from claude_provenance;")
 	if err != nil {
 		return nil, err
 	}
@@ -162,7 +214,10 @@ func insertAttribution(dbPath string, u Unit, promptID string, watermark string)
 }
 
 func countAttributionRows(dbPath string) (int, error) {
-	out, err := runSQLite(dbPath, "select count(*) from claude_provenance;")
+	if dbFileMissing(dbPath) {
+		return 0, nil
+	}
+	out, err := runSQLiteReadOnly(dbPath, "select count(*) from claude_provenance;")
 	if err != nil {
 		return 0, err
 	}
