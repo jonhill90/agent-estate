@@ -77,6 +77,21 @@ const (
 	ancestorFieldWeight = 1.0
 )
 
+// MEASURED AND REJECTED, agent-estate#1255: a per-source tier1 field
+// weight for vault-fact (mirroring ancestorFieldWeight's pattern, tried
+// at 5/6/7/8/9/10/12/15) does NOT fix the K3 gate's ranking half, because
+// BM25's own k1 saturation caps a SINGLE term occurrence's contribution
+// near idf*(k1+1) regardless of how large its field weight is raised --
+// a fact matching only its own title term ("estate", one occurrence)
+// plateaued at score 5-6 across that entire sweep while a competing
+// sparse-source item matching three ordinary words each contributed
+// their own separate, unsaturated term additions and kept outscoring it.
+// Raising a multiplicand on an already-saturated term cannot out-score a
+// sum of several unsaturated ones -- this is arithmetic, not a tuning
+// problem a bigger number solves. See query.go's vaultFactTitleBonus for
+// the mechanism actually used instead, and #1255's PR body for the full
+// sweep table this comment summarises.
+
 // tier1SearchableText, ancestorSearchableText and tier2SearchableText are
 // searchableText's own three fields, kept separate here (rather than
 // flattened into one string) because BM25 field weighting needs to know

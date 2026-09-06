@@ -280,7 +280,14 @@ func knowledgeGrounding() string {
 		"(agent-estate#1065's trustworthiness signal, itself reported not_applicable " +
 		"when the index couldn't be read) included, instead of parsing the prose. " +
 		"This is a tool, not a required step: use it if it helps, and the turn " +
-		"still works when the index is missing. If results look noisy or " +
+		"still works when the index is missing. VAULT FACTS -- the operator's " +
+		"own reviewed, published standing constraints (`source: vault-fact`) -- " +
+		"ARE PRIVATE BY DEFAULT (agent-estate#1255): a query without `--private` " +
+		"can score a governing constraint and still not show it to you, reported " +
+		"only as `withheld_private`/`matched_withheld_majority`, not as an error. " +
+		"If your task could plausibly be governed by a standing operator " +
+		"decision, query with `--private` -- do not trust an unscoped default-mode " +
+		"result to have checked for one. If results look noisy or " +
 		"off-topic, prefix the query with `source:<name>` -- e.g. `source:repo-docs` " +
 		"for how this repo works, `source:corpus-directive` for what the operator " +
 		"has decided -- to narrow to one source. Under `--private`, do so whenever " +

@@ -49,3 +49,28 @@ func TestRoleGrounding_BothRolesCarrySourceScoping(t *testing.T) {
 		t.Errorf("fix-pass grounding does not carry source: scoping:\n%s", fixPass)
 	}
 }
+
+// WHY THIS TEST EXISTS. agent-estate#1255 (the K3 gate): a real published
+// vault fact scored zero for a topically-related question in default mode
+// not because retrieval failed, but because vault facts are private by
+// default and the grounding never said so -- a caller checking for a
+// standing constraint had no way to learn from this text that an unscoped
+// query can silently miss one. Mirrors TestKnowledgeGrounding_MentionsSourceScoping's
+// own discipline (agent-estate#1081): fails against grounding text that
+// omits the callout, passes once it is explicit.
+func TestKnowledgeGrounding_MentionsVaultFactsArePrivateByDefault(t *testing.T) {
+	got := knowledgeGrounding()
+
+	if !strings.Contains(got, "vault-fact") {
+		t.Fatalf("knowledge grounding never names vault-fact as a source -- a lane has no way to learn that class exists:\n%s", got)
+	}
+	if !strings.Contains(got, "PRIVATE BY DEFAULT") && !strings.Contains(got, "private by default") {
+		t.Fatalf("knowledge grounding does not say vault facts are private by default -- a lane checking a standing constraint in default mode has no warning it can silently miss one:\n%s", got)
+	}
+	if !strings.Contains(got, "agent-estate#1255") {
+		t.Errorf("knowledge grounding does not cite agent-estate#1255:\n%s", got)
+	}
+	if !strings.Contains(got, "--private") {
+		t.Errorf("knowledge grounding does not tell a caller to use --private:\n%s", got)
+	}
+}

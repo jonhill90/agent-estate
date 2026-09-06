@@ -1713,3 +1713,89 @@ func TestPublicPlusWithheldEqualsPrivateTotal(t *testing.T) {
 		})
 	}
 }
+
+// TestQueryStandingConstraintSurvivesLexicallyDifferentQuestion is
+// agent-estate#1255's own regression guard: the K3 gate found a real
+// published vault fact retrieved at a real score when a question already
+// contained its own keywords ("is the widget a product to sell"),
+// and not at all for a topically-related question that shares only the
+// fact's own entity term and none of its other vocabulary ("what should
+// the team prioritise for the widget next"). Fixture content here
+// is synthetic (no operator words, no real fact body -- see #1255's own
+// "the vault is private" constraint); the SHAPE reproduces the gate
+// exactly: one standing-constraint vault fact sharing exactly one term
+// ("widget") with the question, competing against ten noise items (other
+// sources, and other vault facts) that each coincidentally share TWO OR
+// MORE ordinary words with the question and would otherwise fill every
+// one of QueryLimit's ten slots ahead of it -- the real gate's own
+// measured shape (see query.go's vaultFactTitleBonus doc comment for the
+// real ranked list this mirrors).
+func TestQueryStandingConstraintSurvivesLexicallyDifferentQuestion(t *testing.T) {
+	items := []Item{
+		{
+			ID: "target", Source: "vault-fact",
+			Permalink:   "/vault/agent/facts/widget-not-a-product.md",
+			Tier1:       "the widget is a research prototype, not a product to sell",
+			Tier2:       "The widget exists to sharpen engineering skills. It is not a commercial product and will not be sold or packaged.",
+			Publishable: true, PublishBasis: "test fixture: marked publishable",
+		},
+	}
+	// Ten noise items, each sharing THREE of the question's OTHER terms
+	// (team, prioritise, next, quarter, should) but never "widget" --
+	// exactly the population that used to fill every display slot ahead
+	// of the target before the title-floor exemption existed:
+	// agent-estate#1134's floor alone would exclude the target as a
+	// below-floor single-term match. Removing "vault-fact" from
+	// titleFloorExemptSources (query.go) was run against this exact
+	// fixture before it was checked in and made this test fail (see
+	// #1255's PR body); zeroing vaultFactTitleBonus alone does not, at
+	// this fixture's scale -- the floor exemption is the load-bearing
+	// mechanism this test pins, and the bonus is the further, separately
+	// measured refinement #1255's real published fact needed against the
+	// full ~4000-item production index (see vaultFactTitleBonus's own
+	// doc comment for that measurement).
+	noiseWords := [][3]string{
+		{"team", "next", "quarter"}, {"should", "next", "team"}, {"team", "prioritise", "quarter"},
+		{"prioritise", "quarter", "should"}, {"should", "team", "next"}, {"next", "quarter", "team"},
+		{"team", "quarter", "prioritise"}, {"should", "prioritise", "next"}, {"prioritise", "next", "quarter"},
+		{"should", "quarter", "team"},
+	}
+	for i, w := range noiseWords {
+		items = append(items, Item{
+			ID: fmt.Sprintf("noise-%d", i), Source: "corpus-directive",
+			Permalink:      fmt.Sprintf("corpus:item:%d", 9000+i),
+			StructuralTags: []string{"weight:hard"},
+			Tier1:          fmt.Sprintf("an unrelated directive that happens to mention %s, %s and %s", w[0], w[1], w[2]),
+			Tier2:          fmt.Sprintf("an unrelated directive that happens to mention %s, %s and %s", w[0], w[1], w[2]),
+			Publishable:    true, PublishBasis: "test fixture: marked publishable",
+		})
+	}
+
+	path := filepath.Join(t.TempDir(), "index.json")
+	if err := Write(path, Result{Items: items}); err != nil {
+		t.Fatal(err)
+	}
+
+	ownWords := Query(path, "is the widget a product to sell", 0, true)
+	if ownWords.State != StateMatched || len(ownWords.Matches) == 0 || ownWords.Matches[0].ID != "target" {
+		t.Fatalf("own-words query: got state=%q matches=%+v, want target ranked first", ownWords.State, ownWords.Matches)
+	}
+
+	lexicallyDifferent := Query(path, "what should the team prioritise for the widget next quarter", 0, true)
+	if lexicallyDifferent.State != StateMatched {
+		t.Fatalf("lexically-different query: State = %q, want %q (reason=%q)",
+			lexicallyDifferent.State, StateMatched, lexicallyDifferent.Reason)
+	}
+	var found bool
+	for _, m := range lexicallyDifferent.Matches {
+		if m.ID == "target" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("lexically-different query: Matches = %+v, want \"target\" present within QueryLimit -- "+
+			"a standing constraint sharing only its own entity term with a topically-related question "+
+			"must still surface, not just when the question already contains the fact's own keywords "+
+			"(agent-estate#1255)", lexicallyDifferent.Matches)
+	}
+}
