@@ -10,7 +10,7 @@
 // exact prompts row it came from) and permanently quarantined at
 // status='candidate' by this package. Nothing in this file ever writes any
 // other status -- promoting a candidate into durable knowledge is a separate,
-// later, reviewed act this package deliberately does not build (the settled
+// reviewed act implemented by memory.go (the settled
 // vault fact this follows is knowledge-architecture-operating-design:
 // "candidate inbox = ingestion quarantine; cited, then promoted or discarded
 // by review; never silent promotion").
@@ -24,8 +24,8 @@
 // a new table. decide.go adds a decision column (decision, decided_at) a
 // reviewer sets to 'promoted' or 'discarded' -- a REVIEW record, not a
 // promotion: it never moves anything into a durable knowledge store, never
-// changes status or kind, and the durable-store format itself stays a
-// decision reserved to the operator. See decide.go's own doc comment for
+// changes status or kind. memory.go writes reviewed facts into the existing
+// Agent Memory vault and stores publication state separately. See decide.go for
 // the write-gating shape (mirrors cmd/codexingest's own guard exactly).
 //
 // # Why kind is always "unclassified"

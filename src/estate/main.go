@@ -1667,6 +1667,10 @@ func main() {
 		}
 
 	case "candidates":
+		if len(os.Args) > 2 && os.Args[2] == "memory" {
+			runCandidatesMemory(os.Args[3:])
+			return
+		}
 		if len(os.Args) > 2 && os.Args[2] == "list" {
 			runCandidatesList(os.Args[3:])
 			return

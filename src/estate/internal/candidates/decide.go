@@ -7,8 +7,8 @@
 // Recording decision='promoted' marks a candidate as reviewed and approved
 // for promotion. It does NOT move any content into durable knowledge, does
 // not write markdown, sqlite, duckdb, or any other durable store, and does
-// not decide what that store will be -- that choice is reserved to the
-// operator and stays open (agent-estate#1139's own brief). A caller that
+// not publish it. memory.go provides the separate reviewed Agent Memory
+// publication path authorized by the operator. A caller that
 // reads decision='promoted' as "already promoted" has misread this package.
 //
 // # Live-corpus write gating lives in main.go, not here
@@ -114,6 +114,13 @@ func candidateExists(dbPath, id string) (bool, error) {
 // same "dry run means dry run" contract cmd/codexingest's own -apply flag
 // keeps.
 func Decide(dbPath, id, decision string, apply bool) (DecideResult, error) {
+	managed, err := ReadMemory(dbPath, id)
+	if err != nil {
+		return DecideResult{}, err
+	}
+	if managed.Revision != "" {
+		return DecideResult{}, fmt.Errorf("candidate has a memory proposal; use candidates memory accept/reject so canonical knowledge follows the decision")
+	}
 	status, err := decisionStatus(decision)
 	if err != nil {
 		return DecideResult{}, err
