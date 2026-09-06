@@ -38,6 +38,8 @@ func main() {
 			Sources: []catalogue.Source{
 				catalogue.BuildCodexSource(codex),
 				catalogue.BuildClaudeSource(claude),
+				catalogue.BuildUnresolvedPDFSource("seed-pdf-a"),
+				catalogue.BuildUnresolvedPDFSource("seed-pdf-b"),
 			},
 		}
 	}
