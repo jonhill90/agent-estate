@@ -171,11 +171,20 @@ var Registry = []Feature{
 		Evidence: "PR #1244 (merged; re-verify with `gh pr view 1244`): " +
 			"internal/candidates derives a cited, reviewable queue of CANDIDATE " +
 			"records from codex_provenance, permanently quarantined at " +
-			"status='candidate'.",
-		Caveats: "Quarantine and citation only. Promotion of a candidate into durable " +
-			"knowledge -- or discarding one -- is a separate, later, reviewed act that " +
-			"this package deliberately does not build; nothing in it ever writes any " +
-			"status other than 'candidate'. Do not read this row as promotion working.",
+			"status='candidate'. This dispatch (agent-estate#1139) adds the review " +
+			"surface #1244 deliberately left unbuilt: `estate candidates list` " +
+			"(filters by source file and pages in ingestion order; measured " +
+			"2026-09-06 against a corpus copy: 4,360 candidates over 472 distinct " +
+			"source files), `estate candidates show <id>` (resolves the cited " +
+			"prompt through prompt_id/provenance_id on demand, never a copy), and " +
+			"`estate candidates decide <id> promote|discard`, gated exactly like " +
+			"cmd/codexingest's own -apply/-authorized-live-write/banner/SameFile " +
+			"guard shape.",
+		Caveats: "Quarantine and citation only. A promote/discard decision marks a " +
+			"candidate reviewed; it never writes status (still always 'candidate') " +
+			"and never moves anything into a durable knowledge store -- that " +
+			"storage format is reserved to Jon and remains open. Do not read this " +
+			"row as promotion (moving data into durable knowledge) working.",
 	},
 	{
 		ID:     "agents-md-progressive-disclosure",

@@ -15,6 +15,19 @@
 // "candidate inbox = ingestion quarantine; cited, then promoted or discarded
 // by review; never silent promotion").
 //
+// # The review surface (review.go, decide.go)
+//
+// This file (candidates.go) is derivation only -- it never writes anything
+// but status='candidate'. review.go adds the reviewable half this task
+// (agent-estate#1139's follow-up) builds: List and Get resolve a
+// candidate's cited prompt/provenance ON DEMAND, never by copying text into
+// a new table. decide.go adds a decision column (decision, decided_at) a
+// reviewer sets to 'promoted' or 'discarded' -- a REVIEW record, not a
+// promotion: it never moves anything into a durable knowledge store, never
+// changes status or kind, and the durable-store format itself stays a
+// decision reserved to the operator. See decide.go's own doc comment for
+// the write-gating shape (mirrors cmd/codexingest's own guard exactly).
+//
 // # Why kind is always "unclassified"
 //
 // The Codex ingest (cmd/codexingest) writes prompt-level rows only --
