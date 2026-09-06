@@ -99,6 +99,16 @@ instrument that cannot see a thing looks exactly like the thing being absent.
 | The TUI (`src/tui`): panes, seams, layout, its merge path | [docs/orientation/tui-arrival.md](docs/orientation/tui-arrival.md) |
 | Adding any script, or tempted by shell/Python | [docs/orientation/go-only.md](docs/orientation/go-only.md) |
 | A rule that used to be a CI gate | [docs/ci-rules-retired.md](docs/ci-rules-retired.md) |
+| `estate knowledge`'s index: what it queries, how it ranks, `coverage`/`contradictions`, `--private` | [docs/knowledge-system.md](docs/knowledge-system.md) |
+| Running as, or reasoning about, the Director's cron loop (`estate tick check/record/escalate`) | [docs/director-brief.md](docs/director-brief.md) and [docs/director-loop.md](docs/director-loop.md) |
+| What phase the meta-harness roadmap is in, or what to build next | [docs/phase-plan.md](docs/phase-plan.md) |
+| Whether the one-independent-review convention is worth its cost | [docs/reviewer-value.md](docs/reviewer-value.md) |
+| What a dispatched turn actually costs, per harness, and how `estate spend` reads it | [docs/spend-observation.md](docs/spend-observation.md) |
+
+`docs/product/` and `docs/tui/` (PRD/SPEC) are already routed to from `README.md` and
+`docs/orientation/tui-arrival.md` respectively — not re-listed here to avoid a third
+path to the same file. `docs/tui-arrival.md`'s own citations (`src/tui/testdata/vhs/README.md`,
+`full-nav-walk-report.md`) are likewise already reachable from there.
 
 Run `go run ./src/estate` with no arguments for the current subcommand list —
 it grows, and a list written in prose goes stale between commits.
