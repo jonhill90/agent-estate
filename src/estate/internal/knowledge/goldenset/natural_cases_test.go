@@ -14,8 +14,8 @@ func TestLoadNaturalParsesEmbeddedCases(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadNatural() error: %v", err)
 	}
-	if len(cases) != 24 {
-		t.Fatalf("len(cases) = %d, want 24 -- #1073's original twelve-case set, agent-estate#1169's nine per-file cases (nl-13..nl-21), plus agent-estate#1162's three discriminating scoping cases (nl-22..nl-24)", len(cases))
+	if len(cases) != 25 {
+		t.Fatalf("len(cases) = %d, want 25 -- #1073's original twelve-case set, agent-estate#1169's nine per-file cases (nl-13..nl-21), agent-estate#1162's three discriminating scoping cases (nl-22..nl-24), plus the AGENTS.md progressive-disclosure split's per-file case for docs/orientation/conventions.md (nl-25)", len(cases))
 	}
 }
 
