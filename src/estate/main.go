@@ -719,7 +719,7 @@ func printKnowledgeQuery(qr knowledge.QueryResult) {
 	// before any of the three shapes below. #1045's reviewer hit this
 	// blind exactly once for real: a stale index answered silently, and
 	// only manual regeneration caught it.
-	printIndexFreshness(qr.IndexGeneratedAt)
+	printIndexFreshness(qr.IndexGeneratedAt, qr.SourceStatuses)
 	printBuildCommitMismatch(qr.IndexGeneratedBy, currentBuildCommit())
 
 	switch qr.State {
@@ -1143,7 +1143,17 @@ func statFile(name, path string) indexSourceMtime {
 // cfgErr non-nil means the comparison could not run at all (source paths
 // themselves could not be resolved); every caller treats that as its own
 // finding, not a silent skip.
-func freshnessFindings(generatedAt time.Time) (stale, unknown, missing []indexSourceMtime, cfgErr error) {
+//
+// statuses is the loaded index's own SourceStatuses: findings are scoped
+// to the sources THAT index actually read. Without this scope, a machine
+// that lacks a source the index never depended on gets a false
+// "the compiled index depends on it" missing finding -- CI reproduced
+// exactly that for loops-research against a fixture index naming only
+// vault-fact and github-stars. An index that carries no source list at
+// all (older index files; SourceStatuses is omitempty) falls back to
+// checking every configured source, the pre-scope behavior, because for
+// those we genuinely cannot tell what was read.
+func freshnessFindings(generatedAt time.Time, statuses []knowledge.SourceResult) (stale, unknown, missing []indexSourceMtime, cfgErr error) {
 	cfg, err := knowledge.DefaultConfig()
 	if err != nil {
 		return nil, nil, nil, err
@@ -1151,6 +1161,19 @@ func freshnessFindings(generatedAt time.Time) (stale, unknown, missing []indexSo
 	for _, s := range indexSourceMtimes(cfg) {
 		if !s.known {
 			if s.checkable {
+				// The missing bucket alone is scoped to the index's own
+				// source list: "could not be read, though the compiled
+				// index depends on it" is only a truthful sentence when
+				// the index actually read that source. stale stays
+				// environment-wide on purpose -- a source that exists
+				// here but that the index never read means the index is
+				// behind reality, which IS a staleness fact
+				// (TestKnowledgeQueryCoverageStaleNeverPureTopLevel
+				// encodes that intent with a github-stars-only index
+				// expecting a vault stale finding).
+				if len(statuses) > 0 && !indexDependsOn(statuses, s.name) {
+					continue
+				}
 				missing = append(missing, s)
 			} else {
 				unknown = append(unknown, s)
@@ -1164,6 +1187,33 @@ func freshnessFindings(generatedAt time.Time) (stale, unknown, missing []indexSo
 	return stale, unknown, missing, nil
 }
 
+// indexDependsOn maps a freshness entry's name (indexSourceMtimes' naming:
+// agent-memory-vault, corpus-db, loops-research, github-stars) onto the
+// loaded index's own SourceStatuses naming (vault-fact, corpus-<kind>,
+// loops-research, github-stars) and reports whether that index actually
+// read the source behind the entry. The two namespaces differ because one
+// names what is statted on disk and the other names what Generate emitted;
+// this function is the single place the correspondence lives.
+func indexDependsOn(statuses []knowledge.SourceResult, mtimeName string) bool {
+	for _, s := range statuses {
+		switch mtimeName {
+		case "agent-memory-vault":
+			if s.Name == "vault-fact" {
+				return true
+			}
+		case "corpus-db":
+			if strings.HasPrefix(s.Name, "corpus-") {
+				return true
+			}
+		default:
+			if s.Name == mtimeName {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // printIndexFreshness prints the compiled index's own age, then names any
 // source freshnessFindings reports as changed since or uncheckable --
 // agent-estate#1036. It never regenerates anything; freshnessFindings'
@@ -1171,13 +1221,13 @@ func freshnessFindings(generatedAt time.Time) (stale, unknown, missing []indexSo
 // generatedAt.IsZero() means the caller has no successfully-read index to
 // report on (StateIndexMissing/StateIndexUnreadable already returned
 // before this is called), so it is a silent no-op.
-func printIndexFreshness(generatedAt time.Time) {
+func printIndexFreshness(generatedAt time.Time, statuses []knowledge.SourceResult) {
 	if generatedAt.IsZero() {
 		return
 	}
 	fmt.Printf("index built %s ago (%s)\n", formatAge(time.Since(generatedAt)), generatedAt.Format(time.RFC3339))
 
-	stale, unknown, missing, err := freshnessFindings(generatedAt)
+	stale, unknown, missing, err := freshnessFindings(generatedAt, statuses)
 	if err != nil {
 		fmt.Printf("note: could not resolve source paths to check staleness against: %s\n", err)
 		return
@@ -1227,11 +1277,11 @@ func printIndexFreshness(generatedAt time.Time) {
 // CoverageUnknownFreshness with no named source -- every source's
 // freshness is equally uncheckable when the comparison can't run at all,
 // which is at least as severe as any single source being uncheckable.
-func foldFreshnessIntoCoverage(cov knowledge.Coverage, generatedAt time.Time) knowledge.Coverage {
+func foldFreshnessIntoCoverage(cov knowledge.Coverage, generatedAt time.Time, statuses []knowledge.SourceResult) knowledge.Coverage {
 	if generatedAt.IsZero() {
 		return cov
 	}
-	stale, unknown, missing, err := freshnessFindings(generatedAt)
+	stale, unknown, missing, err := freshnessFindings(generatedAt, statuses)
 	if err != nil {
 		return cov.WithFreshnessReason(knowledge.CoverageUnknownFreshness, "",
 			"could not resolve source paths to check staleness against: "+err.Error())
@@ -1479,7 +1529,7 @@ func main() {
 			// see the same freshness finding a human reading the note
 			// sees. No-op when IndexGeneratedAt is zero (the two
 			// index-read-failure states already returned above).
-			qr.Coverage = foldFreshnessIntoCoverage(qr.Coverage, qr.IndexGeneratedAt)
+			qr.Coverage = foldFreshnessIntoCoverage(qr.Coverage, qr.IndexGeneratedAt, qr.SourceStatuses)
 			// agent-estate#1082: fold the index-vs-binary comparison in
 			// the same way -- detection, not prevention or refusal (see
 			// foldGeneratedByIntoCoverage's own doc comment).

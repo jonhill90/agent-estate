@@ -130,3 +130,32 @@ func TestKnowledgeQueryProseNamesSourceGoneLoudly(t *testing.T) {
 		t.Fatalf("prose output's SOURCE GONE banner does not name agent-memory-vault:\n%s", text)
 	}
 }
+
+// TestKnowledgeQueryJSONCoverageIgnoresSourcesTheIndexNeverRead is the CI
+// regression behind the scope parameter freshnessFindings now takes: the
+// fixture index names only vault-fact and github-stars, so a machine
+// without loops-research (every CI runner) must NOT get a source_missing
+// finding for it -- "the compiled index depends on it" was a false claim
+// there. FAILS BEFORE the scoping (CI reproduced source_missing for
+// loops-research and Coverage.State escalating to "mixed") and PASSES
+// AFTER. On a machine where loops-research exists the pre-fix code passes
+// too -- CI is the environment this test exists for.
+func TestKnowledgeQueryJSONCoverageIgnoresSourcesTheIndexNeverRead(t *testing.T) {
+	bin := buildEstateBinary(t)
+	dir := t.TempDir()
+	idx := filepath.Join(dir, "index.json")
+
+	generatedAt := time.Now().UTC().Add(1 * time.Hour)
+	writeFixtureIndexAt(t, idx, generatedAt)
+
+	vaultDir := writeVaultFixture(t, time.Now())
+	corpusPath := writeCorpusFixture(t, time.Now())
+
+	got, raw := runKnowledgeQueryJSON(t, bin, idx, vaultDir, corpusPath, "zzz_no_match_question_zzz")
+
+	for _, r := range got.Coverage.Reasons {
+		if r.Source == "loops-research" || r.Source == "corpus-db" {
+			t.Fatalf("Coverage.Reasons names %q, a source the loaded index never read (fixture names only vault-fact and github-stars): %+v\nraw: %s", r.Source, got.Coverage.Reasons, raw)
+		}
+	}
+}
