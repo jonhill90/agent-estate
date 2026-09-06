@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -32,6 +33,7 @@ import (
 	"github.com/jonhill90/agent-estate/estate/internal/isolate"
 	"github.com/jonhill90/agent-estate/estate/internal/knowledge"
 	"github.com/jonhill90/agent-estate/estate/internal/ledger"
+	"github.com/jonhill90/agent-estate/estate/internal/livepath"
 	"github.com/jonhill90/agent-estate/estate/internal/mirror"
 	"github.com/jonhill90/agent-estate/estate/internal/pressure"
 	"github.com/jonhill90/agent-estate/estate/internal/reclaim"
@@ -890,6 +892,183 @@ func knowledgeQueryExitCode(state knowledge.QueryState) int {
 	}
 }
 
+// resolveCandidatesDBPath applies the same "-db, else the live corpus"
+// default every candidates subcommand shares.
+func resolveCandidatesDBPath(dbPath string) string {
+	if dbPath != "" {
+		return dbPath
+	}
+	p, err := corpus.Path()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "estate: resolving default corpus path:", err)
+		os.Exit(2)
+	}
+	return p
+}
+
+// candidatesListErrorLine turns a List error into the reason line a
+// reviewer needs -- distinguishing "nothing to read" from "queue never
+// derived" from any other read failure, per this task's own "absence stays
+// a typed value" rule.
+func candidatesListErrorLine(err error) string {
+	switch {
+	case errors.Is(err, candidates.ErrCorpusNotFound):
+		return fmt.Sprintf("estate: %v", err)
+	case errors.Is(err, candidates.ErrCandidatesTableMissing):
+		return fmt.Sprintf("estate: %v", err)
+	default:
+		return fmt.Sprintf("estate: could not read candidate queue: %v", err)
+	}
+}
+
+func runCandidatesList(args []string) {
+	fs := flag.NewFlagSet("candidates list", flag.ExitOnError)
+	dbPath := fs.String("db", "", "path to a corpus copy or the live corpus (default: the live corpus)")
+	source := fs.String("source", "", "substring filter on codex_provenance.source_file")
+	limit := fs.Int("limit", 0, "max rows to print (default 50)")
+	offset := fs.Int("offset", 0, "rows to skip, for paging in ingestion order")
+	fs.Parse(args)
+
+	res, err := candidates.List(resolveCandidatesDBPath(*dbPath), candidates.ListFilter{
+		SourceFile: *source,
+		Limit:      *limit,
+		Offset:     *offset,
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, candidatesListErrorLine(err))
+		os.Exit(1)
+	}
+	if res.Total == 0 {
+		fmt.Println("0 candidates match this filter")
+		return
+	}
+	fmt.Printf("showing %d of %d candidates matching this filter (ingestion order)\n\n", len(res.Items), res.Total)
+	for _, c := range res.Items {
+		mark := c.Decision
+		if mark == "" {
+			mark = "undecided"
+		}
+		if c.ProvenanceGone {
+			fmt.Printf("%s  [%s]  *** PROVENANCE GONE -- codex_provenance row %s no longer resolves\n", c.ID, mark, c.ProvenanceID)
+			continue
+		}
+		fmt.Printf("%s  [%s]  %s (record %d)\n", c.ID, mark, c.SourceFile, c.RecordIndex)
+	}
+}
+
+func runCandidatesShow(args []string) {
+	fs := flag.NewFlagSet("candidates show", flag.ExitOnError)
+	dbPath := fs.String("db", "", "path to a corpus copy or the live corpus (default: the live corpus)")
+	fs.Parse(args)
+	rest := fs.Args()
+	if len(rest) != 1 {
+		fmt.Fprintln(os.Stderr, "usage: estate candidates show [-db path] <candidate-id>")
+		os.Exit(2)
+	}
+
+	d, err := candidates.Get(resolveCandidatesDBPath(*dbPath), rest[0])
+	if err != nil {
+		if errors.Is(err, candidates.ErrCandidateNotFound) {
+			fmt.Fprintln(os.Stderr, "estate:", err)
+			os.Exit(1)
+		}
+		fmt.Fprintln(os.Stderr, candidatesListErrorLine(err))
+		os.Exit(1)
+	}
+
+	fmt.Printf("id:            %s\n", d.ID)
+	fmt.Printf("decision:      %s\n", decisionOrUndecided(d.Decision))
+	if d.DecidedAt != "" {
+		fmt.Printf("decided_at:    %s\n", d.DecidedAt)
+	}
+	fmt.Printf("created_at:    %s\n", d.CreatedAt)
+	fmt.Printf("prompt_id:     %s\n", d.PromptID)
+	fmt.Printf("provenance_id: %s\n", d.ProvenanceID)
+	if d.ProvenanceGone {
+		fmt.Println("*** PROVENANCE GONE -- this candidate's codex_provenance row no longer resolves")
+	} else {
+		fmt.Printf("source_file:   %s\n", d.SourceFile)
+		fmt.Printf("record_index:  %d\n", d.RecordIndex)
+		fmt.Printf("harness:       %s\n", d.Harness)
+		fmt.Printf("session_id:    %s\n", d.SessionID)
+		fmt.Printf("content_hash:  %s\n", d.ContentHash)
+	}
+	if d.PromptGone {
+		fmt.Println("*** PROMPT GONE -- this candidate's prompts row no longer resolves")
+		return
+	}
+	fmt.Printf("\ncontext: %s\n\nprompt (resolved on demand, not stored by this package):\n%s\n", d.PromptContext, d.PromptText)
+}
+
+func decisionOrUndecided(status string) string {
+	if status == "" {
+		return "undecided"
+	}
+	return status
+}
+
+func runCandidatesDecide(args []string) {
+	fs := flag.NewFlagSet("candidates decide", flag.ExitOnError)
+	dbPath := fs.String("db", "", "path to a corpus copy or the live corpus (default: the live corpus)")
+	apply := fs.Bool("apply", false, "write the decision; default is a zero-write dry run")
+	authorizedLiveWrite := fs.Bool("authorized-live-write", false,
+		"explicit human authorization to run -apply against the live corpus. Default false, never inferable from "+
+			"any other flag or environment variable. Only takes effect when -db ALSO explicitly names the live "+
+			"path -- it never causes a default or inferred path to be treated as live-authorized.")
+	fs.Parse(args)
+	rest := fs.Args()
+	if len(rest) != 2 || (rest[1] != candidates.DecisionPromote && rest[1] != candidates.DecisionDiscard) {
+		fmt.Fprintf(os.Stderr, "usage: estate candidates decide [-db path] [-apply] [-authorized-live-write] <candidate-id> %s|%s\n",
+			candidates.DecisionPromote, candidates.DecisionDiscard)
+		os.Exit(2)
+	}
+	id, decision := rest[0], rest[1]
+	resolvedDB := resolveCandidatesDBPath(*dbPath)
+
+	// Mirrors cmd/codexingest's main.go exactly (agent-estate#1139's own
+	// brief: "copy that command's guard shape rather than inventing a
+	// second one") -- the SAME internal/livepath.RefuseLivePath call, the
+	// SAME "refuse unless -authorized-live-write AND -db explicitly names
+	// the live path" logic, the SAME banner before any write.
+	liveReason, live := livepath.RefuseLivePath(resolvedDB)
+	if live && !*authorizedLiveWrite {
+		mode := "dry-run"
+		if *apply {
+			mode = "-apply"
+		}
+		fmt.Fprintf(os.Stderr, "estate candidates decide: refusing %s against %s: %s\n", mode, resolvedDB, liveReason)
+		os.Exit(1)
+	}
+	if live && *authorizedLiveWrite && *apply {
+		fmt.Fprintln(os.Stderr, "================================================================================")
+		fmt.Fprintln(os.Stderr, "AUTHORIZED LIVE-CORPUS WRITE -- -authorized-live-write was passed explicitly")
+		fmt.Fprintf(os.Stderr, "  path:      %s\n", resolvedDB)
+		fmt.Fprintf(os.Stderr, "  reason:    %s\n", liveReason)
+		fmt.Fprintf(os.Stderr, "  candidate: %s\n", id)
+		fmt.Fprintf(os.Stderr, "  decision:  %s\n", decision)
+		fmt.Fprintln(os.Stderr, "================================================================================")
+	}
+
+	res, err := candidates.Decide(resolvedDB, id, decision, *apply)
+	if err != nil {
+		if errors.Is(err, candidates.ErrCandidateNotFound) || errors.Is(err, candidates.ErrCandidatesTableMissing) {
+			fmt.Fprintln(os.Stderr, "estate:", err)
+			os.Exit(1)
+		}
+		fmt.Fprintln(os.Stderr, "estate: recording decision:", err)
+		os.Exit(1)
+	}
+	note := "this marks reviewed-for-promotion only, it does not move anything into durable knowledge"
+	if decision == candidates.DecisionDiscard {
+		note = "this marks reviewed-and-discarded only, it does not delete or move anything"
+	}
+	if !res.Applied {
+		fmt.Printf("dry run: would record %s -> %s (pass -apply to write; %s)\n", res.ID, res.Status, note)
+		return
+	}
+	fmt.Printf("recorded %s -> %s at %s (%s)\n", res.ID, res.Status, res.DecidedAt, note)
+}
+
 // parseKnowledgeArgs splits a `knowledge query`/`knowledge get` argument
 // list into --private (agent-estate#1033's explicit, opt-in private mode),
 // --json (agent-estate#1068's structured output mode), and the remaining
@@ -1488,6 +1667,19 @@ func main() {
 		}
 
 	case "candidates":
+		if len(os.Args) > 2 && os.Args[2] == "list" {
+			runCandidatesList(os.Args[3:])
+			return
+		}
+		if len(os.Args) > 2 && os.Args[2] == "show" {
+			runCandidatesShow(os.Args[3:])
+			return
+		}
+		if len(os.Args) > 2 && os.Args[2] == "decide" {
+			runCandidatesDecide(os.Args[3:])
+			return
+		}
+
 		dbPath := ""
 		for i := 2; i < len(os.Args); i++ {
 			switch {
@@ -1497,7 +1689,7 @@ func main() {
 			case strings.HasPrefix(os.Args[i], "-db="):
 				dbPath = strings.TrimPrefix(os.Args[i], "-db=")
 			default:
-				fmt.Fprintf(os.Stderr, "estate: unrecognised argument %q for candidates -- valid: -db <path>\n", os.Args[i])
+				fmt.Fprintf(os.Stderr, "estate: unrecognised argument %q for candidates -- valid: -db <path>, or a list/show/decide subcommand\n", os.Args[i])
 				os.Exit(2)
 			}
 		}
