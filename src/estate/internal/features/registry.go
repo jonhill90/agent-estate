@@ -100,13 +100,20 @@ var Registry = []Feature{
 		ID:     "grounding-coverage-fix",
 		Name:   "Dispatch grounding coverage fix (defect A)",
 		Status: Delivered,
-		Evidence: "PR #1241 (merged, main@2a04cf8's ancestor a879206): grounding now " +
-			"injects Hard() over kind IN (parameter, directive, correction), not " +
-			"parameter alone. Re-verified 2026-09-06: sqlite3 -readonly " +
-			"~/corpus/ledger.sqlite3 \"select kind, count(*) from items where " +
-			"weight='hard' group by kind\" -> correction 173, directive 1341, " +
-			"parameter 958 (958+1341+173 = 2472, up from 958); " +
-			"src/estate/internal/corpus/corpus.go's Hard() reads all three kinds.",
+		Evidence: "PR #1241 (merged, main@2a04cf8's ancestor a879206) widened Hard() to " +
+			"kind IN (parameter, directive, correction), not parameter alone -- but that " +
+			"widening filtered weight and kind only, never status, so 'dropped' (retired) " +
+			"and 'needs_review' (unconfirmed) hard rows were still injected as law. Fixed " +
+			"in agent-estate#1139: Hard() now excludes status IN (dropped, needs_review) " +
+			"and returns what it excluded so the omission is reported, never silent " +
+			"(Grounding() renders an 'excluded as not-currently-law' line with per-status " +
+			"counts). Re-verified 2026-09-06: sqlite3 -readonly ~/corpus/ledger.sqlite3 " +
+			"\"select status, count(*) from items where weight='hard' and kind in " +
+			"('parameter','directive','correction') group by status\" -> acted 1843, " +
+			"acknowledged 299, resolved 236, open 52, dropped 32, needs_review 10 " +
+			"(total 2472); eligible-as-law count is 2472 - 32 - 10 = 2430, confirmed by " +
+			"both a direct SQL count and Hard()'s own live-corpus run. " +
+			"src/estate/internal/corpus/corpus.go's Hard() and Grounding().",
 	},
 	{
 		ID:     "disclosure-ladder-third-rung",

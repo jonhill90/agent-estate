@@ -2472,12 +2472,12 @@ func main() {
 		// The operator's parameters are law and outrank the brief. If they
 		// cannot be read we refuse: an agent working without them is exactly
 		// how a month went into a layer the corpus had already ruled out.
-		params, err := corpus.Hard()
+		params, excluded, err := corpus.Hard()
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "estate: refusing to dispatch --", err)
 			os.Exit(1)
 		}
-		grounded := corpus.Grounding(issue+" "+string(brief), params) + string(brief)
+		grounded := corpus.Grounding(issue+" "+string(brief), params, excluded) + string(brief)
 
 		// The repository root is needed twice below -- once to sweep the
 		// worktrees earlier turns left behind, once to make this turn's own
