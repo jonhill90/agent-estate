@@ -158,10 +158,53 @@ var Registry = []Feature{
 			"agent-memory-vault (re-run 2026-09-06).",
 	},
 	{
-		ID:      "agent-memory-v0",
-		Name:    "Agent Memory v0 (per-agent storage)",
-		Status:  NotStarted,
-		Caveats: "Storage format is reserved to Jon -- do not build.",
+		ID:     "agent-memory-v0",
+		Name:   "Agent Memory v0 (durable per-agent storage format)",
+		Status: NotStarted,
+		Caveats: "Storage format is reserved to Jon -- do not build. Distinct from " +
+			"agent-memory-v0-layout below (a visible directory/routing surface over " +
+			"the existing vault) and from the standing-law injection mechanism " +
+			"(agent-estate#1255, PRs #1260/#1261): that mechanism injects a small, " +
+			"human-declared set of Agent Memory facts into every dispatch preamble as " +
+			"law -- it is a retrieval/grounding feature, not a storage format, and its " +
+			"being delivered does not advance this row.",
+	},
+	{
+		ID:     "agent-memory-v0-layout",
+		Name:   "Agent Memory v0 -- visible layout and routing surface",
+		Status: Delivered,
+		Evidence: "Verified 2026-09-06 against the live vault at $AGENT_MEMORY_VAULT " +
+			"(an iCloud Obsidian vault, not tracked by git -- evidence is filesystem " +
+			"state plus a dispatched-agent run, not a PR diff): " +
+			"`agent/00 - Inbox/README.md` exists and is empty of candidates by design " +
+			"(it explains that unreviewed candidates live in the corpus's " +
+			"knowledge_candidates table, not as vault files); `agent/ROUTING.md` is 34 " +
+			"lines (re-verify: wc -l); `agent/LIFECYCLE.md` is 42 lines (re-verify: " +
+			"wc -l) and names the candidate -> accepted -> superseded -> rejected " +
+			"lifecycle plus which stages are not automated; `agent/index.md` gained " +
+			"exactly one additive pointer line at line 10 (\"New here? Start at " +
+			"ROUTING.md ...\"), otherwise unchanged (118 facts before and after, " +
+			"118 bullets in index.md, re-verify: grep -c '^- ' agent/index.md and ls " +
+			"agent/facts | wc -l), and `tools/validate_index.py` (re-verify: `cd " +
+			"agent && python3 tools/validate_index.py`) passes with 14 pre-existing " +
+			"soft frontmatter warnings and no hard violations. Fresh-agent navigation " +
+			"proof (run by the Director through a real `estate dispatch`, task naming " +
+			"no paths and not mentioning ROUTING.md): the agent discovered ROUTING.md " +
+			"and `00 - Inbox/README.md` unaided, described the layout, and located an " +
+			"accepted fact by title and path (facts/python-package-manager-uv.md), " +
+			"read-only, no writes.",
+		Caveats: "Scope limit, stated plainly: this delivers a visible, governed " +
+			"layout and routing surface only. It does not deliver candidate " +
+			"review-and-promotion as an operator workflow (see " +
+			"candidate-knowledge-inbox below, still InProgress), and it does not make " +
+			"retrieval reliable (see knowledge-query's own Caveats). Distinct from the " +
+			"standing-law injection mechanism (agent-estate#1255, PRs #1260/#1261): " +
+			"that PR pair injects one declared class of facts into the dispatch " +
+			"preamble as unconditional law -- a retrieval/grounding change, not a " +
+			"layout or lifecycle change -- and does not by itself constitute organized " +
+			"Agent Memory. Neither this row nor those PRs should be read as having " +
+			"delivered organized Agent Memory as a whole; that remains the sum of " +
+			"several still-partial rows in this ledger.",
 	},
 	{
 		ID:     "feature-completion-ledger",
@@ -191,7 +234,14 @@ var Registry = []Feature{
 			"candidate reviewed; it never writes status (still always 'candidate') " +
 			"and never moves anything into a durable knowledge store -- that " +
 			"storage format is reserved to Jon and remains open. Do not read this " +
-			"row as promotion (moving data into durable knowledge) working.",
+			"row as promotion (moving data into durable knowledge) working. Stays " +
+			"InProgress, not Delivered: the non-standing retrieval gate " +
+			"(agent-estate#1255), measured 2026-09-06 by the Director through real " +
+			"`estate dispatch` runs, scored 2 of 3 -- one of three fresh agents never " +
+			"consulted the knowledge base at all. \"Demonstrably usable by a fresh " +
+			"agent\" is not true at 2-of-3, and this row's own review surface " +
+			"(`estate candidates list/show/decide`) has not been separately gated by " +
+			"that measurement.",
 	},
 	{
 		ID:     "agents-md-progressive-disclosure",
