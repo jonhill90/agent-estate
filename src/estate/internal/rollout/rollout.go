@@ -32,10 +32,15 @@ import (
 // RawRecord is the top-level shape shared by every rollout JSONL line:
 // {"timestamp": "...", "type": "...", "payload": {...}}. Payload is left as
 // raw bytes because its shape depends entirely on Type, and this package
-// must not assume it knows every shape that will ever appear.
+// must not assume it knows every shape that will ever appear. Timestamp is
+// decoded verbatim (never parsed or reformatted here) so a caller that needs
+// it -- cmd/codexingest's CapturedAt metadata, agent-estate#1139 -- gets the
+// source's own string exactly as written; this package makes no claim about
+// its format or presence.
 type RawRecord struct {
-	Type    string          `json:"type"`
-	Payload json.RawMessage `json:"payload"`
+	Type      string          `json:"type"`
+	Timestamp string          `json:"timestamp"`
+	Payload   json.RawMessage `json:"payload"`
 }
 
 // ResponseItemPayload is response_item's payload shape. Only "message"
@@ -111,6 +116,16 @@ type Turn struct {
 	SessionID string `json:"session_id"`
 	Source    string `json:"source"` // "response_item" or "compacted"
 	Text      string `json:"-"`
+
+	// CapturedAt is the record's own top-level "timestamp" field, verbatim
+	// (never parsed, never defaulted to "now" -- see internal/provenance's
+	// own CapturedAt doc comment for why absence must stay absence). For a
+	// response_item turn this is that record's own timestamp; for a
+	// CompactedOnlyInCompacted turn it is the COMPACTED RECORD's timestamp
+	// (replacement_history entries carry no timestamp of their own), which
+	// is a coarser approximation a caller should treat as "roughly when this
+	// history was captured", not "when the operator actually typed it".
+	CapturedAt string `json:"captured_at,omitempty"`
 }
 
 // FileAnalysis is one rollout file's full parse: every aggregate
@@ -225,10 +240,11 @@ func AnalyzeFile(path string) (FileAnalysis, error) {
 					fa.Sessions[currentSession].OperatorTurns++
 				}
 				fa.Turns = append(fa.Turns, Turn{
-					LineNo:    lineNo,
-					SessionID: currentSessionID,
-					Source:    "response_item",
-					Text:      p.Content[0].Text,
+					LineNo:     lineNo,
+					SessionID:  currentSessionID,
+					Source:     "response_item",
+					Text:       p.Content[0].Text,
+					CapturedAt: rec.Timestamp,
 				})
 			}
 		case "session_meta":
@@ -272,10 +288,11 @@ func AnalyzeFile(path string) (FileAnalysis, error) {
 				} else {
 					fa.CompactedOnlyInCompacted++
 					compactedOnly = append(compactedOnly, Turn{
-						LineNo:    lineNo,
-						SessionID: currentSessionID,
-						Source:    "compacted",
-						Text:      text,
+						LineNo:     lineNo,
+						SessionID:  currentSessionID,
+						Source:     "compacted",
+						Text:       text,
+						CapturedAt: rec.Timestamp,
 					})
 				}
 			}
