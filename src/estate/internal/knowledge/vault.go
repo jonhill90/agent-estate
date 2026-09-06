@@ -31,6 +31,21 @@ type vaultFact struct {
 	Body string
 }
 
+// VaultSourceName and VaultItemSourceTag are the exact strings vaultSource
+// emits below -- SourceResult.Name (plural, the reader's own family name)
+// and every Item's Source (singular, agent-estate#1139 defect C's
+// plural/singular gap; see SourceNameMatches). Exported so a fixture or
+// test standing in for a real vault index derives these from the same
+// constants production uses instead of repeating them as literals: a
+// fixture that types its own copy of "vault-fact"/"vault-facts" cannot
+// fail when the two drift apart, which is exactly how indexDependsOn's
+// exact-match bug in main.go shipped undetected -- every fixture agreed
+// with the buggy literal instead of with vaultSource's real output.
+const (
+	VaultSourceName    = "vault-facts"
+	VaultItemSourceTag = "vault-fact"
+)
+
 // vaultSource reads every agent/facts/*.md file's own frontmatter under
 // vaultDir. A vault that cannot be listed at all (unset, missing,
 // unreadable) is one failed source, not a silently empty Items slice; a
@@ -38,7 +53,7 @@ type vaultFact struct {
 // whole source, since agent/index.md itself already tolerates unparsed
 // bullet lines (src/tui's ParseIndex).
 func vaultSource(vaultDir string) (SourceResult, []Item) {
-	res := SourceResult{Name: "vault-facts"}
+	res := SourceResult{Name: VaultSourceName}
 	if vaultDir == "" {
 		res.Reason = "$AGENT_MEMORY_VAULT is not set"
 		return res, nil
@@ -93,10 +108,10 @@ func vaultSource(vaultDir string) (SourceResult, []Item) {
 				tier2 = f.Description
 			}
 		}
-		publishable, basis := classify("vault-fact")
+		publishable, basis := classify(VaultItemSourceTag)
 		items = append(items, Item{
 			ID:             itemID(path),
-			Source:         "vault-fact",
+			Source:         VaultItemSourceTag,
 			Permalink:      path,
 			StructuralTags: structural,
 			Tier1:          truncate(tier1, 200),

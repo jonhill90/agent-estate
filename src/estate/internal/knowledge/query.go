@@ -735,18 +735,29 @@ func isCorpusKindTag(name string) bool {
 	return false
 }
 
+// SourceNameMatches reports whether a and b plausibly name the same
+// source family, tolerating a trailing "s" on either side. It exists
+// because this package's naming already disagrees on plurality for at
+// least one real source: vault.go's items carry Source "vault-fact",
+// singular, while vaultSource's own SourceResult.Name is "vault-facts",
+// plural. Every caller comparing an item/tag-derived name against a
+// SourceResult.Name must go through this one function -- a second
+// hand-rolled comparison is exactly how indexDependsOn (agent-estate#1139
+// defect C, PR #1242 post-merge review) drifted from this exact-match-only
+// case and silently stopped matching the vault in production.
+func SourceNameMatches(a, b string) bool {
+	return strings.TrimSuffix(strings.ToLower(a), "s") == strings.TrimSuffix(strings.ToLower(b), "s")
+}
+
 // failedSourceForTag looks for a source in sources that is both !OK
 // (failed to build, so it produced zero items and could never have made
 // this tag "known" no matter what it names) and whose Name plausibly
 // names the same source as tag's "source:<name>" suffix. The comparison
-// tolerates a trailing "s" on either side because addSourceTag derives
-// the tag from each ITEM's own Source string, while SourceResult.Name is
-// each READER's own family name, and those two vocabularies already
-// disagree on plurality for at least one real source (vault.go's items
-// carry Source "vault-fact", singular, while vaultSource's own
-// SourceResult.Name is "vault-facts", plural) -- not a bug this function
-// is fixing, just the naming gap it has to see through to tell "this
-// source failed" from "no such source" for that exact tag.
+// tolerates a trailing "s" on either side (via SourceNameMatches) because
+// addSourceTag derives the tag from each ITEM's own Source string, while
+// SourceResult.Name is each READER's own family name, and those two
+// vocabularies already disagree on plurality for at least one real source
+// (see SourceNameMatches).
 func failedSourceForTag(tag string, sources []SourceResult) (SourceResult, bool) {
 	const prefix = "source:"
 	if !strings.HasPrefix(tag, prefix) {
@@ -757,7 +768,7 @@ func failedSourceForTag(tag string, sources []SourceResult) (SourceResult, bool)
 		if s.OK {
 			continue
 		}
-		if strings.TrimSuffix(strings.ToLower(s.Name), "s") == name {
+		if SourceNameMatches(s.Name, name) {
 			return s, true
 		}
 		if s.Name == "corpus-items" && isCorpusKindTag(name) {
