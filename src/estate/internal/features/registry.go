@@ -125,14 +125,30 @@ var Registry = []Feature{
 		ID:     "query-absence-reporting",
 		Name:   "Query-time absence reporting (defect C)",
 		Status: Delivered,
-		Evidence: "PR #1242 (main@2a04cf8): a source that read successfully at index-" +
-			"build time but is unreachable at query time now reports its own " +
-			"CoverageSourceMissing state with a \"*** SOURCE GONE ***\" banner in " +
-			"prose, and names the missing source in --json coverage, instead of " +
-			"folding silently into 'unknown'. Re-verify: go test ./src/estate -run " +
+		Evidence: "PR #1242 (main@2a04cf8) shipped CoverageSourceMissing and the " +
+			"\"*** SOURCE GONE ***\" banner, but a post-merge review (comment " +
+			"5556852578) found indexDependsOn in main.go matched the vault by the " +
+			"literal \"vault-fact\" while vaultSource()'s real SourceResult.Name is " +
+			"\"vault-facts\" (plural) -- the vault, the PR's own headline source, " +
+			"silently never triggered the banner in production; loops-research and " +
+			"corpus-db were unaffected. The fixtures behind " +
+			"TestKnowledgeQueryProseNamesSourceGoneLoudly and " +
+			"TestKnowledgeQueryJSONCoverageNamesMissingSource had independently " +
+			"typed \"vault-fact\" as SourceResult.Name too, so they agreed with the " +
+			"bug instead of catching it. Follow-up (this dispatch, agent-estate#1139): " +
+			"indexDependsOn now shares knowledge.SourceNameMatches (the same " +
+			"trailing-\"s\"-tolerant comparison failedSourceForTag already used) " +
+			"instead of a second literal; vaultSource's Name/Source strings are now " +
+			"exported constants (knowledge.VaultSourceName, " +
+			"knowledge.VaultItemSourceTag) and the test fixtures derive from them " +
+			"instead of retyping the literals. Re-verify: go test ./src/estate -run " +
 			"'TestKnowledgeQueryProseNamesSourceGoneLoudly|" +
 			"TestKnowledgeQueryJSONCoverageNamesMissingSource' -v (both PASS, re-run " +
-			"2026-09-06).",
+			"2026-09-06, now against a fixture Name of \"vault-facts\" matching " +
+			"production) and a real built binary: build a vault fixture, `estate " +
+			"knowledge` to index it, move the vault directory away, `estate " +
+			"knowledge query <question>` -- the SOURCE GONE banner names " +
+			"agent-memory-vault (re-run 2026-09-06).",
 	},
 	{
 		ID:      "agent-memory-v0",

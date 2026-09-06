@@ -1189,16 +1189,28 @@ func freshnessFindings(generatedAt time.Time, statuses []knowledge.SourceResult)
 
 // indexDependsOn maps a freshness entry's name (indexSourceMtimes' naming:
 // agent-memory-vault, corpus-db, loops-research, github-stars) onto the
-// loaded index's own SourceStatuses naming (vault-fact, corpus-<kind>,
+// loaded index's own SourceStatuses naming (vault-facts, corpus-<kind>,
 // loops-research, github-stars) and reports whether that index actually
 // read the source behind the entry. The two namespaces differ because one
 // names what is statted on disk and the other names what Generate emitted;
 // this function is the single place the correspondence lives.
+//
+// The "agent-memory-vault" case goes through knowledge.SourceNameMatches
+// rather than an exact string, because the real production
+// SourceResult.Name for the vault is "vault-facts" (plural, set in
+// vaultSource()), not "vault-fact" -- a literal "vault-fact" here matched
+// nothing real and silently dropped the vault out of the missing bucket
+// in production while every fixture-backed test (which hand-wrote
+// "vault-fact" into its fixtures) stayed green (agent-estate#1139 defect
+// C, PR #1242 post-merge review comment 5556852578). Sharing
+// SourceNameMatches with failedSourceForTag's own tolerant comparison
+// means there is exactly one place that knows about this plurality gap,
+// not two literals that can drift apart again.
 func indexDependsOn(statuses []knowledge.SourceResult, mtimeName string) bool {
 	for _, s := range statuses {
 		switch mtimeName {
 		case "agent-memory-vault":
-			if s.Name == "vault-fact" {
+			if knowledge.SourceNameMatches(s.Name, "vault-fact") {
 				return true
 			}
 		case "corpus-db":

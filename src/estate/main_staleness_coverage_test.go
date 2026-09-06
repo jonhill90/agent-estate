@@ -100,16 +100,28 @@ func runKnowledgeQueryJSON(t *testing.T, bin, idx, vaultDir, corpusPath, questio
 // writeFixtureIndexAt writes a minimal compiled index at idx with the
 // given GeneratedAt and no matching content -- these tests exercise
 // Coverage, not ranking, so the question deliberately matches nothing.
+//
+// The vault entries below are deliberately NOT hand-typed literals: they
+// come from knowledge.VaultSourceName / knowledge.VaultItemSourceTag, the
+// same constants vaultSource() itself emits. Before this fixture went
+// through those constants it hardcoded "vault-fact" as SourceResult.Name
+// (singular) -- a value production never emits (the real Name is
+// "vault-facts", plural) -- so every test built on this fixture agreed
+// with indexDependsOn's buggy literal comparison instead of catching it
+// (agent-estate#1139 defect C, PR #1242 post-merge review comment
+// 5556852578). Deriving from the real constants means a future rename
+// that breaks the pair again breaks this fixture at compile time, not
+// silently.
 func writeFixtureIndexAt(t *testing.T, idx string, generatedAt time.Time) {
 	t.Helper()
 	res := knowledge.Result{
 		GeneratedAt: generatedAt,
 		Sources: []knowledge.SourceResult{
 			{Name: "github-stars", OK: true, Count: 1},
-			{Name: "vault-fact", OK: true, Count: 1},
+			{Name: knowledge.VaultSourceName, OK: true, Count: 1},
 		},
 		Items: []knowledge.Item{
-			{ID: "it-0000000000001080", Source: "vault-fact", Permalink: "/tmp/unrelated.md",
+			{ID: "it-0000000000001080", Source: knowledge.VaultItemSourceTag, Permalink: "/tmp/unrelated.md",
 				Tier1: "an item unrelated to any question this file asks", Publishable: true,
 				PublishBasis: "vault fact, always public"},
 		},
