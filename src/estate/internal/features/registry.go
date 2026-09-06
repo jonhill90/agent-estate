@@ -88,40 +88,87 @@ var Registry = []Feature{
 		Name:     "estate knowledge query (cited, capped, progressive disclosure)",
 		Status:   Delivered,
 		Evidence: "issue #1019 work",
-		Caveats: "Three measured defects, dated 2026-09-05: " +
-			"(A) grounding injects only kind=parameter weight=hard -- 958 rows, excluding " +
-			"1,341 hard directives + 173 hard corrections, 39% coverage (the injecting query " +
-			"is Hard() in src/estate/internal/corpus/corpus.go; re-verify counts: " +
-			"sqlite3 -readonly ~/corpus/ledger.sqlite3 \"select kind, count(*) from items " +
-			"where weight='hard' group by kind\"); " +
-			"(B) disclosure ladder has two real rungs, not three (tier3 median 38-148 chars -- " +
-			"measured 2026-09-05, carried from the dispatching session; not cheaply " +
-			"re-measurable, carried rather than re-verified); " +
-			"(C) query-time absence is silent (vanished source => changed results, exit 0, " +
-			"no report)",
+		Caveats: "Defects A, B and C (dated 2026-09-05) are fixed as of PRs #1241 and " +
+			"#1242 -- see the grounding-coverage-fix, disclosure-ladder-third-rung and " +
+			"query-absence-reporting rows below for evidence and re-verification commands. " +
+			"Remaining known gaps: github-stars and repo-docs keep tier2-only depth by " +
+			"documented design (no deeper local material for github-stars; out of scope " +
+			"for repo-docs) -- only vault-fact, loops-research and corpus-* items gained a " +
+			"genuine tier3.",
 	},
 	{
-		ID:      "grounding-coverage-fix",
-		Name:    "Dispatch grounding coverage fix (defect A)",
-		Status:  NotStarted,
-		Caveats: "See knowledge-query's Caveats, defect (A).",
+		ID:     "grounding-coverage-fix",
+		Name:   "Dispatch grounding coverage fix (defect A)",
+		Status: Delivered,
+		Evidence: "PR #1241 (merged, main@2a04cf8's ancestor a879206): grounding now " +
+			"injects Hard() over kind IN (parameter, directive, correction), not " +
+			"parameter alone. Re-verified 2026-09-06: sqlite3 -readonly " +
+			"~/corpus/ledger.sqlite3 \"select kind, count(*) from items where " +
+			"weight='hard' group by kind\" -> correction 173, directive 1341, " +
+			"parameter 958 (958+1341+173 = 2472, up from 958); " +
+			"src/estate/internal/corpus/corpus.go's Hard() reads all three kinds.",
 	},
 	{
-		ID:      "disclosure-ladder-third-rung",
-		Name:    "Disclosure ladder third rung (defect B)",
-		Status:  NotStarted,
-		Caveats: "See knowledge-query's Caveats, defect (B).",
+		ID:     "disclosure-ladder-third-rung",
+		Name:   "Disclosure ladder third rung (defect B)",
+		Status: Delivered,
+		Evidence: "PR #1242 (main@2a04cf8): tier3 for vault-fact and loops-research is " +
+			"now the entire source file verbatim, and corpus-* tier3 is the item's " +
+			"untruncated body plus weight/status/resolved_to metadata -- genuinely " +
+			"deeper than tier2, not shorter. Re-verify: go test ./src/estate/... -run " +
+			"'TestVaultSourceTier3DeepensPastTier2|TestLoopsSourceTier3DeepensPastTier2|" +
+			"TestCorpusSourceTier3DeepensPastTier2' -v (all three PASS, re-run " +
+			"2026-09-06). github-stars and repo-docs are documented exceptions left at " +
+			"tier2 (see knowledge-query's Caveats).",
 	},
 	{
-		ID:      "query-absence-reporting",
-		Name:    "Query-time absence reporting (defect C)",
-		Status:  NotStarted,
-		Caveats: "See knowledge-query's Caveats, defect (C).",
+		ID:     "query-absence-reporting",
+		Name:   "Query-time absence reporting (defect C)",
+		Status: Delivered,
+		Evidence: "PR #1242 (main@2a04cf8): a source that read successfully at index-" +
+			"build time but is unreachable at query time now reports its own " +
+			"CoverageSourceMissing state with a \"*** SOURCE GONE ***\" banner in " +
+			"prose, and names the missing source in --json coverage, instead of " +
+			"folding silently into 'unknown'. Re-verify: go test ./src/estate -run " +
+			"'TestKnowledgeQueryProseNamesSourceGoneLoudly|" +
+			"TestKnowledgeQueryJSONCoverageNamesMissingSource' -v (both PASS, re-run " +
+			"2026-09-06).",
 	},
 	{
 		ID:      "agent-memory-v0",
 		Name:    "Agent Memory v0 (per-agent storage)",
 		Status:  NotStarted,
 		Caveats: "Storage format is reserved to Jon -- do not build.",
+	},
+	{
+		ID:     "feature-completion-ledger",
+		Name:   "Feature-completion ledger (this instrument)",
+		Status: Delivered,
+		Evidence: "PR #1243 (merged; re-verify with `gh pr view 1243`): introduces this " +
+			"package and the `estate features` command, hand-maintained, never " +
+			"inferred from git/gh activity.",
+	},
+	{
+		ID:     "candidate-knowledge-inbox",
+		Name:   "Candidate knowledge inbox (quarantined, from Codex provenance)",
+		Status: InProgress,
+		Evidence: "PR #1244 (merged; re-verify with `gh pr view 1244`): " +
+			"internal/candidates derives a cited, reviewable queue of CANDIDATE " +
+			"records from codex_provenance, permanently quarantined at " +
+			"status='candidate'.",
+		Caveats: "Quarantine and citation only. Promotion of a candidate into durable " +
+			"knowledge -- or discarding one -- is a separate, later, reviewed act that " +
+			"this package deliberately does not build; nothing in it ever writes any " +
+			"status other than 'candidate'. Do not read this row as promotion working.",
+	},
+	{
+		ID:     "agents-md-progressive-disclosure",
+		Name:   "AGENTS.md progressive-disclosure split",
+		Status: Delivered,
+		Evidence: "PR #1245 (merged; re-verify with `gh pr view 1245`): AGENTS.md shrinks " +
+			"631 -> 111 lines; detailed sections move verbatim to docs/orientation/" +
+			"{daemon,invariants,conventions,tui-arrival,go-only}.md. Re-verify: " +
+			"wc -l AGENTS.md (111, measured 2026-09-06) and " +
+			"git show 5f0caab^:AGENTS.md | wc -l (631).",
 	},
 }
