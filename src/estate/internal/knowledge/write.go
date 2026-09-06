@@ -9,6 +9,7 @@ import (
 	"sync"
 	"unicode"
 
+	"github.com/jonhill90/agent-estate/estate/internal/catalogue"
 	"github.com/jonhill90/agent-estate/estate/internal/isolate"
 )
 
@@ -37,6 +38,12 @@ func DefaultConfig() (Config, error) {
 		cfg.RepoRoot = p
 	} else if wd, err := os.Getwd(); err == nil {
 		cfg.RepoRoot = findRepoRoot(wd) // "" if no AGENTS.md found above wd
+	}
+	// catalogue.DefaultRegisterDir already applies the same
+	// env-override-then-fixed-default resolution this function uses for
+	// every other field; reused directly rather than duplicated here.
+	if reg, regErr := catalogue.DefaultRegisterDir(); regErr == nil {
+		cfg.CataloguePath = reg
 	}
 	return cfg, nil
 }
@@ -371,6 +378,7 @@ const AllowSharedWriteEnv = "ESTATE_KNOWLEDGE_ALLOW_SHARED_WRITE"
 //     does -- now requires this acknowledgement too. See main.go's
 //     `--allow-shared-write` flag (or setting AllowSharedWriteEnv directly)
 //     for how an operator opts back in.
+//
 // agent-estate#1191 (hole 2): shared, above, is true not only for the
 // fallback path but also for an explicit ESTATE_KNOWLEDGE_INDEX override
 // that names that same file by any spelling samePath resolves -- otherwise

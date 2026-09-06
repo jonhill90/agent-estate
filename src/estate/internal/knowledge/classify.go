@@ -3,7 +3,7 @@ package knowledge
 // classify decides Item.Publishable and Item.PublishBasis for source, at
 // compile time (agent-estate#1028) -- see Item's own doc comment for the
 // "UNCLASSIFIED MEANS PRIVATE" rule this function exists to enforce. Every
-// item any of the five sources produce is run through this call before it
+// item any of the six sources produce is run through this call before it
 // enters a Result; no source constructs an Item's Publishable field
 // itself.
 //
@@ -71,6 +71,8 @@ func classify(source string) (publishable bool, basis string) {
 		return false, "loops-research: sourced from jonhill90/Loops-Research, a private GitHub repository (verified 2026-09-04) -- explicit classification, not a fallthrough (agent-estate#1059)"
 	case "vault-fact":
 		return false, "vault-fact: the operator's own memory vault, never public -- explicit classification, not a fallthrough (agent-estate#1059)"
+	case "catalogue-source":
+		return false, "catalogue-source: the private source register may name locators under the operator's own home directory or catalogue an unpublished source -- explicit classification, not a fallthrough (agent-estate#1139 lane B)"
 	default:
 		return false, source + ": source defaults to private -- no per-item publishability marker exists yet (agent-estate#1028)"
 	}

@@ -214,10 +214,11 @@ func TestClassifyLoopsResearchAndVaultFactAreExplicitNotDefault(t *testing.T) {
 // Revert both and the test passes again.
 func TestClassifyPublishableSetIsExactlyGithubStarsAndRepoDocs(t *testing.T) {
 	wantPublic := map[string]bool{
-		"github-stars":   true,
-		"repo-docs":      true,
-		"loops-research": false,
-		"vault-fact":     false,
+		"github-stars":     true,
+		"repo-docs":        true,
+		"loops-research":   false,
+		"vault-fact":       false,
+		"catalogue-source": false,
 	}
 
 	for _, source := range classifiedSourceNames(t) {
