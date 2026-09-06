@@ -1079,6 +1079,9 @@ func Query(indexPath, question string, limit int, includePrivate bool) QueryResu
 	var all []scored
 	withheldPrivate := 0
 	for _, it := range res.Items {
+		if !currentMemoryItem(it) {
+			continue
+		}
 		if !itemHasAllTags(it, tagFilters) {
 			continue
 		}
@@ -1266,6 +1269,9 @@ func Get(indexPath, id string, includePrivate bool) (item Item, ok bool, reason 
 	}
 	for _, it := range res.Items {
 		if it.ID == id {
+			if !currentMemoryItem(it) {
+				return Item{}, false, "managed fact changed or was rejected; regenerate the knowledge index"
+			}
 			if !includePrivate && !it.Publishable {
 				return Item{}, false, fmt.Sprintf("item %s is private (%s) -- rerun with --private to fetch it", id, it.PublishBasis)
 			}

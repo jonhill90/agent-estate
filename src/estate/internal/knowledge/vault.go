@@ -18,11 +18,13 @@ import (
 // opens it). Both are correct for what each package is; they are not the
 // same constraint.
 type vaultFact struct {
-	Slug        string
-	Type        string
-	Title       string
-	Description string
-	Created     string
+	MemoryStatus   string
+	MemoryRevision string
+	Slug           string
+	Type           string
+	Title          string
+	Description    string
+	Created        string
 	// Body is everything after the closing frontmatter fence, trimmed --
 	// the fact's own full text (agent-estate#1027). Compiled into
 	// Item.Tier2 so it enters Query's searchable text (searchableText in
@@ -81,6 +83,9 @@ func vaultSource(vaultDir string) (SourceResult, []Item) {
 			continue // frontmatter this package cannot parse -- skipped, not fabricated
 		}
 		f.Slug = slug
+		if f.MemoryStatus != "" && f.MemoryStatus != "promoted" {
+			continue
+		}
 		title := f.Title
 		if title == "" {
 			title = slug
@@ -178,6 +183,10 @@ func parseVaultFact(data string) (vaultFact, error) {
 		key = strings.TrimSpace(key)
 		val = strings.TrimSpace(strings.Trim(strings.TrimSpace(val), `"`))
 		switch key {
+		case "memory_status":
+			f.MemoryStatus = val
+		case "memory_revision":
+			f.MemoryRevision = val
 		case "type":
 			f.Type = val
 		case "title":
@@ -202,4 +211,24 @@ func parseVaultFact(data string) (vaultFact, error) {
 	}
 	f.Body = strings.TrimSpace(body.String())
 	return f, nil
+}
+
+// Full vault snapshots are checked against canonical bytes, including snapshots
+// compiled before a fact was adopted into the reviewed workflow. This prevents
+// an old, unmarked snapshot from resurrecting a subsequently withdrawn fact.
+// Older pointer-only disclosure formats remain permissive.
+func currentMemoryItem(it Item) bool {
+	if it.Source != VaultItemSourceTag {
+		return true
+	}
+	cached, err := parseVaultFact(it.Tier3)
+	if err != nil {
+		return true
+	}
+	raw, err := os.ReadFile(it.Permalink)
+	if err != nil {
+		return false
+	}
+	live, err := parseVaultFact(string(raw))
+	return err == nil && (live.MemoryStatus == "" || live.MemoryStatus == "promoted") && live.MemoryRevision == cached.MemoryRevision && it.Tier3 == vaultTier3(it.Permalink, string(raw))
 }
