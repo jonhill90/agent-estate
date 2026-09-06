@@ -23,6 +23,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jonhill90/agent-estate/estate/internal/candidates"
 	"github.com/jonhill90/agent-estate/estate/internal/corpus"
 	"github.com/jonhill90/agent-estate/estate/internal/dispatchid"
 	"github.com/jonhill90/agent-estate/estate/internal/gate"
@@ -554,6 +555,10 @@ func usage() {
                                         checks green, author != reviewer, reviewer
                                         actually completed a review, and posted APPROVE
   estate corpus-audit [n]               hard parameters least supported by your words
+  estate candidates [-db path]          derive quarantined, cited CANDIDATE knowledge
+                                         rows (status=candidate, kind=unclassified) from
+                                         codex_provenance -- never promotes, never
+                                         classifies; -db defaults to internal/corpus.Path()
   estate knowledge                      regenerate the compiled, read-only index over
                                          GitHub stars, the memory vault, the corpus and
                                          Loops-Research -- derived, never authoritative;
@@ -1355,6 +1360,36 @@ func main() {
 		if suspect > 0 {
 			os.Exit(1)
 		}
+
+	case "candidates":
+		dbPath := ""
+		for i := 2; i < len(os.Args); i++ {
+			switch {
+			case os.Args[i] == "-db" && i+1 < len(os.Args):
+				dbPath = os.Args[i+1]
+				i++
+			case strings.HasPrefix(os.Args[i], "-db="):
+				dbPath = strings.TrimPrefix(os.Args[i], "-db=")
+			default:
+				fmt.Fprintf(os.Stderr, "estate: unrecognised argument %q for candidates -- valid: -db <path>\n", os.Args[i])
+				os.Exit(2)
+			}
+		}
+		if dbPath == "" {
+			p, err := corpus.Path()
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "estate: resolving default corpus path:", err)
+				os.Exit(2)
+			}
+			dbPath = p
+		}
+		res, err := candidates.Derive(dbPath)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "estate:", err)
+			os.Exit(1)
+		}
+		fmt.Printf("%d codex_provenance rows; %d knowledge_candidates total (%d new this run), all status=candidate kind=unclassified\n",
+			res.ProvenanceRows, res.TotalCandidates, res.Inserted)
 
 	case "knowledge":
 		if len(os.Args) > 2 && os.Args[2] == "query" {
