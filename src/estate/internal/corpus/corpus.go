@@ -10,6 +10,17 @@
 // kinds -- 958 parameters, 1,341 directives, 173 corrections -- knowledge,
 // not scratch space the harness reuses.
 //
+// This file is not the only source of law a dispatch preamble carries.
+// agent-estate#1254 pins the rule that Agent Memory (the vault) and
+// derived knowledge content must never enter this preamble by accident --
+// no heuristic, no tag, no score ever promotes a fact from evidence to
+// law. agent-estate#1255 defines the sole deliberate exception: a tiny,
+// human-declared, hard-capped set of facts (see standinglaw.go's
+// StandingLawSet) that Grounding renders in its own clearly-labelled
+// section, separate from the corpus rows below. Accidental promotion
+// stays forbidden; declared membership in that capped set is the only
+// path onto it.
+//
 // Reading is done through the sqlite3 CLI rather than a driver so this stays
 // dependency-free. Note the URI form: the bare -readonly flag has been
 // observed failing with "unable to open database file (14)" under WAL
@@ -174,7 +185,18 @@ func Hard() ([]Param, []Excluded, error) {
 // 'dropped' or 'needs_review' (agent-estate#1139 requirement 4) -- stated
 // here with the same "shown -- N left out" discipline as the byte cap below,
 // so a lane can never mistake "filtered out" for "no law on this exists".
-func Grounding(task string, ps []Param, excluded []Excluded) string {
+//
+// standing is agent-estate#1255's own addition: the resolved output of
+// StandingLaw(), rendered in its own section, clearly labelled as Agent
+// Memory in origin so a reader can never mistake it for corpus law. This is
+// the one deliberate exception to agent-estate#1254 ("published Agent
+// Memory / derived knowledge must never enter Hard()/Grounding() as law
+// by accident") -- see standinglaw.go's package doc for the reconciliation.
+// Every member of standing is already vetted by StandingLaw() (declared,
+// capped, hash-checked); Grounding renders whatever it is given here
+// unconditionally, the same way it renders ps unconditionally -- it does
+// not re-derive or re-filter membership.
+func Grounding(task string, ps []Param, excluded []Excluded, standing []StandingLawEntry) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# OPERATOR PARAMETERS -- THESE ARE LAW\n\n")
 	fmt.Fprintf(&b, "There are %d binding parameters, directives, and corrections on record. They\n"+
@@ -190,6 +212,19 @@ func Grounding(task string, ps []Param, excluded []Excluded) string {
 		}
 		fmt.Fprintf(&b, "%d additional row(s) were excluded as not-currently-law (%s) -- retired or\n"+
 			"unconfirmed decisions are not law and are not counted above.\n\n", total, strings.Join(parts, ", "))
+	}
+
+	if len(standing) > 0 {
+		fmt.Fprintf(&b, "## Standing law -- Agent Memory (%d of %d declared, all shown -- capped, never truncated)\n\n"+
+			"These are separately-sourced law: explicitly declared members of\n"+
+			"corpus.StandingLawSet, not corpus rows. They bind every task"+
+			" unconditionally,\nnot only tasks whose wording happens to match them.\n\n",
+			len(standing), len(standing))
+		for _, s := range standing {
+			fmt.Fprintf(&b, "- [agent-memory] **%s** — %s\n", s.Slug, s.Body)
+			fmt.Fprintf(&b, "  (why this is standing law: %s)\n", s.Reason)
+		}
+		b.WriteString("\n")
 	}
 
 	words := strings.Fields(strings.ToLower(task))

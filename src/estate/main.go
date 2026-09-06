@@ -2712,7 +2712,19 @@ func main() {
 			fmt.Fprintln(os.Stderr, "estate: refusing to dispatch --", err)
 			os.Exit(1)
 		}
-		grounded := corpus.Grounding(issue+" "+string(brief), params, excluded) + string(brief)
+		// Standing law (agent-estate#1255) is resolved and refused on
+		// exactly the same terms as corpus law above: a declared member
+		// that cannot be read, has drifted, or exceeds the caps in
+		// internal/corpus/standinglaw.go stops the dispatch rather than
+		// silently proceeding one binding constraint short. See that
+		// file's package doc for why this is the sole deliberate
+		// exception to agent-estate#1254.
+		standing, err := corpus.StandingLaw(os.Getenv("AGENT_MEMORY_VAULT"))
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "estate: refusing to dispatch --", err)
+			os.Exit(1)
+		}
+		grounded := corpus.Grounding(issue+" "+string(brief), params, excluded, standing) + string(brief)
 
 		// The repository root is needed twice below -- once to sweep the
 		// worktrees earlier turns left behind, once to make this turn's own
