@@ -13,7 +13,7 @@ import (
 // "no constraints found".
 func TestUnreadableCorpusIsAnError(t *testing.T) {
 	t.Setenv("ESTATE_CORPUS", filepath.Join(t.TempDir(), "absent.sqlite3"))
-	if _, err := Hard(); err == nil {
+	if _, _, err := Hard(); err == nil {
 		t.Fatal("Hard() returned nil error for an absent corpus; it must refuse")
 	}
 }
@@ -24,7 +24,7 @@ func TestEmptyCorpusIsRefusedNotTreatedAsNoConstraints(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("ESTATE_CORPUS", p)
-	if _, err := Hard(); err == nil {
+	if _, _, err := Hard(); err == nil {
 		t.Fatal("Hard() accepted an unusable corpus; zero parameters must never read as 'no rules'")
 	}
 }
@@ -37,7 +37,7 @@ func TestGroundingStatesFullCountAndDemandsIndependentCheck(t *testing.T) {
 		{Key: "tooling=cli_first", Body: "Prefer CLI-backed workflows."},
 		{Key: "lang=go", Body: "The app is written in Go, never shell or python."},
 	}
-	g := Grounding("rewrite the shell dispatcher", ps)
+	g := Grounding("rewrite the shell dispatcher", ps, nil)
 	if !strings.Contains(g, "2 binding parameters") {
 		t.Fatalf("grounding does not state the true total:\n%s", g)
 	}
@@ -53,7 +53,7 @@ func TestGroundingStatesFullCountAndDemandsIndependentCheck(t *testing.T) {
 }
 
 func TestGroundingStillDemandsCheckWhenNothingMatches(t *testing.T) {
-	g := Grounding("zzzz", []Param{{Key: "k", Body: "b"}})
+	g := Grounding("zzzz", []Param{{Key: "k", Body: "b"}}, nil)
 	if !strings.Contains(g, "Query the\ncorpus yourself") {
 		t.Fatal("grounding dropped the independent-check requirement when no parameter matched")
 	}
@@ -76,8 +76,12 @@ func buildFixtureCorpus(t *testing.T, ddl string) string {
 
 // hardRowsDDL is agent-estate#1139's own fixture: one hard row of each of the
 // three kinds Hard() must return, plus a hard 'thought' (must stay excluded --
-// only parameter/directive/correction are ever law) and a retracted
-// 'directive' (must stay excluded regardless of kind).
+// only parameter/directive/correction are ever law), a retracted 'directive'
+// (must stay excluded regardless of kind), a 'dropped' directive and a
+// 'needs_review' correction (both must stay excluded by status even though
+// weight='hard' and kind qualifies -- this is defect A: Hard() filtered
+// weight and kind but never status, injecting retired and unconfirmed
+// records as law).
 const hardRowsDDL = `
 CREATE TABLE items (
   id INTEGER PRIMARY KEY,
@@ -96,7 +100,9 @@ INSERT INTO items (id, prompt_id, kind, body, weight, status, resolved_to) VALUE
   (2, 102, 'directive', 'The app is Go, never shell or python.', 'hard', 'acted', NULL),
   (3, 103, 'correction', 'Not X after all -- Y is correct.', 'hard', 'acted', NULL),
   (4, 104, 'thought', 'A stray musing, must not appear even though hard.', 'hard', 'open', NULL),
-  (5, 105, 'directive', 'A retracted directive, must not appear.', 'retracted', 'acted', NULL);
+  (5, 105, 'directive', 'A retracted directive, must not appear.', 'retracted', 'acted', NULL),
+  (6, 106, 'directive', 'A dropped directive, must not appear as law.', 'hard', 'dropped', NULL),
+  (7, 107, 'correction', 'A needs_review correction, must not appear as law.', 'hard', 'needs_review', NULL);
 `
 
 // TestHardReturnsAllThreeKindsExcludingThoughtAndRetracted is
@@ -108,7 +114,7 @@ func TestHardReturnsAllThreeKindsExcludingThoughtAndRetracted(t *testing.T) {
 	path := buildFixtureCorpus(t, hardRowsDDL)
 	t.Setenv("ESTATE_CORPUS", path)
 
-	ps, err := Hard()
+	ps, _, err := Hard()
 	if err != nil {
 		t.Fatalf("Hard() returned an error against a valid fixture: %v", err)
 	}
@@ -132,6 +138,48 @@ func TestHardReturnsAllThreeKindsExcludingThoughtAndRetracted(t *testing.T) {
 	}
 }
 
+// TestHardExcludesDroppedAndNeedsReviewButReportsThem is agent-estate#1139's
+// defect-A regression test. Hard() filtered weight and kind but never
+// status, so a 'dropped' (retired) or 'needs_review' (unconfirmed) hard row
+// was injected into every dispatch preamble under a heading that says these
+// are law. Both must now be excluded from ps, AND the exclusion must be
+// visible -- reported back with a count per status -- rather than silently
+// dropped, per requirement 4 ("an agent must be able to tell 'there is no
+// law about X' from 'the law about X was filtered out'").
+func TestHardExcludesDroppedAndNeedsReviewButReportsThem(t *testing.T) {
+	path := buildFixtureCorpus(t, hardRowsDDL)
+	t.Setenv("ESTATE_CORPUS", path)
+
+	ps, excluded, err := Hard()
+	if err != nil {
+		t.Fatalf("Hard() returned an error against a valid fixture: %v", err)
+	}
+	for _, p := range ps {
+		if strings.Contains(p.Body, "dropped directive") {
+			t.Fatalf("Hard() included a 'dropped' row as law: %+v", p)
+		}
+		if strings.Contains(p.Body, "needs_review correction") {
+			t.Fatalf("Hard() included a 'needs_review' row as law: %+v", p)
+		}
+	}
+
+	counts := map[string]int{}
+	for _, e := range excluded {
+		counts[e.Status] = e.Count
+	}
+	if counts["dropped"] != 1 {
+		t.Fatalf("Hard() excluded-report says %d dropped rows, want 1: %+v", counts["dropped"], excluded)
+	}
+	if counts["needs_review"] != 1 {
+		t.Fatalf("Hard() excluded-report says %d needs_review rows, want 1: %+v", counts["needs_review"], excluded)
+	}
+
+	g := Grounding("some task", ps, excluded)
+	if !strings.Contains(g, "dropped: 1") || !strings.Contains(g, "needs_review: 1") {
+		t.Fatalf("Grounding() does not surface the exclusion counts to the agent:\n%s", g)
+	}
+}
+
 // TestHardCountMatchesLiveCorpusAcrossAllThreeKinds is §4(a)'s live-corpus
 // check: the widened read must return exactly as many rows as a direct count
 // of weight='hard' rows across all three kinds. Skips when no live corpus is
@@ -152,15 +200,19 @@ func TestHardCountMatchesLiveCorpusAcrossAllThreeKinds(t *testing.T) {
 	}
 	want := strings.TrimSpace(string(out))
 
-	ps, err := Hard()
+	ps, excluded, err := Hard()
 	if err != nil {
 		t.Fatalf("Hard() against the live corpus: %v", err)
 	}
-	got := fmt.Sprintf("%d", len(ps))
-	if got != want {
-		t.Fatalf("Hard() returned %s rows, live sqlite count says %s -- the two must agree", got, want)
+	excludedTotal := 0
+	for _, e := range excluded {
+		excludedTotal += e.Count
 	}
-	t.Logf("Hard() count == live sqlite count == %s hard rows (parameter+directive+correction)", want)
+	got := fmt.Sprintf("%d", len(ps)+excludedTotal)
+	if got != want {
+		t.Fatalf("Hard() returned %d live + %d excluded = %s rows, live sqlite count says %s -- the two must agree", len(ps), excludedTotal, got, want)
+	}
+	t.Logf("Hard() live+excluded count == live sqlite count == %s hard rows (parameter+directive+correction)", want)
 }
 
 // TestGroundingRenderedPreambleStaysUnderByteCeiling is §4(c)'s first half:
@@ -168,7 +220,7 @@ func TestHardCountMatchesLiveCorpusAcrossAllThreeKinds(t *testing.T) {
 // must stay under maxPreambleBytes.
 func TestGroundingRenderedPreambleStaysUnderByteCeiling(t *testing.T) {
 	ps := manyMatchingParams(2500, 2000)
-	g := Grounding("widen dispatch grounding to include directives and corrections", ps)
+	g := Grounding("widen dispatch grounding to include directives and corrections", ps, nil)
 	if len(g) > maxPreambleBytes {
 		t.Fatalf("rendered preamble is %d bytes, want <= %d (maxPreambleBytes)", len(g), maxPreambleBytes)
 	}
@@ -188,13 +240,13 @@ func TestGroundingCapIsLoadBearing(t *testing.T) {
 	ps := manyMatchingParams(2500, 2000)
 	task := "widen dispatch grounding to include directives and corrections"
 
-	enabled := len(Grounding(task, ps))
+	enabled := len(Grounding(task, ps, nil))
 
 	origBytes, origItem, origMatches := maxPreambleBytes, maxItemBytes, maxMatches
 	maxPreambleBytes = 100 * 1024 * 1024
 	maxItemBytes = 100 * 1024
 	maxMatches = len(ps)
-	disabled := len(Grounding(task, ps))
+	disabled := len(Grounding(task, ps, nil))
 	maxPreambleBytes, maxItemBytes, maxMatches = origBytes, origItem, origMatches
 
 	if enabled > origBytes {

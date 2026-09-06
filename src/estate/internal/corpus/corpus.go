@@ -61,8 +61,31 @@ const sep = "\x1f"
 // thoughts).
 const hardKinds = `'parameter','directive','correction'`
 
-// Hard returns every binding parameter, directive, and correction. An error
-// here must stop a dispatch, never be downgraded to "none found".
+// excludedStatuses are the item statuses that must never be presented as law
+// even at weight='hard': 'dropped' is a retired decision, 'needs_review' is
+// one nobody has confirmed yet (agent-estate#1139). This is the opposite
+// direction of the kind/weight filters above -- those are inclusion lists,
+// this is an exclusion list, because 'acted', 'acknowledged', 'resolved' and
+// 'open' are all still binding and must stay included by default.
+var excludedStatuses = map[string]bool{
+	"dropped":      true,
+	"needs_review": true,
+}
+
+// Excluded reports how many hard rows were left out of a Hard() result
+// because their status marks them as not-currently-law, broken down by
+// status so an agent can tell "there is no law about X" from "the law about
+// X was filtered out" (agent-estate#1139 requirement 4: absence is a typed
+// value here, never silent).
+type Excluded struct {
+	Status string
+	Count  int
+}
+
+// Hard returns every binding parameter, directive, and correction whose
+// status hasn't retired or unconfirmed it, plus a report of what was left
+// out and why. An error here must stop a dispatch, never be downgraded to
+// "none found".
 //
 // This reads items directly rather than through the live_parameters view --
 // that view is parameter-only (`kind = 'parameter'`) and widening it would
@@ -71,44 +94,65 @@ const hardKinds = `'parameter','directive','correction'`
 // (weight is a three-value CHECK: hard/preference/retracted, so a retracted
 // row is never also hard) -- it is kept explicit anyway so a future
 // re-weighting of the enum can't silently let retracted law back in.
-func Hard() ([]Param, error) {
+//
+// status is intentionally NOT filtered in SQL: it is filtered in Go below,
+// after the raw row count is known, so the zero-rows refusal (a corpus that
+// cannot be read must never read as "no constraints") is judged against what
+// the database actually returned, not against what survived the status
+// filter. A hard pool where every row happens to be dropped/needs_review is
+// a real, reportable state, not blindness.
+func Hard() ([]Param, []Excluded, error) {
 	p, err := dbPath()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if _, err := os.Stat(p); err != nil {
-		return nil, fmt.Errorf("corpus unreadable at %s: %w", p, err)
+		return nil, nil, fmt.Errorf("corpus unreadable at %s: %w", p, err)
 	}
-	q := `select coalesce(resolved_to,''), kind, replace(replace(body, char(10), ' '), char(13), ' ')
+	q := `select coalesce(resolved_to,''), kind, status, replace(replace(body, char(10), ' '), char(13), ' ')
 	      from items where weight='hard' and weight != 'retracted' and kind in (` + hardKinds + `)`
 	cmd := exec.Command("sqlite3", "-separator", sep, "file:"+p+"?mode=ro&immutable=1", q)
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("corpus query failed: %w", err)
+		return nil, nil, fmt.Errorf("corpus query failed: %w", err)
 	}
 	var ps []Param
+	excludedCount := map[string]int{}
+	rows := 0
 	s := bufio.NewScanner(strings.NewReader(string(out)))
 	s.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 	for s.Scan() {
-		parts := strings.SplitN(s.Text(), sep, 3)
-		if len(parts) != 3 {
+		parts := strings.SplitN(s.Text(), sep, 4)
+		if len(parts) != 4 {
+			continue
+		}
+		rows++
+		status := strings.TrimSpace(parts[2])
+		if excludedStatuses[status] {
+			excludedCount[status]++
 			continue
 		}
 		ps = append(ps, Param{
 			Key:  strings.TrimSpace(parts[0]),
 			Kind: strings.TrimSpace(parts[1]),
-			Body: strings.TrimSpace(parts[2]),
+			Body: strings.TrimSpace(parts[3]),
 		})
 	}
 	if err := s.Err(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	if len(ps) == 0 {
+	if rows == 0 {
 		// An empty result from a database that exists is blindness, not an
 		// operator with no opinions. Refuse.
-		return nil, fmt.Errorf("corpus returned zero hard rows -- refusing to treat that as 'no constraints'")
+		return nil, nil, fmt.Errorf("corpus returned zero hard rows -- refusing to treat that as 'no constraints'")
 	}
-	return ps, nil
+	var excluded []Excluded
+	for _, status := range []string{"dropped", "needs_review"} {
+		if n := excludedCount[status]; n > 0 {
+			excluded = append(excluded, Excluded{Status: status, Count: n})
+		}
+	}
+	return ps, excluded, nil
 }
 
 // Grounding renders the preamble prepended to every brief. Rows whose text
@@ -125,12 +169,28 @@ func Hard() ([]Param, error) {
 // at live-corpus scale (~236KB raw across directives+corrections alone) an
 // uncapped render is a dump truck, not a preamble. A "N of M shown" line
 // always states what was left out.
-func Grounding(task string, ps []Param) string {
+//
+// excluded reports the hard rows that were left out of ps for being
+// 'dropped' or 'needs_review' (agent-estate#1139 requirement 4) -- stated
+// here with the same "shown -- N left out" discipline as the byte cap below,
+// so a lane can never mistake "filtered out" for "no law on this exists".
+func Grounding(task string, ps []Param, excluded []Excluded) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# OPERATOR PARAMETERS -- THESE ARE LAW\n\n")
 	fmt.Fprintf(&b, "There are %d binding parameters, directives, and corrections on record. They\n"+
 		"are not advice, and they outrank this brief. If this task extends something\n"+
 		"one of them rules out, STOP and say so rather than doing it well.\n\n", len(ps))
+
+	if len(excluded) > 0 {
+		total := 0
+		parts := make([]string, len(excluded))
+		for i, e := range excluded {
+			total += e.Count
+			parts[i] = fmt.Sprintf("%s: %d", e.Status, e.Count)
+		}
+		fmt.Fprintf(&b, "%d additional row(s) were excluded as not-currently-law (%s) -- retired or\n"+
+			"unconfirmed decisions are not law and are not counted above.\n\n", total, strings.Join(parts, ", "))
+	}
 
 	words := strings.Fields(strings.ToLower(task))
 	var hits []Param
