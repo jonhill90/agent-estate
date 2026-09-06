@@ -321,6 +321,29 @@ const (
 	// would overclaim a staleness that was never actually observed. See
 	// CoverageStale.
 	CoverageUnknownFreshness CoverageState = "unknown"
+	// CoverageSourceMissing means a source the compiled index depends on
+	// was successfully read when the index was built (its SourceStatuses
+	// entry is OK) but, at QUERY time, could not be found or read at all --
+	// agent-estate#1139 defect C. Deliberately distinct from
+	// CoverageUnknownFreshness: "no local file ever exists to check"
+	// (github-stars, standingly) and "a local file existed, was read at
+	// build time, and is now unreadable" are different claims, and #1139's
+	// own measurement found the prior code collapsed both into the same
+	// "unknown" reason, indistinguishable except by reading Detail's free
+	// text -- a caller branching on Coverage.State alone (the documented,
+	// machine-readable surface) saw no difference between routine,
+	// standing noise and a source that had actually vanished. This is the
+	// louder claim of the two: a positively observed absence, not merely an
+	// uncheckable one, so it must never render with the same visibility as
+	// CoverageUnknownFreshness. It is also distinct from CoverageDegraded:
+	// degraded is a BUILD-time failure already recorded in SourceStatuses;
+	// this is a QUERY-time finding about a source that was fine when the
+	// index was built and has since become unreachable, which SourceStatuses
+	// (a build-time snapshot) has no way to know about on its own. Like
+	// CoverageStale/CoverageUnknownFreshness, not set by this package
+	// directly -- a caller with filesystem access folds it in via
+	// WithFreshnessReason.
+	CoverageSourceMissing CoverageState = "source_missing"
 	// CoverageBinaryMismatch means the compiled index's own GeneratedBy
 	// commit and the CURRENTLY RUNNING checkout's commit were both
 	// positively resolved and differ -- agent-estate#1082. Deliberately

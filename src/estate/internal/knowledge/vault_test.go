@@ -118,3 +118,34 @@ func TestVaultSourceSkipsOneUnparseableFactWithoutFailingTheSource(t *testing.T)
 		t.Fatalf("items = %+v", items)
 	}
 }
+
+// TestVaultSourceTier3DeepensPastTier2 is agent-estate#1139 defect B's own
+// acceptance test: Tier3 must carry MORE material than Tier2, not less --
+// the old behaviour ("open <path> for the full fact") was shorter than
+// Tier2's own full body and carried no new information a reader following
+// the ladder didn't already have. FAILS against the reverted pointer-
+// string behaviour (Tier3 shorter than Tier2, no frontmatter marker
+// present) and PASSES against vaultTier3's full-file rendering.
+func TestVaultSourceTier3DeepensPastTier2(t *testing.T) {
+	dir := t.TempDir()
+	writeVaultFact(t, dir, "one", fixtureVaultFact)
+
+	_, items := vaultSource(dir)
+	if len(items) != 1 {
+		t.Fatalf("got %d items, want 1", len(items))
+	}
+	it := items[0]
+	if len(it.Tier3) <= len(it.Tier2) {
+		t.Fatalf("Tier3 (%d bytes) is not longer than Tier2 (%d bytes) -- tier3=%q tier2=%q",
+			len(it.Tier3), len(it.Tier2), it.Tier3, it.Tier2)
+	}
+	// The frontmatter fence is only ever present in the raw file, never in
+	// Tier2 (body only) -- its presence in Tier3 is the signal that Tier3
+	// carries the WHOLE record, not merely a repeat of the body.
+	if !strings.Contains(it.Tier3, "---") {
+		t.Errorf("Tier3 = %q, want it to carry the fact's own frontmatter fence (the full file, not just the body)", it.Tier3)
+	}
+	if !strings.Contains(it.Tier3, "xenoglyph") {
+		t.Errorf("Tier3 = %q, want it to still carry the body's own distinctive word", it.Tier3)
+	}
+}

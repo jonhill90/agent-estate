@@ -126,7 +126,7 @@ func TestCorpusSourceIncludesHardThoughtOnly(t *testing.T) {
 func TestBulkExcludedThoughtRowIsAPredicateNotACount(t *testing.T) {
 	cases := []struct {
 		weight, status string
-		wantExcluded    bool
+		wantExcluded   bool
 	}{
 		{"hard", "open", false},
 		{"hard", "acknowledged", false},
@@ -252,8 +252,13 @@ func TestCorpusSourceCarriesPromptID(t *testing.T) {
 		"11": "111",
 	}
 	for _, it := range items {
-		id := strings.TrimPrefix(it.Tier3, "the corpus's own item ")
-		id = id[:strings.Index(id, " (kind=")]
+		// Extracted from Permalink ("corpus:item:<id>"), not Tier3 --
+		// agent-estate#1139 deepened Tier3 into real content (see
+		// corpusTier3 in corpus.go), so it is no longer a stable,
+		// parseable pointer string this test can key off of. Permalink's
+		// shape is untouched by that change and is corpusSource's own
+		// stated identifier for the row either way.
+		id := strings.TrimPrefix(it.Permalink, "corpus:item:")
 		wantPromptID, ok := want[id]
 		if !ok {
 			t.Fatalf("unexpected item id %q in corpusSource() output", id)
@@ -300,4 +305,44 @@ func TestCorpusSourceEmptyPathIsHonest(t *testing.T) {
 	if res.OK {
 		t.Fatal("corpusSource(\"\", ...) reported OK with no path configured")
 	}
+}
+
+// TestCorpusSourceTier3DeepensPastTier2 is agent-estate#1139 defect B's own
+// acceptance test: the old pointer ("the corpus's own item <id> (kind=X)
+// in <path> -- not this file") carried the item's own id/kind/path but no
+// more material than Tier2's own truncate(body, 400) -- for a body under
+// 400 characters (every fixture row here) Tier3 was actually the SAME
+// length class as Tier2 while adding zero of the item's own weight/status/
+// resolved_to metadata. Tier3 must now carry that metadata plus the FULL
+// (untruncated) body, still never touching prompts.text_raw/text_clean
+// (corpusTier3 only ever reads the items table's own body column). FAILS
+// against the reverted pointer-string behaviour (no weight=/status=
+// marker, no untruncated body) and PASSES against corpusTier3's rendering.
+func TestCorpusSourceTier3DeepensPastTier2(t *testing.T) {
+	path := buildFixtureCorpus(t, fixtureDDL)
+	_, items := corpusSource(path)
+
+	for _, it := range items {
+		if it.Source != "corpus-parameter" {
+			continue
+		}
+		if !strings.Contains(it.Permalink, "corpus:item:1") {
+			continue // the "tooling=cli_first" parameter row (id=1)
+		}
+		if len(it.Tier3) <= len(it.Tier2) {
+			t.Fatalf("Tier3 (%d bytes) is not longer than Tier2 (%d bytes) -- tier3=%q tier2=%q",
+				len(it.Tier3), len(it.Tier2), it.Tier3, it.Tier2)
+		}
+		if !strings.Contains(it.Tier3, "weight=hard") {
+			t.Errorf("Tier3 = %q, want it to carry the item's own weight=hard metadata", it.Tier3)
+		}
+		if !strings.Contains(it.Tier3, "resolved_to=tooling=cli_first") {
+			t.Errorf("Tier3 = %q, want it to carry the item's own resolved_to metadata", it.Tier3)
+		}
+		if !strings.Contains(it.Tier3, "Prefer CLI-backed workflows.") {
+			t.Errorf("Tier3 = %q, want it to carry the item's own full body", it.Tier3)
+		}
+		return
+	}
+	t.Fatal("did not find the tooling=cli_first corpus-parameter item")
 }

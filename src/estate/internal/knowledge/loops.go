@@ -53,7 +53,7 @@ func loopsSource(dir string) (SourceResult, []Item) {
 			StructuralTags: []string{"loops-research"},
 			Tier1:          truncate(heading, 200),
 			Tier2:          truncate(para, 400),
-			Tier3:          "open " + path + " for the full note",
+			Tier3:          loopsTier3(path, string(data)),
 			Publishable:    publishable,
 			PublishBasis:   basis,
 		})
@@ -62,6 +62,24 @@ func loopsSource(dir string) (SourceResult, []Item) {
 	res.OK = true
 	res.Count = len(items)
 	return res, items
+}
+
+// loopsTier3 is the third disclosure rung for a Loops-Research note --
+// agent-estate#1139 defect B: the pointer this used to return ("open <path>
+// for the full note") was a pointer, not a deeper level of disclosure.
+// Tier2 is only the note's first paragraph, truncated to 400 characters
+// (loopsSource above); Tier3 is the ENTIRE note file verbatim, so a reader
+// who follows the ladder actually gets more material at each step -- the
+// full text a truncated single paragraph could never carry. raw is the
+// note's own bytes, read once by the caller (loopsSource) and passed in
+// here rather than re-read, so this can never diverge from what Tier1/Tier2
+// were actually built from.
+func loopsTier3(path, raw string) string {
+	body := strings.TrimSpace(raw)
+	if body == "" {
+		return "(note file at " + path + " is empty)"
+	}
+	return body + "\n\n(full note file: " + path + ")"
 }
 
 // firstHeadingAndParagraph pulls a file's first `# ` heading and the

@@ -3,6 +3,7 @@ package knowledge
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -49,5 +50,33 @@ func TestLoopsSourceIgnoresNonMarkdownFiles(t *testing.T) {
 	res, _ := loopsSource(dir)
 	if res.Count != 1 {
 		t.Fatalf("loopsSource() count = %d, want 1 (non-.md file must be ignored)", res.Count)
+	}
+}
+
+// TestLoopsSourceTier3DeepensPastTier2 is agent-estate#1139 defect B's own
+// acceptance test: Tier2 is only the note's first paragraph, truncated to
+// 400 characters -- Tier3 must carry the note's ENTIRE content, materially
+// more than that one paragraph, not a bare "open <path>" pointer. FAILS
+// against the reverted pointer-string behaviour (Tier3 shorter than Tier2)
+// and PASSES against loopsTier3's full-file rendering.
+func TestLoopsSourceTier3DeepensPastTier2(t *testing.T) {
+	dir := t.TempDir()
+	content := "# 00 -- The landscape\n\n## Timeline\n\nSome real paragraph text here.\n\n" +
+		"## Second section\n\nA second paragraph with more distinctive material: quixotropic.\n"
+	if err := os.WriteFile(filepath.Join(dir, "00-landscape.md"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, items := loopsSource(dir)
+	if len(items) != 1 {
+		t.Fatalf("got %d items, want 1", len(items))
+	}
+	it := items[0]
+	if len(it.Tier3) <= len(it.Tier2) {
+		t.Fatalf("Tier3 (%d bytes) is not longer than Tier2 (%d bytes) -- tier3=%q tier2=%q",
+			len(it.Tier3), len(it.Tier2), it.Tier3, it.Tier2)
+	}
+	if !strings.Contains(it.Tier3, "quixotropic") {
+		t.Errorf("Tier3 = %q, want it to carry the second section's own text -- Tier2 only carries the first paragraph", it.Tier3)
 	}
 }

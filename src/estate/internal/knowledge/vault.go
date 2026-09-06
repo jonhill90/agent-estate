@@ -101,7 +101,7 @@ func vaultSource(vaultDir string) (SourceResult, []Item) {
 			StructuralTags: structural,
 			Tier1:          truncate(tier1, 200),
 			Tier2:          tier2,
-			Tier3:          "open " + path + " for the full fact",
+			Tier3:          vaultTier3(path, string(data)),
 			Publishable:    publishable,
 			PublishBasis:   basis,
 		})
@@ -110,6 +110,29 @@ func vaultSource(vaultDir string) (SourceResult, []Item) {
 	res.OK = true
 	res.Count = len(items)
 	return res, items
+}
+
+// vaultTier3 is the third disclosure rung for a vault fact -- agent-
+// estate#1139 defect B: the pointer this used to return ("open <path> for
+// the full fact") was a pointer, not a deeper level of disclosure, and
+// Tier2 already carries the fact's own full body (agent-estate#1027), so a
+// reader who followed the ladder from Tier2 to Tier3 got LESS material,
+// not more. raw is the fact file's own bytes, read once by the caller
+// (vaultSource) and passed in here rather than re-read, so this can never
+// diverge from what Tier1/Tier2 were actually built from. Tier3 is the
+// entire file verbatim -- frontmatter fence and all -- which is strictly a
+// superset of Tier2 (body only): a reader gets the fact's own structural
+// fields (type/title/description/created) alongside the body, not just the
+// body again. Nothing here is authoritative over the file itself (see this
+// package's own "never authoritative" doc comment) -- path is still named,
+// for a reader who wants to open and edit the real file rather than trust
+// this copy.
+func vaultTier3(path, raw string) string {
+	body := strings.TrimSpace(raw)
+	if body == "" {
+		return "(fact file at " + path + " is empty)"
+	}
+	return body + "\n\n(full fact file: " + path + ")"
 }
 
 // parseVaultFact is a minimal frontmatter scan over the same six-field
