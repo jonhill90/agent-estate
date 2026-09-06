@@ -21,23 +21,26 @@
 // package's problem to paper over -- a missing root is recorded as
 // HealthMissing with the exact path looked for, never silently omitted.
 //
-// A fourth-and-fifth pair of records cover a task handed to a prior turn:
-// add catalogue records for "both seed PDFs". That prior turn could not
-// resolve which two PDFs were meant -- see PDFSearchLocations below for
-// every place this package's own re-run of that search looked, all of it
-// empty. Per agent-estate#1139's own instruction ("if you cannot identify
-// the two PDFs, record them as Missing with the paths you searched and a
-// detail saying the referent is unresolved"), BuildUnresolvedPDFSource
-// records exactly that: an honest HealthMissing row, never an invented
-// filename and never a substituted, unrelated PDF standing in for the real
-// one.
+// A third-and-fourth pair of records cover the two seed PDF artifacts named
+// in the Agent Memory vault fact "seed-knowledge-source-artifacts" (created
+// 2026-09-05T03:04:27Z). A prior turn recorded these two as HealthMissing
+// with "referent unresolved" (agent-estate#1236) after a search that covered
+// this repository, its issues, the corpus, and the filesystem excluding
+// ~/Downloads -- but never queried the memory vault, which is precisely
+// where the operator had already declared the two artifacts. That search is
+// now known to have been incomplete, not the referent genuinely absent: see
+// SeedPDFDescriptors below, each entry sourced directly from that fact, with
+// this package's own from-scratch SHA-256 re-verification recorded in
+// BuildSeedPDFSource's Detail rather than trusted from the fact alone.
 package catalogue
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/jonhill90/agent-estate/estate/internal/rollout"
@@ -102,18 +105,13 @@ type Source struct {
 	Name string `json:"name"`
 	// Harness is the harness this source belongs to -- "claude" or "codex".
 	Harness string `json:"harness"`
-	// RootPath is the directory this source's units live under. Empty string
-	// means one of two different things depending on Health, and a consumer
-	// must not conflate them: for BuildCodexSource/BuildClaudeSource it means
-	// "could not resolve a home directory to build the default root" (see
-	// Detail) -- a real path was attempted and failed to resolve. For
-	// BuildUnresolvedPDFSource specifically, "" means something stronger:
-	// no candidate path was ever identified to attempt in the first place --
-	// there is no filesystem location this source could name even
-	// speculatively. Do not read an empty RootPath as "root is the
-	// filesystem root" (Go's os package never returns "" for that) and do
-	// not treat it as interchangeable across sources; Detail always carries
-	// the fuller explanation for the specific row.
+	// RootPath is the directory (for Codex/Claude) or file (for a seed PDF)
+	// this source's units live under. An empty string means
+	// BuildCodexSource/BuildClaudeSource could not resolve a home directory
+	// to build the default root (see Detail) -- a real path was attempted
+	// and failed to resolve. Do not read an empty RootPath as "root is the
+	// filesystem root" (Go's os package never returns "" for that); Detail
+	// always carries the fuller explanation for the specific row.
 	RootPath string `json:"root_path"`
 	// IdentityFields names which fields, together, identify one unit of this
 	// source -- e.g. which JSON field(s) a caller must key on to tell two
@@ -138,6 +136,52 @@ type Source struct {
 	// says what was counted, so a reader does not have to infer it from
 	// IdentityFields alone.
 	Detail string `json:"detail"`
+
+	// The six fields below were added for the two seed-PDF artifact records
+	// (agent-estate#1139 K2, per the Agent Memory fact
+	// "seed-knowledge-source-artifacts": "K2 must catalogue their authority,
+	// scope, sensitivity/access policy, freshness, owner, and rebuild path").
+	// They are not meaningful for every source -- Codex rollouts and Claude
+	// transcripts are live, first-party, unpublished operator data with no
+	// external "rebuild" concept -- but every source populates them rather
+	// than leaving them blank with no explanation, for the same reason a
+	// Populated source always states its Detail: a reader should never have
+	// to guess whether an empty field means "not applicable" or "forgotten."
+
+	// Authority states who or what stands behind this source's contents and
+	// how much that backing is worth -- e.g. "first-party, harness-written"
+	// versus "unreviewed preprint, not accepted truth."
+	Authority string `json:"authority"`
+	// Scope states what this source does and does not cover -- one document,
+	// one machine's own session history, etc.
+	Scope string `json:"scope"`
+	// SensitivityAccess states this source's access policy -- who may read
+	// it, whether it may be published, and any handling constraint (e.g.
+	// "never enters git").
+	SensitivityAccess string `json:"sensitivity_access"`
+	// Freshness states how current this source's content is and how that
+	// currency was established -- a fixed publication date for a static
+	// document, "live and append-only" for a growing transcript log.
+	Freshness string `json:"freshness"`
+	// Owner names who is accountable for this source existing and being
+	// accurate -- almost always the operator, stated explicitly rather than
+	// left implicit.
+	Owner string `json:"owner"`
+	// RebuildPath states how this source's content could be reacquired if
+	// lost -- a canonical URL to re-fetch, or "cannot be rebuilt" when there
+	// is no such path.
+	RebuildPath string `json:"rebuild_path"`
+
+	// RecordedSHA256 and ObservedSHA256 are populated only for a source
+	// verified against a previously recorded identity hash (currently: the
+	// two seed PDFs, checked against the SHA-256 values in the Agent Memory
+	// fact named above). Both empty means no hash verification applies to
+	// this source. RecordedSHA256 is the hash the fact claims; ObservedSHA256
+	// is what BuildSeedPDFSource actually computed from the live file this
+	// run. A mismatch between the two is a finding to report in Detail, not
+	// something this package silently corrects -- see BuildSeedPDFSource.
+	RecordedSHA256 string `json:"recorded_sha256,omitempty"`
+	ObservedSHA256 string `json:"observed_sha256,omitempty"`
 }
 
 // Catalogue is every known source, as of the moment Build ran.
@@ -166,125 +210,187 @@ func DefaultClaudeRoot() string {
 }
 
 // Build returns the catalogue seeded with the estate's two real
-// conversation-transcript sources plus the two seed-PDF records
-// agent-estate#1139 asked for, each read once, read-only, right now.
+// conversation-transcript sources plus the two seed-PDF artifact records
+// (agent-estate#1139 K2), each read once, read-only, right now.
 func Build() Catalogue {
-	return Catalogue{
-		Sources: []Source{
-			BuildCodexSource(DefaultCodexRoot()),
-			BuildClaudeSource(DefaultClaudeRoot()),
-			BuildUnresolvedPDFSource("seed-pdf-a"),
-			BuildUnresolvedPDFSource("seed-pdf-b"),
-		},
+	sources := []Source{
+		BuildCodexSource(DefaultCodexRoot()),
+		BuildClaudeSource(DefaultClaudeRoot()),
 	}
+	for _, d := range SeedPDFDescriptors {
+		sources = append(sources, BuildSeedPDFSource(d))
+	}
+	return Catalogue{Sources: sources}
 }
 
-// PDFSearchLocations is every place this package's own search for "both seed
-// PDFs" (agent-estate#1139) looked before concluding the referent is
-// unresolved. Kept as an exported var, not restated prose, so a later
-// re-search starts from the same list rather than a paraphrase of it, and so
-// BuildUnresolvedPDFSource's Detail and any test asserting on it read from
-// one source of truth.
-//
-// Every location below was re-checked directly by this package's own author
-// (not merely inherited from a prior turn's report): git history search
-// across every commit reachable from any ref in this repository, this
-// repository's docs/ and AGENTS.md, GitHub issue search, a corpus query
-// (bounded by the corpus's 2026-09-02T19:09:37Z ingestion watermark -- an
-// empty result there is not conclusive for anything said after that
-// instant), ~/source/repos/Personal/Loops-Research's full git history (PDFs
-// appear there only as external arxiv/openai.com URLs cited in prose, never
-// as a local file), and a filesystem sweep for *.pdf under
-// ~/source (excluding ~/Documents, ~/Downloads and ~/Desktop, which are the
-// operator's personal documents and out of bounds for this task). That sweep
-// found PDFs, but none referenced anywhere as a "seed PDF" for this project:
-// personal career CVs (out of bounds on content, not merely unrelated),
-// two malformed-fixture PDFs belonging to an unrelated powerpoint skill's
-// test suite, and two more (a theme showcase, a browser preview) belonging
-// to unrelated repos. None was substituted in as a guess.
-var PDFSearchLocations = []string{
-	"git log --all -p | grep -i '.pdf' (this repository, every commit reachable from any ref)",
-	"git rev-list --all | xargs git grep -i '.pdf' (this repository, same scope, tree contents rather than diffs)",
-	"docs/ and AGENTS.md in this repository (grep -rniE '\\.pdf|seed pdf|pdfs')",
-	"gh issue list --search pdf (this repository's GitHub issues)",
-	"~/corpus/ledger.sqlite3: items where body like '%pdf%' (0 rows; ingestion watermark 2026-09-02T19:09:37Z bounds this, does not settle it)",
-	"~/source/repos/Personal/Loops-Research (full git history; .md only, PDFs referenced only as external URLs, never a local file)",
-	"~/source/**/*.pdf, excluding ~/Documents, ~/Downloads and ~/Desktop (filesystem sweep; found PDFs, none referenced as a seed PDF for this project)",
+// SeedPDFDescriptor is the fixed, hand-verified provenance for one seed PDF
+// artifact, sourced from the Agent Memory vault fact
+// "seed-knowledge-source-artifacts" (created 2026-09-05T03:04:27Z, source:
+// Jon, 2026-09-05). This package does not discover these paths or hashes on
+// its own -- an operator-declared fact is the authority for which two files
+// these are, and BuildSeedPDFSource's job is to verify that fact against the
+// live file, never to (re)search for it.
+type SeedPDFDescriptor struct {
+	// Name is a short, stable identifier for this record.
+	Name string
+	// Path is the file's location under the operator's own $HOME/Downloads.
+	// Reads of this path are metadata-only (os.Stat, and a full-file read
+	// used solely to compute a SHA-256 and count structural page markers --
+	// see BuildSeedPDFSource) -- never a text or content extraction.
+	Path string
+	// RecordedSHA256 is the hash the memory fact claims for this file.
+	RecordedSHA256 string
+	// IdentityFields names which fields, together, identify this artifact.
+	IdentityFields    []string
+	Authority         string
+	Scope             string
+	SensitivityAccess string
+	Freshness         string
+	Owner             string
+	RebuildPath       string
 }
 
-// PDFSearchObservedAt is the recorded instant the search described by
-// PDFSearchLocations was actually performed, not a live measurement: it is
-// the commit timestamp of ba36184f122c85cb517c56b4bf23a17e187c3dfd (2026-09-
-// 05T20:03:18-04:00, normalized to UTC below), the turn that ran that search
-// and wrote PDFSearchLocations down. A commit timestamp is the nearest
-// verifiable proxy this package has for "when" -- there is no other durable
-// record of the instant the search itself ran.
-//
-// This value is a RECORDED HISTORICAL OBSERVATION, held here as a constant,
-// never a live time.Now(). BuildUnresolvedPDFSource performs no read, no
-// search, and no I/O of any kind at call time -- PDFSearchLocations
-// describes an investigation a prior turn ran manually, once, outside this
-// code path. Stamping call-time wall-clock time would silently re-assert
-// "just searched, found nothing" on every future call, when in fact nothing
-// is searched at read time at all; the actual search happened once, here.
-// This constant does not advance on its own. It stays exactly this
-// timestamp until someone actually re-runs the search in PDFSearchLocations
-// and updates both of these together -- do not bump it without also
-// re-running the search.
-var PDFSearchObservedAt = time.Date(2026, 9, 6, 0, 3, 18, 0, time.UTC)
+// SeedPDFDescriptors is the two artifacts named in the memory fact. Both
+// entries carry Jon's own status caveat from that fact: these are
+// candidates awaiting Estate review, not accepted truth, and one is an
+// unreviewed preprint -- this catalogue must not imply otherwise.
+var SeedPDFDescriptors = []SeedPDFDescriptor{
+	{
+		Name:           "seed-pdf-continual-harness",
+		Path:           filepath.Join(os.Getenv("HOME"), "Downloads", "2605.09998v1.pdf"),
+		RecordedSHA256: "50f60996b0d962cdbf01f5b6a262ccd68b149c8b67cc2594218453717ea0c45e",
+		IdentityFields: []string{"arXiv id (2605.09998v1)", "sha256"},
+		Authority: "arXiv preprint arXiv:2605.09998v1, \"Continual Harness: Online Adaptation for " +
+			"Self-Improving Foundation Agents\". Unreviewed and not peer-reviewed -- per the memory " +
+			"fact's own status caveat, treat as a preprint candidate, not accepted truth, until an " +
+			"Estate review distils any of its claims.",
+		Scope: "One paper, 28 pages. A candidate seed source for later evidence-based distillation " +
+			"into skills or decisions -- not itself knowledge until that review happens.",
+		SensitivityAccess: "Local file under the operator's own $HOME/Downloads; never committed to git " +
+			"and never had its content read by this catalogue -- only size, mtime, SHA-256 and a " +
+			"structural page-object count were read. Readable by the operator's own account only " +
+			"(standard $HOME file permissions); no separate access policy has been set.",
+		Freshness: "Preprint version v1 (arXiv versions after v1, if any, are a different artifact); " +
+			"declared in the memory fact on 2026-09-05T03:04:27Z; not re-fetched or re-verified beyond " +
+			"this catalogue run's own SHA-256 check.",
+		Owner: "Jon (operator); acquired and placed at this path by him, catalogued per agent-estate#1139.",
+		RebuildPath: "Re-download arXiv:2605.09998v1 specifically (https://arxiv.org/abs/2605.09998) and " +
+			"verify the re-fetched file's SHA-256 against RecordedSHA256 before treating it as the same " +
+			"artifact -- a later arXiv version would not match.",
+	},
+	{
+		Name:           "seed-pdf-agentic-engineering-google",
+		Path:           filepath.Join(os.Getenv("HOME"), "Downloads", "Agentic Engineering - Google.pdf"),
+		RecordedSHA256: "76cb2eb6ce4789380ed45f2dbb9009f92a363bb2b60a16bfd25d71694438b691",
+		IdentityFields: []string{"sha256"},
+		Authority: "Unattributed beyond the filename's own \"Google\" credit; per the memory fact, " +
+			"provenance and content review are pending. The PDF's own metadata (Producer: Adobe PDF " +
+			"Library 18.0) does not itself establish authorship. Treat as candidate, not accepted truth.",
+		Scope: "One document, 51 pages.",
+		SensitivityAccess: "Local file under the operator's own $HOME/Downloads; never committed to git " +
+			"and never had its content read by this catalogue -- only size, mtime, SHA-256 and a " +
+			"structural page-object count were read. Readable by the operator's own account only.",
+		Freshness: "PDF metadata records a creation/modification date of 2026-06-18 (read via file " +
+			"metadata, not verified against any canonical published version); declared in the memory " +
+			"fact on 2026-09-05T03:04:27Z.",
+		Owner: "Jon (operator); acquired and placed at this path by him.",
+		RebuildPath: "No canonical source URL has been identified yet. Per the memory fact's own " +
+			"source-discovery loop, record the acquisition source here once it is known; until then " +
+			"this artifact has no rebuild path and would need to be re-supplied by the operator.",
+	},
+}
 
-// BuildUnresolvedPDFSource returns a Source record for a seed PDF this
-// package could not identify. name distinguishes the two records
-// (agent-estate#1139 asked for "both seed PDFs") without claiming to know
-// which document either one actually is.
-//
-// Health is always HealthMissing, but ObservedAt is NOT the zero value --
-// unlike BuildCodexSource/BuildClaudeSource's HealthMissing rows (where the
-// read path was never entered at all, e.g. os.Stat failed), this row
-// represents an exhaustive search that WAS actually run, at a real instant,
-// and concluded "unresolved" -- closer in kind to HealthEmpty (searched,
-// found nothing) than to "never looked". Recording that with a zero
-// timestamp would make it indistinguishable from a row nobody ever searched
-// for, which is exactly the ambiguity this catalogue's typed health states
-// exist to prevent (agent-estate#1139 gate 5's own review).
-//
-// ObservedAt is NOT set to time.Now() here, and it is not the same
-// convention BuildCodexSource/BuildClaudeSource use for their own
-// ObservedAt: those two call os.Stat/WalkRolloutFiles inline, in the same
-// invocation, and stamp time.Now() adjacent to work that just ran -- their
-// timestamp really does mean "just observed." This function does no read of
-// any kind, so a call-time time.Now() here would mean only "whenever this
-// struct happened to be built," not "whenever this was checked." Instead
-// ObservedAt is set to PDFSearchObservedAt, the recorded instant the actual
-// manual search ran (see that var's own doc comment) -- a fixed historical
-// value that will not advance until the search is re-run and that constant
-// is updated with it. UnitCount is still not meaningful here for the same
-// reason a Missing root's UnitCount never is: there is nothing to have
-// counted.
-func BuildUnresolvedPDFSource(name string) Source {
-	return Source{
-		Name:    name,
-		Harness: "pdf",
-		// No root path: there is no candidate filename or directory to
-		// point one at. The exact locations searched are in Detail, per
-		// agent-estate#1139's own instruction for this case. See the
-		// RootPath field's own doc comment for how this "" differs from
-		// the other two sources' "".
-		RootPath: "",
-		IdentityFields: []string{
-			"filename (unresolved -- referent not found)",
-			"page or section number within the document (unresolved)",
-		},
-		Health:     HealthMissing,
-		UnitCount:  0,
-		ObservedAt: PDFSearchObservedAt,
-		Detail: "referent unresolved: no PDF matching \"" + name + "\" (one of \"both seed PDFs\", " +
-			"agent-estate#1139) could be identified anywhere searched. Searched: " +
-			strings.Join(PDFSearchLocations, "; ") + ". Not recorded as any of the unrelated PDFs " +
-			"this search did turn up (personal career documents, out-of-scope test fixtures, unrelated " +
-			"repos' assets) -- an unresolved source and an absent one must not look the same, and a " +
-			"substituted filename would be indistinguishable from the real one to any later reader.",
+// pdfPageObjectPattern matches a PDF's own /Type /Page dictionary entry --
+// the structural marker every general-purpose PDF library (pdfinfo among
+// them) keys off to count pages. It also matches the page-tree root's
+// /Type /Pages entry, which countPDFPageObjects excludes separately.
+var pdfPageObjectPattern = regexp.MustCompile(`/Type\s*/Page`)
+
+// countPDFPageObjects counts PDF page objects by counting this byte-level
+// structural marker, never by parsing or rendering any page's text, image,
+// or content stream -- it reads the PDF's own object-dictionary tags, not
+// its content. This was cross-checked against pdfinfo's authoritative parse
+// for both seed artifacts before being trusted here (28 and 51 respectively,
+// matching pdfinfo exactly for both files as verified for this PR).
+func countPDFPageObjects(data []byte) int {
+	locs := pdfPageObjectPattern.FindAllIndex(data, -1)
+	count := 0
+	for _, loc := range locs {
+		if loc[1] < len(data) && data[loc[1]] == 's' {
+			continue // "/Type /Pages": the page-tree root, not a page object.
+		}
+		count++
 	}
+	return count
+}
+
+// BuildSeedPDFSource verifies one seed PDF descriptor against the live file
+// and returns its Source record. It never reads the file more than once,
+// never writes to it, and treats a hash mismatch as a finding to report, not
+// something to silently correct: if RecordedSHA256 (from the memory fact) no
+// longer matches ObservedSHA256 (computed here, now), the fact is stale and
+// Detail says so explicitly rather than picking one value to trust quietly.
+func BuildSeedPDFSource(d SeedPDFDescriptor) Source {
+	src := Source{
+		Name:              d.Name,
+		Harness:           "pdf",
+		RootPath:          d.Path,
+		IdentityFields:    d.IdentityFields,
+		Authority:         d.Authority,
+		Scope:             d.Scope,
+		SensitivityAccess: d.SensitivityAccess,
+		Freshness:         d.Freshness,
+		Owner:             d.Owner,
+		RebuildPath:       d.RebuildPath,
+		RecordedSHA256:    d.RecordedSHA256,
+	}
+
+	info, err := os.Stat(d.Path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			src.Health = HealthMissing
+			src.Detail = "file does not exist at the path recorded in the memory fact: " + d.Path
+			return src
+		}
+		src.Health = HealthUnreadable
+		src.Detail = "os.Stat failed: " + err.Error()
+		return src
+	}
+	if info.IsDir() {
+		src.Health = HealthUnreadable
+		src.Detail = "path exists but is a directory, not a file: " + d.Path
+		return src
+	}
+
+	data, err := os.ReadFile(d.Path)
+	if err != nil {
+		src.Health = HealthUnreadable
+		src.Detail = "could not read file: " + err.Error()
+		return src
+	}
+
+	sum := sha256.Sum256(data)
+	observed := hex.EncodeToString(sum[:])
+	src.ObservedSHA256 = observed
+	pages := countPDFPageObjects(data)
+	src.ObservedAt = time.Now()
+	src.UnitCount = pages
+	src.Health = HealthPopulated
+
+	if observed == d.RecordedSHA256 {
+		src.Detail = "SHA-256 verified: observed hash matches the value recorded in the Agent Memory " +
+			"fact \"seed-knowledge-source-artifacts\"; " + strconv.Itoa(pages) + " page object(s) " +
+			"counted from structural /Type/Page markers -- metadata only, no page content read, " +
+			"extracted, quoted, or stored."
+	} else {
+		src.Detail = "SHA-256 MISMATCH: observed " + observed + " does not match the recorded fact's " +
+			d.RecordedSHA256 + " -- the memory fact is stale or this file has changed since it was " +
+			"recorded. This is a finding to report, not something this package corrects on its own; " +
+			"do not treat this record as verified until the discrepancy is resolved. " +
+			strconv.Itoa(pages) + " page object(s) counted from structural /Type/Page markers -- " +
+			"metadata only, no page content read, extracted, quoted, or stored."
+	}
+	return src
 }
 
 // BuildCodexSource inspects one Codex rollout root and returns its Source
@@ -300,10 +406,16 @@ func BuildUnresolvedPDFSource(name string) Source {
 // session_meta carries an explicit session id of its own.
 func BuildCodexSource(root string) Source {
 	src := Source{
-		Name:           "codex-rollouts",
-		Harness:        "codex",
-		RootPath:       root,
-		IdentityFields: []string{"session_meta.payload.id (session)", "line position within file (turn ordinal)"},
+		Name:              "codex-rollouts",
+		Harness:           "codex",
+		RootPath:          root,
+		IdentityFields:    []string{"session_meta.payload.id (session)", "line position within file (turn ordinal)"},
+		Authority:         "First-party: the Codex harness's own rollout log of the operator's live sessions, not a secondary or republished source.",
+		Scope:             "This machine's own ~/.codex/sessions tree; one operator's own working sessions only, not a shared or multi-user corpus.",
+		SensitivityAccess: "Local only; contains raw operator prompts and harness output. Never publish, paste into anything public, or commit to git.",
+		Freshness:         "Live and append-only; freshness is ObservedAt itself, re-measured each time this source is rebuilt.",
+		Owner:             "Jon (operator), on this machine.",
+		RebuildPath:       "Cannot be rebuilt or reacquired from elsewhere -- it is observed directly wherever the harness itself writes, not fetched from a canonical location.",
 	}
 
 	if root == "" {
@@ -387,10 +499,16 @@ func BuildCodexSource(root string) Source {
 // nothing here to leave an mtime changed.
 func BuildClaudeSource(root string) Source {
 	src := Source{
-		Name:           "claude-transcripts",
-		Harness:        "claude",
-		RootPath:       root,
-		IdentityFields: []string{"sessionId (also the file's own name, <sessionId>.jsonl)"},
+		Name:              "claude-transcripts",
+		Harness:           "claude",
+		RootPath:          root,
+		IdentityFields:    []string{"sessionId (also the file's own name, <sessionId>.jsonl)"},
+		Authority:         "First-party: Claude Code's own session transcripts of the operator's live sessions, not a secondary or republished source.",
+		Scope:             "This machine's own ~/.claude/projects tree; one operator's own working sessions only, not a shared or multi-user corpus.",
+		SensitivityAccess: "Local only; contains raw operator prompts and harness output. Never publish, paste into anything public, or commit to git.",
+		Freshness:         "Live and append-only; freshness is ObservedAt itself, re-measured each time this source is rebuilt.",
+		Owner:             "Jon (operator), on this machine.",
+		RebuildPath:       "Cannot be rebuilt or reacquired from elsewhere -- it is observed directly wherever the harness itself writes, not fetched from a canonical location.",
 	}
 
 	if root == "" {
