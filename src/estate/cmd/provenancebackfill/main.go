@@ -21,14 +21,21 @@
 //     zero new rows -- every candidate is already present under its
 //     identity id and is reported outcomeAlready.
 //
-// # Never the live corpus
+// # Never the live corpus, unless explicitly authorized
 //
 // refuseLivePath below is an in-process backstop on top of the
-// ledger-write-guard hook: -apply refuses outright if -db resolves to the
-// live corpus path or the retired agent-dotfiles-supervisor location. This
-// tool's own acceptance evidence is produced entirely against a `cp`'d copy
-// (see the task brief); backfilling the live corpus is a separate, later,
-// explicitly authorized step this tool does not take.
+// ledger-write-guard hook: BOTH -dry-run and -apply refuse outright if -db
+// resolves to the live corpus path or the retired agent-dotfiles-supervisor
+// location. -dry-run is gated identically to -apply here, not because
+// buildReport's own writes are conditioned on -apply (they are -- see
+// attribute.go's ensureAttributionTable/attributionTableExists split) but
+// because this guard's job is refusing an unauthorized live path, full stop
+// -- it must not depend on knowing which call downstream would have written.
+// This tool's own acceptance evidence is produced entirely against a `cp`'d
+// copy (see the task brief); backfilling the live corpus is a separate,
+// later, explicitly authorized step -- gated by -authorized-live-write, see
+// run() and its doc comment there, so this refusal is not permanently
+// absolute, only absolute by default.
 package main
 
 import (
@@ -56,6 +63,10 @@ func run(args []string, stdout, stderr *os.File) int {
 	apply := fs.Bool("apply", false, "write claude_provenance rows for the plan computed under -watermark")
 	recordWatermark := fs.Bool("record-watermark", false, "print the current time as RFC3339 and exit; touches nothing else")
 	claudeRoot := fs.String("claude-root", "", "root of Claude transcript JSONL files (default ~/.claude/projects)")
+	authorizedLiveWrite := fs.Bool("authorized-live-write", false,
+		"explicit human authorization to run -apply against the live corpus. Default false, never inferable from "+
+			"any other flag or environment variable. Only takes effect when -db ALSO explicitly names the live "+
+			"path -- it never causes a default or inferred path to be treated as live-authorized.")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -82,19 +93,60 @@ func run(args []string, stdout, stderr *os.File) int {
 		fmt.Fprintln(stderr, "provenancebackfill: pass -dry-run or -apply")
 		return 2
 	}
-	if *apply {
-		if reason, live := refuseLivePath(*dbPath); live {
-			fmt.Fprintf(stderr, "provenancebackfill: refusing -apply against %s: %s\n", *dbPath, reason)
-			return 1
-		}
-	}
-
 	root := *claudeRoot
 	if root == "" {
 		root, err = defaultClaudeRoot()
 		if err != nil {
 			fmt.Fprintf(stderr, "provenancebackfill: %v\n", err)
 			return 1
+		}
+	}
+
+	// This guard runs for -dry-run exactly as it does for -apply
+	// (agent-estate#1237 review): buildReport's own writes are now gated on
+	// apply (see attribute.go/attributionTableExists), but the guard itself
+	// must not assume that -- an ungated write anywhere downstream of an
+	// unauthorized live path is exactly the defect this closes, and gating
+	// only "the write call we know about today" is how that defect happens
+	// again tomorrow. Mode is checked only to pick the word in the message.
+	if reason, live := refuseLivePath(*dbPath); live {
+		if !*authorizedLiveWrite {
+			mode := "-dry-run"
+			if *apply {
+				mode = "-apply"
+			}
+			fmt.Fprintf(stderr, "provenancebackfill: refusing %s against %s: %s\n", mode, *dbPath, reason)
+			return 1
+		}
+		// -authorized-live-write permits this ONLY because -db also
+		// explicitly names the live path (refuseLivePath just confirmed that
+		// identity) -- never a default or inferred path. The banner names the
+		// RESOLVED candidate refuseLivePath actually compared (symlinks
+		// followed, case-folded), not filepath.Abs(*dbPath) -- printing the
+		// unresolved spelling while writing through a resolved one would
+		// announce the wrong target (agent-estate#1237 review).
+		resolved, resolveErr := resolveForCompare(*dbPath)
+		display := *dbPath
+		if resolveErr == nil {
+			display = resolved.clean
+		}
+		if *apply {
+			// Compute the plan read-only first so the banner states the exact
+			// row count before a single row is written -- this call is now
+			// genuinely zero-write regardless of path (apply=false), not
+			// merely zero-write because it happened to target a copy.
+			planned, err := buildReport(*dbPath, root, watermark, false)
+			if err != nil {
+				fmt.Fprintf(stderr, "provenancebackfill: computing authorized live-write plan: %v\n", err)
+				return 1
+			}
+			fmt.Fprintln(stderr, "================================================================================")
+			fmt.Fprintln(stderr, "AUTHORIZED LIVE-CORPUS WRITE -- -authorized-live-write was passed explicitly")
+			fmt.Fprintf(stderr, "  path:      %s\n", display)
+			fmt.Fprintf(stderr, "  reason:    %s\n", reason)
+			fmt.Fprintf(stderr, "  rows to write: %d\n", planned.AttributedCount)
+			fmt.Fprintf(stderr, "  watermark: %s\n", watermark.Format(time.RFC3339))
+			fmt.Fprintln(stderr, "================================================================================")
 		}
 	}
 
@@ -344,19 +396,47 @@ func buildReport(dbPath, root string, watermark time.Time, apply bool) (Report, 
 	r.FilesStatFailed = plan.StatFailures
 	r.FilesEligible = len(plan.Eligible)
 
-	if err := ensureAttributionTable(dbPath); err != nil {
-		return r, fmt.Errorf("ensuring claude_provenance table: %w", err)
+	// A dry run must never write to dbPath, live corpus or not (agent-estate#1237
+	// review) -- ensureAttributionTable's CREATE TABLE only runs under -apply.
+	// A dry run instead asks attributionTableExists, a plain SELECT, and treats
+	// "table not there yet" as before=0/already-empty: the same numbers a
+	// genuinely-untouched table would report, without ever creating one.
+	//
+	// "A plain SELECT" was not, on its own, enough to make that true: the
+	// bare sqlite3 CLI opens read-write by default and creates its target
+	// even for a SELECT, so against a -db path that had never been `cp`'d
+	// into place, this SELECT alone still left an empty, no-schema file
+	// behind (agent-estate#1237, PR #1237's second review -- the fourth
+	// overclaiming comment in this family before this one). Every read-only
+	// call site reachable from this function -- attributionTableExists,
+	// countAttributionRows, alreadyAttributedIDs, fetchPromptsForFile -- now
+	// opens via runSQLiteReadOnly (`sqlite3 -readonly`), which fails to open
+	// rather than creating a file when nothing is there yet; see attribute.go's
+	// dbFileMissing for how each caller tells that expected case apart from a
+	// real error.
+	if apply {
+		if err := ensureAttributionTable(dbPath); err != nil {
+			return r, fmt.Errorf("ensuring claude_provenance table: %w", err)
+		}
 	}
-	before, err := countAttributionRows(dbPath)
+	exists, err := attributionTableExists(dbPath)
 	if err != nil {
-		return r, fmt.Errorf("counting existing claude_provenance rows: %w", err)
+		return r, fmt.Errorf("checking claude_provenance table: %w", err)
+	}
+
+	before := 0
+	already := map[string]bool{}
+	if exists {
+		before, err = countAttributionRows(dbPath)
+		if err != nil {
+			return r, fmt.Errorf("counting existing claude_provenance rows: %w", err)
+		}
+		already, err = alreadyAttributedIDs(dbPath)
+		if err != nil {
+			return r, fmt.Errorf("reading existing claude_provenance ids: %w", err)
+		}
 	}
 	r.TableCountBefore = before
-
-	already, err := alreadyAttributedIDs(dbPath)
-	if err != nil {
-		return r, fmt.Errorf("reading existing claude_provenance ids: %w", err)
-	}
 
 	// Excluded-by-collision basenames: report their prompts rows too, so
 	// "rows examined" covers every candidate this run could see, not just
@@ -452,9 +532,17 @@ func buildReport(dbPath, root string, watermark time.Time, apply bool) (Report, 
 		r.Decisions = append(r.Decisions, decisions...)
 	}
 
-	after, err := countAttributionRows(dbPath)
-	if err != nil {
-		return r, fmt.Errorf("counting claude_provenance rows after run: %w", err)
+	// apply implies ensureAttributionTable ran above, so the table exists to
+	// recount. A dry run never wrote anything, so its "after" is exactly its
+	// "before" -- recounting would either hit the same never-created table
+	// (a pointless SELECT) or, if it already existed, correctly report no
+	// change, which "after = before" already states without another query.
+	after := before
+	if apply {
+		after, err = countAttributionRows(dbPath)
+		if err != nil {
+			return r, fmt.Errorf("counting claude_provenance rows after run: %w", err)
+		}
 	}
 	r.TableCountAfter = after
 	return r, nil

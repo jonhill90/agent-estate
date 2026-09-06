@@ -142,6 +142,352 @@ func TestFindClaudeFilesReportsBasenameCollision(t *testing.T) {
 	}
 }
 
+// runCapture invokes run() with args, capturing stdout/stderr as strings and
+// returning the exit code alongside them.
+func runCapture(t *testing.T, args []string) (stdout, stderr string, exit int) {
+	t.Helper()
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	errR, errW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	exit = run(args, outW, errW)
+	outW.Close()
+	errW.Close()
+	stdout = drainPipe(t, outR)
+	stderr = drainPipe(t, errR)
+	return stdout, stderr, exit
+}
+
+func drainPipe(t *testing.T, r *os.File) string {
+	t.Helper()
+	buf := make([]byte, 0, 4096)
+	tmp := make([]byte, 4096)
+	for {
+		n, err := r.Read(tmp)
+		buf = append(buf, tmp[:n]...)
+		if err != nil {
+			break
+		}
+	}
+	return string(buf)
+}
+
+// TestRunAuthorizedLiveWriteFlagRequiresLivePathAndDb locks the escape hatch
+// this test file is named for (agent-estate#1139): -authorized-live-write
+// changes the outcome ONLY when -apply is also given an explicitly-named live
+// path, and every other combination behaves exactly as before the flag
+// existed.
+func TestRunAuthorizedLiveWriteFlagRequiresLivePathAndDb(t *testing.T) {
+	// A fake "live" corpus, entirely inside a temp dir -- ESTATE_CORPUS
+	// redirects corpus.Path() here so nothing in this test ever touches the
+	// real corpus.
+	dir := t.TempDir()
+	liveDir := filepath.Join(dir, "corpus")
+	if err := os.MkdirAll(liveDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	livePath := filepath.Join(liveDir, "ledger.sqlite3")
+	t.Setenv("ESTATE_CORPUS", livePath)
+
+	watermarkArg := time.Now().Add(time.Hour).Format(time.RFC3339)
+	claudeDir := t.TempDir() // empty; no fixtures needed for these refusal/permit checks
+
+	t.Run("apply + live path + no flag refuses", func(t *testing.T) {
+		// Refusal happens in the guard, before the db is ever opened -- no
+		// fixture corpus is needed at livePath for this case.
+		_, stderr, exit := runCapture(t, []string{
+			"-db", livePath, "-apply", "-watermark", watermarkArg, "-claude-root", claudeDir,
+		})
+		if exit != 1 {
+			t.Fatalf("exit = %d, want 1; stderr=%s", exit, stderr)
+		}
+		if !strings.Contains(stderr, "refusing -apply against") {
+			t.Errorf("stderr = %q, want a refusal message", stderr)
+		}
+	})
+
+	t.Run("apply + flag + no -db refuses", func(t *testing.T) {
+		_, stderr, exit := runCapture(t, []string{
+			"-apply", "-authorized-live-write", "-watermark", watermarkArg, "-claude-root", claudeDir,
+		})
+		if exit != 2 {
+			t.Fatalf("exit = %d, want 2; stderr=%s", exit, stderr)
+		}
+		if !strings.Contains(stderr, "-db is required") {
+			t.Errorf("stderr = %q, want the -db-required message", stderr)
+		}
+	})
+
+	t.Run("apply + flag + non-live path behaves exactly as today", func(t *testing.T) {
+		sqliteAvailable(t)
+		claudeDir := t.TempDir()
+		writeClaudeFixture(t, claudeDir, "proj", "row-abc.jsonl", []string{
+			`{"type":"user","sessionId":"sess-1","message":{"role":"user","content":"row-text-row-abc"}}`,
+		})
+		dbDir := t.TempDir()
+		dbPath := newTestCorpus(t, dbDir, [][2]string{{"row-abc", "row-abc.jsonl"}})
+
+		stdout, stderr, exit := runCapture(t, []string{
+			"-db", dbPath, "-apply", "-authorized-live-write", "-watermark", watermarkArg, "-claude-root", claudeDir,
+		})
+		if exit != 0 {
+			t.Fatalf("exit = %d, want 0; stderr=%s", exit, stderr)
+		}
+		if strings.Contains(stderr, "AUTHORIZED LIVE-CORPUS WRITE") {
+			t.Errorf("banner must not print for a non-live path; stderr=%s", stderr)
+		}
+		if !strings.Contains(stdout, "rows attributed: 1") {
+			t.Errorf("stdout = %q, want exactly one row attributed, same as without the flag", stdout)
+		}
+	})
+
+	t.Run("apply + flag + explicitly-named live path is permitted and banners before writing", func(t *testing.T) {
+		sqliteAvailable(t)
+		// Build a real fixture corpus AT the live-corpus path itself, so this
+		// case can prove the write actually lands there -- ESTATE_CORPUS
+		// still points only at this same temp-dir path, never the real one.
+		claudeDirLive := t.TempDir()
+		writeClaudeFixture(t, claudeDirLive, "proj", "row-live.jsonl", []string{
+			`{"type":"user","sessionId":"sess-1","message":{"role":"user","content":"row-text-row-live"}}`,
+		})
+		liveDBPath := newTestCorpus(t, liveDir, [][2]string{{"row-live", "row-live.jsonl"}})
+		if liveDBPath != livePath {
+			// newTestCorpus always names its file corpus-copy.sqlite3; point
+			// ESTATE_CORPUS at the file it actually created instead.
+			t.Setenv("ESTATE_CORPUS", liveDBPath)
+			livePath = liveDBPath
+		}
+
+		stdout, stderr, exit := runCapture(t, []string{
+			"-db", livePath, "-apply", "-authorized-live-write", "-watermark", watermarkArg, "-claude-root", claudeDirLive,
+		})
+		if exit != 0 {
+			t.Fatalf("exit = %d, want 0; stderr=%s", exit, stderr)
+		}
+		if !strings.Contains(stderr, "AUTHORIZED LIVE-CORPUS WRITE") {
+			t.Errorf("stderr = %q, want the authorization banner", stderr)
+		}
+		if !strings.Contains(stderr, "rows to write: 1") {
+			t.Errorf("stderr = %q, want the banner to state the planned row count before writing", stderr)
+		}
+		if !strings.Contains(stderr, watermarkArg) {
+			t.Errorf("stderr = %q, want the banner to state the pinned watermark", stderr)
+		}
+		if !strings.Contains(stdout, "rows attributed: 1") {
+			t.Errorf("stdout = %q, want the permitted apply to actually write the row", stdout)
+		}
+	})
+}
+
+// TestDryRunAgainstLivePathRefusesAndWritesNothing is the fix for the
+// severe defect PR #1237's review found: buildReport used to call
+// ensureAttributionTable (a CREATE TABLE) for -dry-run exactly as it did for
+// -apply, so an unauthorized -dry-run against the live corpus path still
+// wrote. This proves BOTH halves of the fix: run() refuses before
+// buildReport is ever reached, AND the target file is provably untouched
+// (mtime unchanged, no claude_provenance table, sqlite_master unchanged) --
+// not merely "the reported row count was zero."
+func TestDryRunAgainstLivePathRefusesAndWritesNothing(t *testing.T) {
+	sqliteAvailable(t)
+	dir := t.TempDir()
+	liveDir := filepath.Join(dir, "corpus")
+	if err := os.MkdirAll(liveDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	livePath := newTestCorpus(t, liveDir, [][2]string{{"row-abc", "row-abc.jsonl"}})
+	t.Setenv("ESTATE_CORPUS", livePath)
+
+	before, err := os.Stat(livePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeMaster := sqliteMasterDump(t, livePath)
+
+	claudeDir := t.TempDir()
+	writeClaudeFixture(t, claudeDir, "proj", "row-abc.jsonl", []string{
+		`{"type":"user","sessionId":"sess-1","message":{"role":"user","content":"row-text-row-abc"}}`,
+	})
+	watermarkArg := time.Now().Add(time.Hour).Format(time.RFC3339)
+
+	_, stderr, exit := runCapture(t, []string{
+		"-db", livePath, "-dry-run", "-watermark", watermarkArg, "-claude-root", claudeDir,
+	})
+	if exit != 1 {
+		t.Fatalf("exit = %d, want 1; stderr=%s", exit, stderr)
+	}
+	if !strings.Contains(stderr, "refusing -dry-run against") {
+		t.Errorf("stderr = %q, want a -dry-run refusal message", stderr)
+	}
+
+	after, err := os.Stat(livePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.ModTime().Equal(before.ModTime()) {
+		t.Errorf("live corpus mtime changed: before=%v after=%v -- a refused dry run must not touch the file",
+			before.ModTime(), after.ModTime())
+	}
+	afterMaster := sqliteMasterDump(t, livePath)
+	if afterMaster != beforeMaster {
+		t.Errorf("sqlite_master changed by a refused dry run:\nbefore=%q\nafter=%q", beforeMaster, afterMaster)
+	}
+	if strings.Contains(afterMaster, "claude_provenance") {
+		t.Error("claude_provenance table exists after a refused dry run -- the ungated write regressed")
+	}
+}
+
+// TestDryRunAgainstNonLivePathUnchanged locks that a -dry-run against an
+// ordinary (non-live) path behaves exactly as before this fix: it still
+// reports the plan and still writes nothing, since attributionTableExists
+// (a plain SELECT) replaces ensureAttributionTable (a CREATE TABLE) for
+// every -dry-run, live path or not.
+func TestDryRunAgainstNonLivePathUnchanged(t *testing.T) {
+	sqliteAvailable(t)
+	claudeDir := t.TempDir()
+	writeClaudeFixture(t, claudeDir, "proj", "row-abc.jsonl", []string{
+		`{"type":"user","sessionId":"sess-1","message":{"role":"user","content":"row-text-row-abc"}}`,
+	})
+	dbDir := t.TempDir()
+	dbPath := newTestCorpus(t, dbDir, [][2]string{{"row-abc", "row-abc.jsonl"}})
+	watermarkArg := time.Now().Add(time.Hour).Format(time.RFC3339)
+
+	stdout, stderr, exit := runCapture(t, []string{
+		"-db", dbPath, "-dry-run", "-watermark", watermarkArg, "-claude-root", claudeDir,
+	})
+	if exit != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", exit, stderr)
+	}
+	if !strings.Contains(stdout, "rows attributed: 1") {
+		t.Errorf("stdout = %q, want the plan to still report one attributable row", stdout)
+	}
+	master := sqliteMasterDump(t, dbPath)
+	if strings.Contains(master, "claude_provenance") {
+		t.Error("claude_provenance table exists after a non-live -dry-run -- dry runs must never create it")
+	}
+}
+
+// TestDryRunAgainstNonexistentPathCreatesNoFile locks the defect PR #1237's
+// second review found: attributionTableExists (and every other read-only
+// call site reachable from a -dry-run run) used to shell out to the plain
+// `sqlite3` CLI with no `-readonly` flag, which opens its target read-write
+// by default and CREATES an empty, no-schema file even to run a bare
+// SELECT. -db here names a path that has never been `cp`'d into place --
+// exactly the state a dry run against a fresh corpus copy starts from -- so
+// this asserts the strongest form of "a dry run must never write to dbPath":
+// not merely unchanged content, but no file at all.
+func TestDryRunAgainstNonexistentPathCreatesNoFile(t *testing.T) {
+	sqliteAvailable(t)
+	claudeDir := t.TempDir()
+	writeClaudeFixture(t, claudeDir, "proj", "row-abc.jsonl", []string{
+		`{"type":"user","sessionId":"sess-1","message":{"role":"user","content":"row-text-row-abc"}}`,
+	})
+	dbDir := t.TempDir()
+	dbPath := filepath.Join(dbDir, "does-not-exist.sqlite3")
+	watermarkArg := time.Now().Add(time.Hour).Format(time.RFC3339)
+
+	if _, err := os.Stat(dbPath); !os.IsNotExist(err) {
+		t.Fatalf("precondition failed: %s already exists (err=%v)", dbPath, err)
+	}
+
+	stdout, stderr, exit := runCapture(t, []string{
+		"-db", dbPath, "-dry-run", "-watermark", watermarkArg, "-claude-root", claudeDir,
+	})
+	if exit != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", exit, stderr)
+	}
+	if !strings.Contains(stdout, "rows examined: 0") {
+		t.Errorf("stdout = %q, want zero rows examined against a db that was never created", stdout)
+	}
+
+	if _, err := os.Stat(dbPath); !os.IsNotExist(err) {
+		t.Errorf("a -dry-run against a nonexistent -db path created a file at %s (err=%v) -- "+
+			"the sqlite3 CLI opens read-write by default and creates its target even for a bare SELECT "+
+			"unless every read-only call site passes -readonly", dbPath, err)
+	}
+}
+
+// TestAuthorizedLiveWriteBannerPrintsResolvedPath locks the second defect
+// PR #1237's review found: the banner used to print filepath.Abs(*dbPath),
+// the UNRESOLVED spelling, while writing through refuseLivePath's RESOLVED
+// candidate -- a mismatch whenever a symlink sits between them. -db here is
+// a symlink pointing at the real live-corpus file placed under a different
+// name/case, so the resolved and unresolved spellings provably differ, and
+// the banner must show the resolved one.
+func TestAuthorizedLiveWriteBannerPrintsResolvedPath(t *testing.T) {
+	sqliteAvailable(t)
+	dir := t.TempDir()
+	liveDir := filepath.Join(dir, "Corpus") // case differs from the symlink's own spelling below
+	if err := os.MkdirAll(liveDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	claudeDir := t.TempDir()
+	writeClaudeFixture(t, claudeDir, "proj", "row-live.jsonl", []string{
+		`{"type":"user","sessionId":"sess-1","message":{"role":"user","content":"row-text-row-live"}}`,
+	})
+	realPath := newTestCorpus(t, liveDir, [][2]string{{"row-live", "row-live.jsonl"}})
+	t.Setenv("ESTATE_CORPUS", realPath)
+
+	// -db names a symlink, in a differently-spelled sibling directory, that
+	// points AT realPath -- the unresolved spelling (linkPath) and the
+	// resolved spelling (realPath, case-folded) are provably different
+	// strings.
+	linkDir := filepath.Join(dir, "corpus-link")
+	if err := os.MkdirAll(linkDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	linkPath := filepath.Join(linkDir, "ALIAS.sqlite3")
+	if err := os.Symlink(realPath, linkPath); err != nil {
+		t.Fatal(err)
+	}
+	if strings.EqualFold(linkPath, realPath) {
+		t.Fatal("test setup bug: linkPath and realPath must not already match by spelling")
+	}
+
+	watermarkArg := time.Now().Add(time.Hour).Format(time.RFC3339)
+	_, stderr, exit := runCapture(t, []string{
+		"-db", linkPath, "-apply", "-authorized-live-write", "-watermark", watermarkArg, "-claude-root", claudeDir,
+	})
+	if exit != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", exit, stderr)
+	}
+	if !strings.Contains(stderr, "AUTHORIZED LIVE-CORPUS WRITE") {
+		t.Fatalf("stderr = %q, want the authorization banner", stderr)
+	}
+	// Compute the expected resolved form the same way run() does -- via
+	// resolveForCompare -- rather than re-deriving it by hand, since a plain
+	// filepath.Clean of realPath doesn't account for macOS's own /tmp ->
+	// /private/tmp (or /var -> /private/var) symlink that t.TempDir() paths
+	// already sit under, independent of the ALIAS symlink this test adds.
+	wantResolvedPath, err := resolveForCompare(realPath)
+	if err != nil {
+		t.Fatalf("resolveForCompare(%q): %v", realPath, err)
+	}
+	wantResolved := wantResolvedPath.clean
+	if !strings.Contains(stderr, "path:      "+wantResolved) {
+		t.Errorf("stderr = %q, want the banner to print the RESOLVED path %q, not the unresolved spelling %q",
+			stderr, wantResolved, linkPath)
+	}
+	if strings.Contains(stderr, "path:      "+linkPath) {
+		t.Errorf("stderr = %q, banner printed the unresolved spelling %q instead of the resolved target", stderr, linkPath)
+	}
+}
+
+// sqliteMasterDump returns the full sqlite_master contents as a stable
+// string, used to prove a refused/dry-run call left the schema untouched --
+// not merely that the reported row count was zero.
+func sqliteMasterDump(t *testing.T, dbPath string) string {
+	t.Helper()
+	out, err := exec.Command("sqlite3", dbPath, "select * from sqlite_master order by name;").CombinedOutput()
+	if err != nil {
+		t.Fatalf("dumping sqlite_master for %s: %v: %s", dbPath, err, out)
+	}
+	return string(out)
+}
+
 func sqliteAvailable(t *testing.T) {
 	t.Helper()
 	if _, err := exec.LookPath("sqlite3"); err != nil {
