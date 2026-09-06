@@ -170,10 +170,10 @@ func TestBuildClaudeSource_Empty(t *testing.T) {
 	}
 }
 
-// TestBuild_ReturnsBothSources is the seeding contract: exactly the two real
-// transcript sources plus the two seed-PDF records, never invented ones,
-// regardless of what this machine happens to have on disk.
-func TestBuild_ReturnsBothSources(t *testing.T) {
+// TestBuild_ReturnsAllFourSources is the seeding contract: exactly the two
+// real transcript sources plus the two seed-PDF records, never invented
+// ones, regardless of what this machine happens to have on disk.
+func TestBuild_ReturnsAllFourSources(t *testing.T) {
 	cat := Build()
 	if len(cat.Sources) != 4 {
 		t.Fatalf("len(Sources) = %d, want 4", len(cat.Sources))
@@ -188,12 +188,15 @@ func TestBuild_ReturnsBothSources(t *testing.T) {
 }
 
 // TestBuildUnresolvedPDFSource_MissingWithSearchEvidence is the contract for
-// the seed-PDF case specifically: HealthMissing, zero ObservedAt (nothing
-// was successfully read), no RootPath guessed, and a Detail that both names
-// the requesting issue and cites where this package looked -- never a
-// filename invented to fill the gap.
+// the seed-PDF case specifically: HealthMissing, a real measured ObservedAt
+// (the search itself ran at a real instant, even though it found nothing --
+// zero would be indistinguishable from "never looked"), no RootPath
+// guessed, and a Detail that both names the requesting issue and cites
+// where this package looked -- never a filename invented to fill the gap.
 func TestBuildUnresolvedPDFSource_MissingWithSearchEvidence(t *testing.T) {
+	before := time.Now()
 	src := BuildUnresolvedPDFSource("seed-pdf-a")
+	after := time.Now()
 	if src.Health != HealthMissing {
 		t.Fatalf("Health = %v, want HealthMissing", src.Health)
 	}
@@ -203,8 +206,8 @@ func TestBuildUnresolvedPDFSource_MissingWithSearchEvidence(t *testing.T) {
 	if src.RootPath != "" {
 		t.Fatalf("RootPath = %q, want empty -- no candidate path was ever identified", src.RootPath)
 	}
-	if !src.ObservedAt.IsZero() {
-		t.Fatalf("ObservedAt = %v, want zero value for an unresolved source", src.ObservedAt)
+	if src.ObservedAt.Before(before) || src.ObservedAt.After(after) {
+		t.Fatalf("ObservedAt = %v, want between %v and %v -- the search ran at a real instant, not the zero value", src.ObservedAt, before, after)
 	}
 	if src.UnitCount != 0 {
 		t.Fatalf("UnitCount = %d, want 0", src.UnitCount)

@@ -102,7 +102,18 @@ type Source struct {
 	Name string `json:"name"`
 	// Harness is the harness this source belongs to -- "claude" or "codex".
 	Harness string `json:"harness"`
-	// RootPath is the directory this source's units live under.
+	// RootPath is the directory this source's units live under. Empty string
+	// means one of two different things depending on Health, and a consumer
+	// must not conflate them: for BuildCodexSource/BuildClaudeSource it means
+	// "could not resolve a home directory to build the default root" (see
+	// Detail) -- a real path was attempted and failed to resolve. For
+	// BuildUnresolvedPDFSource specifically, "" means something stronger:
+	// no candidate path was ever identified to attempt in the first place --
+	// there is no filesystem location this source could name even
+	// speculatively. Do not read an empty RootPath as "root is the
+	// filesystem root" (Go's os package never returns "" for that) and do
+	// not treat it as interchangeable across sources; Detail always carries
+	// the fuller explanation for the specific row.
 	RootPath string `json:"root_path"`
 	// IdentityFields names which fields, together, identify one unit of this
 	// source -- e.g. which JSON field(s) a caller must key on to tell two
@@ -206,25 +217,36 @@ var PDFSearchLocations = []string{
 // (agent-estate#1139 asked for "both seed PDFs") without claiming to know
 // which document either one actually is.
 //
-// Health is always HealthMissing and ObservedAt is always the zero value --
-// consistent with BuildCodexSource/BuildClaudeSource's own convention that a
-// source never successfully read carries no observed instant. UnitCount is
-// not meaningful here for the same reason a Missing root's UnitCount never
-// is: there is nothing to have counted.
+// Health is always HealthMissing, but ObservedAt is NOT the zero value --
+// unlike BuildCodexSource/BuildClaudeSource's HealthMissing rows (where the
+// read path was never entered at all, e.g. os.Stat failed), this row
+// represents an exhaustive search that WAS actually run, at a real instant,
+// and concluded "unresolved" -- closer in kind to HealthEmpty (searched,
+// found nothing) than to "never looked". Recording that with a zero
+// timestamp would make it indistinguishable from a row nobody ever searched
+// for, which is exactly the ambiguity this catalogue's typed health states
+// exist to prevent (agent-estate#1139 gate 5's own review). So ObservedAt is
+// set to the instant this search evidence was assembled, same as the
+// existing sources set it the moment their own read path is actually
+// entered. UnitCount is still not meaningful here for the same reason a
+// Missing root's UnitCount never is: there is nothing to have counted.
 func BuildUnresolvedPDFSource(name string) Source {
 	return Source{
 		Name:    name,
 		Harness: "pdf",
 		// No root path: there is no candidate filename or directory to
 		// point one at. The exact locations searched are in Detail, per
-		// agent-estate#1139's own instruction for this case.
+		// agent-estate#1139's own instruction for this case. See the
+		// RootPath field's own doc comment for how this "" differs from
+		// the other two sources' "".
 		RootPath: "",
 		IdentityFields: []string{
 			"filename (unresolved -- referent not found)",
 			"page or section number within the document (unresolved)",
 		},
-		Health:    HealthMissing,
-		UnitCount: 0,
+		Health:     HealthMissing,
+		UnitCount:  0,
+		ObservedAt: time.Now(),
 		Detail: "referent unresolved: no PDF matching \"" + name + "\" (one of \"both seed PDFs\", " +
 			"agent-estate#1139) could be identified anywhere searched. Searched: " +
 			strings.Join(PDFSearchLocations, "; ") + ". Not recorded as any of the unrelated PDFs " +
