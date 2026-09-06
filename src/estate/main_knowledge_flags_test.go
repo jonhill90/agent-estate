@@ -96,12 +96,16 @@ func TestKnowledgeQueryJSONCarriesCoverageAndDoesNotBecomeAQueryTerm(t *testing.
 
 	res := knowledge.Result{
 		GeneratedAt: time.Now().UTC(),
+		// Sources names ONLY what this test's environment controls:
+		// freshnessFindings scopes missing-source findings to the loaded
+		// index's own source list, so listing vault-fact/corpus-parameter/
+		// loops-research here without pinning their paths made the test
+		// fail on any machine lacking them (CI has no Loops-Research
+		// checkout, and its path is HOME-derived with no env override).
+		// This is a transport-correctness test; github-stars alone keeps
+		// the unknown-freshness expectation below meaningful.
 		Sources: []knowledge.SourceResult{
 			{Name: "github-stars", OK: true, Count: 1},
-			{Name: "vault-fact", OK: true, Count: 1},
-			{Name: "corpus-parameter", OK: true, Count: 0},
-			{Name: "loops-research", OK: true, Count: 0},
-			{Name: "repo-docs", OK: true, Count: 0},
 		},
 		Items: []knowledge.Item{
 			{ID: "it-0000000000000020", Source: "vault-fact", Permalink: "/tmp/tmux.md",
