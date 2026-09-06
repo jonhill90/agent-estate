@@ -20,12 +20,24 @@
 // ~/.claude/projects/*/*.jsonl. Neither existing on this machine is not this
 // package's problem to paper over -- a missing root is recorded as
 // HealthMissing with the exact path looked for, never silently omitted.
+//
+// A fourth-and-fifth pair of records cover a task handed to a prior turn:
+// add catalogue records for "both seed PDFs". That prior turn could not
+// resolve which two PDFs were meant -- see PDFSearchLocations below for
+// every place this package's own re-run of that search looked, all of it
+// empty. Per agent-estate#1139's own instruction ("if you cannot identify
+// the two PDFs, record them as Missing with the paths you searched and a
+// detail saying the referent is unresolved"), BuildUnresolvedPDFSource
+// records exactly that: an honest HealthMissing row, never an invented
+// filename and never a substituted, unrelated PDF standing in for the real
+// one.
 package catalogue
 
 import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jonhill90/agent-estate/estate/internal/rollout"
@@ -90,7 +102,18 @@ type Source struct {
 	Name string `json:"name"`
 	// Harness is the harness this source belongs to -- "claude" or "codex".
 	Harness string `json:"harness"`
-	// RootPath is the directory this source's units live under.
+	// RootPath is the directory this source's units live under. Empty string
+	// means one of two different things depending on Health, and a consumer
+	// must not conflate them: for BuildCodexSource/BuildClaudeSource it means
+	// "could not resolve a home directory to build the default root" (see
+	// Detail) -- a real path was attempted and failed to resolve. For
+	// BuildUnresolvedPDFSource specifically, "" means something stronger:
+	// no candidate path was ever identified to attempt in the first place --
+	// there is no filesystem location this source could name even
+	// speculatively. Do not read an empty RootPath as "root is the
+	// filesystem root" (Go's os package never returns "" for that) and do
+	// not treat it as interchangeable across sources; Detail always carries
+	// the fuller explanation for the specific row.
 	RootPath string `json:"root_path"`
 	// IdentityFields names which fields, together, identify one unit of this
 	// source -- e.g. which JSON field(s) a caller must key on to tell two
@@ -142,14 +165,125 @@ func DefaultClaudeRoot() string {
 	return filepath.Join(home, ".claude", "projects")
 }
 
-// Build returns the catalogue seeded with the estate's two real sources,
-// each read once, read-only, right now.
+// Build returns the catalogue seeded with the estate's two real
+// conversation-transcript sources plus the two seed-PDF records
+// agent-estate#1139 asked for, each read once, read-only, right now.
 func Build() Catalogue {
 	return Catalogue{
 		Sources: []Source{
 			BuildCodexSource(DefaultCodexRoot()),
 			BuildClaudeSource(DefaultClaudeRoot()),
+			BuildUnresolvedPDFSource("seed-pdf-a"),
+			BuildUnresolvedPDFSource("seed-pdf-b"),
 		},
+	}
+}
+
+// PDFSearchLocations is every place this package's own search for "both seed
+// PDFs" (agent-estate#1139) looked before concluding the referent is
+// unresolved. Kept as an exported var, not restated prose, so a later
+// re-search starts from the same list rather than a paraphrase of it, and so
+// BuildUnresolvedPDFSource's Detail and any test asserting on it read from
+// one source of truth.
+//
+// Every location below was re-checked directly by this package's own author
+// (not merely inherited from a prior turn's report): git history search
+// across every commit reachable from any ref in this repository, this
+// repository's docs/ and AGENTS.md, GitHub issue search, a corpus query
+// (bounded by the corpus's 2026-09-02T19:09:37Z ingestion watermark -- an
+// empty result there is not conclusive for anything said after that
+// instant), ~/source/repos/Personal/Loops-Research's full git history (PDFs
+// appear there only as external arxiv/openai.com URLs cited in prose, never
+// as a local file), and a filesystem sweep for *.pdf under
+// ~/source (excluding ~/Documents, ~/Downloads and ~/Desktop, which are the
+// operator's personal documents and out of bounds for this task). That sweep
+// found PDFs, but none referenced anywhere as a "seed PDF" for this project:
+// personal career CVs (out of bounds on content, not merely unrelated),
+// two malformed-fixture PDFs belonging to an unrelated powerpoint skill's
+// test suite, and two more (a theme showcase, a browser preview) belonging
+// to unrelated repos. None was substituted in as a guess.
+var PDFSearchLocations = []string{
+	"git log --all -p | grep -i '.pdf' (this repository, every commit reachable from any ref)",
+	"git rev-list --all | xargs git grep -i '.pdf' (this repository, same scope, tree contents rather than diffs)",
+	"docs/ and AGENTS.md in this repository (grep -rniE '\\.pdf|seed pdf|pdfs')",
+	"gh issue list --search pdf (this repository's GitHub issues)",
+	"~/corpus/ledger.sqlite3: items where body like '%pdf%' (0 rows; ingestion watermark 2026-09-02T19:09:37Z bounds this, does not settle it)",
+	"~/source/repos/Personal/Loops-Research (full git history; .md only, PDFs referenced only as external URLs, never a local file)",
+	"~/source/**/*.pdf, excluding ~/Documents, ~/Downloads and ~/Desktop (filesystem sweep; found PDFs, none referenced as a seed PDF for this project)",
+}
+
+// PDFSearchObservedAt is the recorded instant the search described by
+// PDFSearchLocations was actually performed, not a live measurement: it is
+// the commit timestamp of ba36184f122c85cb517c56b4bf23a17e187c3dfd (2026-09-
+// 05T20:03:18-04:00, normalized to UTC below), the turn that ran that search
+// and wrote PDFSearchLocations down. A commit timestamp is the nearest
+// verifiable proxy this package has for "when" -- there is no other durable
+// record of the instant the search itself ran.
+//
+// This value is a RECORDED HISTORICAL OBSERVATION, held here as a constant,
+// never a live time.Now(). BuildUnresolvedPDFSource performs no read, no
+// search, and no I/O of any kind at call time -- PDFSearchLocations
+// describes an investigation a prior turn ran manually, once, outside this
+// code path. Stamping call-time wall-clock time would silently re-assert
+// "just searched, found nothing" on every future call, when in fact nothing
+// is searched at read time at all; the actual search happened once, here.
+// This constant does not advance on its own. It stays exactly this
+// timestamp until someone actually re-runs the search in PDFSearchLocations
+// and updates both of these together -- do not bump it without also
+// re-running the search.
+var PDFSearchObservedAt = time.Date(2026, 9, 6, 0, 3, 18, 0, time.UTC)
+
+// BuildUnresolvedPDFSource returns a Source record for a seed PDF this
+// package could not identify. name distinguishes the two records
+// (agent-estate#1139 asked for "both seed PDFs") without claiming to know
+// which document either one actually is.
+//
+// Health is always HealthMissing, but ObservedAt is NOT the zero value --
+// unlike BuildCodexSource/BuildClaudeSource's HealthMissing rows (where the
+// read path was never entered at all, e.g. os.Stat failed), this row
+// represents an exhaustive search that WAS actually run, at a real instant,
+// and concluded "unresolved" -- closer in kind to HealthEmpty (searched,
+// found nothing) than to "never looked". Recording that with a zero
+// timestamp would make it indistinguishable from a row nobody ever searched
+// for, which is exactly the ambiguity this catalogue's typed health states
+// exist to prevent (agent-estate#1139 gate 5's own review).
+//
+// ObservedAt is NOT set to time.Now() here, and it is not the same
+// convention BuildCodexSource/BuildClaudeSource use for their own
+// ObservedAt: those two call os.Stat/WalkRolloutFiles inline, in the same
+// invocation, and stamp time.Now() adjacent to work that just ran -- their
+// timestamp really does mean "just observed." This function does no read of
+// any kind, so a call-time time.Now() here would mean only "whenever this
+// struct happened to be built," not "whenever this was checked." Instead
+// ObservedAt is set to PDFSearchObservedAt, the recorded instant the actual
+// manual search ran (see that var's own doc comment) -- a fixed historical
+// value that will not advance until the search is re-run and that constant
+// is updated with it. UnitCount is still not meaningful here for the same
+// reason a Missing root's UnitCount never is: there is nothing to have
+// counted.
+func BuildUnresolvedPDFSource(name string) Source {
+	return Source{
+		Name:    name,
+		Harness: "pdf",
+		// No root path: there is no candidate filename or directory to
+		// point one at. The exact locations searched are in Detail, per
+		// agent-estate#1139's own instruction for this case. See the
+		// RootPath field's own doc comment for how this "" differs from
+		// the other two sources' "".
+		RootPath: "",
+		IdentityFields: []string{
+			"filename (unresolved -- referent not found)",
+			"page or section number within the document (unresolved)",
+		},
+		Health:     HealthMissing,
+		UnitCount:  0,
+		ObservedAt: PDFSearchObservedAt,
+		Detail: "referent unresolved: no PDF matching \"" + name + "\" (one of \"both seed PDFs\", " +
+			"agent-estate#1139) could be identified anywhere searched. Searched: " +
+			strings.Join(PDFSearchLocations, "; ") + ". Not recorded as any of the unrelated PDFs " +
+			"this search did turn up (personal career documents, out-of-scope test fixtures, unrelated " +
+			"repos' assets) -- an unresolved source and an absent one must not look the same, and a " +
+			"substituted filename would be indistinguishable from the real one to any later reader.",
 	}
 }
 
