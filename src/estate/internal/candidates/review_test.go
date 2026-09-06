@@ -19,7 +19,7 @@ func TestListRequiresDerivedTable(t *testing.T) {
 func TestListEmptyFilterIsNotAnError(t *testing.T) {
 	sqliteAvailable(t)
 	db := newFixtureDB(t, withOneUnit("p1", "prov1"))
-	if _, err := Derive(db); err != nil {
+	if _, err := Derive(db, true); err != nil {
 		t.Fatalf("Derive: %v", err)
 	}
 
@@ -40,7 +40,7 @@ func TestListFiltersBySourceFile(t *testing.T) {
 			"UPDATE codex_provenance SET source_file='/sessions/b.jsonl' WHERE id='prov2';").Run(); err != nil {
 		t.Fatalf("seeding distinct source files: %v", err)
 	}
-	if _, err := Derive(db); err != nil {
+	if _, err := Derive(db, true); err != nil {
 		t.Fatalf("Derive: %v", err)
 	}
 
@@ -56,7 +56,7 @@ func TestListFiltersBySourceFile(t *testing.T) {
 func TestListPagesInIngestionOrder(t *testing.T) {
 	sqliteAvailable(t)
 	db := newFixtureDB(t, withOneUnit("p1", "prov1")+withOneUnit("p2", "prov2")+withOneUnit("p3", "prov3"))
-	if _, err := Derive(db); err != nil {
+	if _, err := Derive(db, true); err != nil {
 		t.Fatalf("Derive: %v", err)
 	}
 
@@ -87,7 +87,7 @@ func TestListPagesInIngestionOrder(t *testing.T) {
 func TestListSurfacesProvenanceGoneLoudly(t *testing.T) {
 	sqliteAvailable(t)
 	db := newFixtureDB(t, withOneUnit("p1", "prov1"))
-	if _, err := Derive(db); err != nil {
+	if _, err := Derive(db, true); err != nil {
 		t.Fatalf("Derive: %v", err)
 	}
 	if err := exec.Command("sqlite3", db, "DELETE FROM codex_provenance WHERE id='prov1';").Run(); err != nil {
@@ -112,7 +112,7 @@ func TestListSurfacesProvenanceGoneLoudly(t *testing.T) {
 func TestGetNotFound(t *testing.T) {
 	sqliteAvailable(t)
 	db := newFixtureDB(t, withOneUnit("p1", "prov1"))
-	if _, err := Derive(db); err != nil {
+	if _, err := Derive(db, true); err != nil {
 		t.Fatalf("Derive: %v", err)
 	}
 
@@ -125,7 +125,7 @@ func TestGetNotFound(t *testing.T) {
 func TestGetResolvesPromptOnDemand(t *testing.T) {
 	sqliteAvailable(t)
 	db := newFixtureDB(t, withOneUnit("p1", "prov1"))
-	if _, err := Derive(db); err != nil {
+	if _, err := Derive(db, true); err != nil {
 		t.Fatalf("Derive: %v", err)
 	}
 	id := query(t, db, "select id from knowledge_candidates;")
@@ -155,7 +155,7 @@ func TestGetResolvesPromptOnDemand(t *testing.T) {
 func TestGetSurfacesPromptGoneLoudly(t *testing.T) {
 	sqliteAvailable(t)
 	db := newFixtureDB(t, withOneUnit("p1", "prov1"))
-	if _, err := Derive(db); err != nil {
+	if _, err := Derive(db, true); err != nil {
 		t.Fatalf("Derive: %v", err)
 	}
 	id := query(t, db, "select id from knowledge_candidates;")

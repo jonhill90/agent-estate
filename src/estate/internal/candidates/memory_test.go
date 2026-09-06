@@ -12,7 +12,7 @@ import (
 
 func TestMemoryWorkflow(t *testing.T) {
 	db := newFixtureDB(t, withOneUnit("p1", "prov1")+withOneUnit("p2", "prov2"))
-	if _, err := Derive(db); err != nil {
+	if _, err := Derive(db, true); err != nil {
 		t.Fatal(err)
 	}
 	a := query(t, db, "select id from knowledge_candidates where prompt_id='p1'")
@@ -100,7 +100,7 @@ func TestMemoryWorkflow(t *testing.T) {
 	if !strings.Contains(string(after), "prov1") || !strings.Contains(string(after), "p1") || !strings.Contains(string(after), first.PublishedRevision) {
 		t.Fatal("missing traceability/supersession")
 	}
-	res, err := Derive(db)
+	res, err := Derive(db, true)
 	if err != nil || res.Inserted != 0 {
 		t.Fatalf("derive rerun: %+v %v", res, err)
 	}
@@ -121,7 +121,7 @@ func TestMemorySafety(t *testing.T) {
 	for _, scenario := range []string{"adopt-existing", "missing-source", "slug-collision", "stale-revision", "external-edit", "dry-run", "rejection-rerun", "repair-after-fact-write", "symlink"} {
 		t.Run(scenario, func(t *testing.T) {
 			db := newFixtureDB(t, withOneUnit("p1", "prov1"))
-			if _, err := Derive(db); err != nil {
+			if _, err := Derive(db, true); err != nil {
 				t.Fatal(err)
 			}
 			id := query(t, db, "select id from knowledge_candidates")

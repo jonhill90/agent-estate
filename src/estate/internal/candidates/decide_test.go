@@ -8,7 +8,7 @@ import (
 func TestDecideRejectsUnknownDecision(t *testing.T) {
 	sqliteAvailable(t)
 	db := newFixtureDB(t, withOneUnit("p1", "prov1"))
-	if _, err := Derive(db); err != nil {
+	if _, err := Derive(db, true); err != nil {
 		t.Fatalf("Derive: %v", err)
 	}
 	id := query(t, db, "select id from knowledge_candidates;")
@@ -22,7 +22,7 @@ func TestDecideRejectsUnknownDecision(t *testing.T) {
 func TestDecideUnknownCandidateRefuses(t *testing.T) {
 	sqliteAvailable(t)
 	db := newFixtureDB(t, withOneUnit("p1", "prov1"))
-	if _, err := Derive(db); err != nil {
+	if _, err := Derive(db, true); err != nil {
 		t.Fatalf("Derive: %v", err)
 	}
 
@@ -41,7 +41,7 @@ func TestDecideUnknownCandidateRefuses(t *testing.T) {
 func TestDecideDryRunWritesNothing(t *testing.T) {
 	sqliteAvailable(t)
 	db := newFixtureDB(t, withOneUnit("p1", "prov1"))
-	if _, err := Derive(db); err != nil {
+	if _, err := Derive(db, true); err != nil {
 		t.Fatalf("Derive: %v", err)
 	}
 	id := query(t, db, "select id from knowledge_candidates;")
@@ -72,7 +72,7 @@ func TestDecideDryRunWritesNothing(t *testing.T) {
 func TestDecideAppliedRecordsDecision(t *testing.T) {
 	sqliteAvailable(t)
 	db := newFixtureDB(t, withOneUnit("p1", "prov1"))
-	if _, err := Derive(db); err != nil {
+	if _, err := Derive(db, true); err != nil {
 		t.Fatalf("Derive: %v", err)
 	}
 	id := query(t, db, "select id from knowledge_candidates;")
@@ -106,7 +106,7 @@ func TestDecideAppliedRecordsDecision(t *testing.T) {
 func TestDecideAppliedTwiceUpdatesInPlace(t *testing.T) {
 	sqliteAvailable(t)
 	db := newFixtureDB(t, withOneUnit("p1", "prov1"))
-	if _, err := Derive(db); err != nil {
+	if _, err := Derive(db, true); err != nil {
 		t.Fatalf("Derive: %v", err)
 	}
 	id := query(t, db, "select id from knowledge_candidates;")

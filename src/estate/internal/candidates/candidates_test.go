@@ -64,7 +64,7 @@ func TestEndToEndOneCandidatePerJoiningRow(t *testing.T) {
 	sqliteAvailable(t)
 	db := newFixtureDB(t, withOneUnit("p1", "prov1"))
 
-	res, err := Derive(db)
+	res, err := Derive(db, true)
 	if err != nil {
 		t.Fatalf("Derive: %v", err)
 	}
@@ -94,10 +94,10 @@ func TestIdempotentRerunInsertsZero(t *testing.T) {
 	sqliteAvailable(t)
 	db := newFixtureDB(t, withOneUnit("p1", "prov1"))
 
-	if _, err := Derive(db); err != nil {
+	if _, err := Derive(db, true); err != nil {
 		t.Fatalf("first Derive: %v", err)
 	}
-	res, err := Derive(db)
+	res, err := Derive(db, true)
 	if err != nil {
 		t.Fatalf("second Derive: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestIdempotentRerunInsertsZero(t *testing.T) {
 
 func TestMissingDatabaseFailsClosed(t *testing.T) {
 	sqliteAvailable(t)
-	_, err := Derive(filepath.Join(t.TempDir(), "does-not-exist.sqlite3"))
+	_, err := Derive(filepath.Join(t.TempDir(), "does-not-exist.sqlite3"), true)
 	if err == nil {
 		t.Fatal("expected error for missing database, got nil")
 	}
@@ -127,7 +127,7 @@ func TestMissingProvenanceTableFailsClosed(t *testing.T) {
 		t.Fatalf("creating fixture db: %v", err)
 	}
 
-	_, err := Derive(dbPath)
+	_, err := Derive(dbPath, true)
 	if err == nil {
 		t.Fatal("expected error when codex_provenance table is absent, got nil")
 	}
@@ -144,7 +144,7 @@ func TestZeroProvenanceRowsFailsClosed(t *testing.T) {
 	// distinct from the missing-table case above.
 	db := newFixtureDB(t, "")
 
-	res, err := Derive(db)
+	res, err := Derive(db, true)
 	if err == nil {
 		// RED CHECK: if Derive silently succeeded with an empty table, this
 		// branch runs and fails the test -- confirming the test can actually
@@ -170,7 +170,7 @@ VALUES ('prov-orphan', 'no-such-prompt', 'codex-rollout', 'codex', 'f.jsonl', 's
 `
 	db := newFixtureDB(t, extra)
 
-	res, err := Derive(db)
+	res, err := Derive(db, true)
 	if err != nil {
 		t.Fatalf("Derive: %v", err)
 	}
@@ -184,11 +184,78 @@ VALUES ('prov-orphan', 'no-such-prompt', 'codex-rollout', 'codex', 'f.jsonl', 's
 	}
 }
 
+// TestDeriveDryRunWritesNothingWhileReportingCounts is acceptance test #3
+// (agent-estate#1251): apply=false must perform zero writes -- not even the
+// knowledge_candidates CREATE TABLE IF NOT EXISTS -- while still reporting
+// exactly what a real run would do.
+func TestDeriveDryRunWritesNothingWhileReportingCounts(t *testing.T) {
+	sqliteAvailable(t)
+	db := newFixtureDB(t, withOneUnit("p1", "prov1"))
+
+	res, err := Derive(db, false)
+	if err != nil {
+		t.Fatalf("Derive dry run: %v", err)
+	}
+	if res.Applied {
+		t.Fatal("Applied = true for a dry run")
+	}
+	if res.ProvenanceRows != 1 {
+		t.Fatalf("ProvenanceRows = %d, want 1", res.ProvenanceRows)
+	}
+	if res.TableExists {
+		t.Fatal("TableExists = true before any run has created it")
+	}
+	if res.TotalCandidates != 0 {
+		t.Fatalf("TotalCandidates = %d, want 0 (table not created yet)", res.TotalCandidates)
+	}
+	if res.WouldInsert != 1 {
+		t.Fatalf("WouldInsert = %d, want 1", res.WouldInsert)
+	}
+	if res.Inserted != 0 {
+		t.Fatalf("Inserted = %d, want 0 for a dry run", res.Inserted)
+	}
+
+	exists, err := tableExists(db, "knowledge_candidates")
+	if err != nil {
+		t.Fatalf("checking knowledge_candidates: %v", err)
+	}
+	if exists {
+		t.Fatal("knowledge_candidates exists after a dry run -- a dry run must write nothing, not even the DDL")
+	}
+}
+
+// TestDeriveDryRunAfterApplyReportsZeroWouldInsert covers the dry run's
+// second shape: a table that already exists, and every joining row already
+// present, so a second dry run truthfully reports WouldInsert=0 -- the same
+// idempotence Derive(db, true) itself guarantees, but read-only.
+func TestDeriveDryRunAfterApplyReportsZeroWouldInsert(t *testing.T) {
+	sqliteAvailable(t)
+	db := newFixtureDB(t, withOneUnit("p1", "prov1"))
+
+	if _, err := Derive(db, true); err != nil {
+		t.Fatalf("apply run: %v", err)
+	}
+
+	res, err := Derive(db, false)
+	if err != nil {
+		t.Fatalf("Derive dry run: %v", err)
+	}
+	if !res.TableExists {
+		t.Fatal("TableExists = false after an apply run created it")
+	}
+	if res.TotalCandidates != 1 {
+		t.Fatalf("TotalCandidates = %d, want 1", res.TotalCandidates)
+	}
+	if res.WouldInsert != 0 {
+		t.Fatalf("WouldInsert = %d, want 0 -- the one candidate already exists", res.WouldInsert)
+	}
+}
+
 func TestEveryCandidateCitesARealProvenanceRow(t *testing.T) {
 	sqliteAvailable(t)
 	db := newFixtureDB(t, withOneUnit("p1", "prov1")+withOneUnit("p2", "prov2"))
 
-	if _, err := Derive(db); err != nil {
+	if _, err := Derive(db, true); err != nil {
 		t.Fatalf("Derive: %v", err)
 	}
 
