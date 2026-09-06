@@ -142,6 +142,147 @@ func TestFindClaudeFilesReportsBasenameCollision(t *testing.T) {
 	}
 }
 
+// runCapture invokes run() with args, capturing stdout/stderr as strings and
+// returning the exit code alongside them.
+func runCapture(t *testing.T, args []string) (stdout, stderr string, exit int) {
+	t.Helper()
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	errR, errW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	exit = run(args, outW, errW)
+	outW.Close()
+	errW.Close()
+	stdout = drainPipe(t, outR)
+	stderr = drainPipe(t, errR)
+	return stdout, stderr, exit
+}
+
+func drainPipe(t *testing.T, r *os.File) string {
+	t.Helper()
+	buf := make([]byte, 0, 4096)
+	tmp := make([]byte, 4096)
+	for {
+		n, err := r.Read(tmp)
+		buf = append(buf, tmp[:n]...)
+		if err != nil {
+			break
+		}
+	}
+	return string(buf)
+}
+
+// TestRunAuthorizedLiveWriteFlagRequiresLivePathAndDb locks the escape hatch
+// this test file is named for (agent-estate#1139): -authorized-live-write
+// changes the outcome ONLY when -apply is also given an explicitly-named live
+// path, and every other combination behaves exactly as before the flag
+// existed.
+func TestRunAuthorizedLiveWriteFlagRequiresLivePathAndDb(t *testing.T) {
+	// A fake "live" corpus, entirely inside a temp dir -- ESTATE_CORPUS
+	// redirects corpus.Path() here so nothing in this test ever touches the
+	// real corpus.
+	dir := t.TempDir()
+	liveDir := filepath.Join(dir, "corpus")
+	if err := os.MkdirAll(liveDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	livePath := filepath.Join(liveDir, "ledger.sqlite3")
+	t.Setenv("ESTATE_CORPUS", livePath)
+
+	watermarkArg := time.Now().Add(time.Hour).Format(time.RFC3339)
+	claudeDir := t.TempDir() // empty; no fixtures needed for these refusal/permit checks
+
+	t.Run("apply + live path + no flag refuses", func(t *testing.T) {
+		// Refusal happens in the guard, before the db is ever opened -- no
+		// fixture corpus is needed at livePath for this case.
+		_, stderr, exit := runCapture(t, []string{
+			"-db", livePath, "-apply", "-watermark", watermarkArg, "-claude-root", claudeDir,
+		})
+		if exit != 1 {
+			t.Fatalf("exit = %d, want 1; stderr=%s", exit, stderr)
+		}
+		if !strings.Contains(stderr, "refusing -apply against") {
+			t.Errorf("stderr = %q, want a refusal message", stderr)
+		}
+	})
+
+	t.Run("apply + flag + no -db refuses", func(t *testing.T) {
+		_, stderr, exit := runCapture(t, []string{
+			"-apply", "-authorized-live-write", "-watermark", watermarkArg, "-claude-root", claudeDir,
+		})
+		if exit != 2 {
+			t.Fatalf("exit = %d, want 2; stderr=%s", exit, stderr)
+		}
+		if !strings.Contains(stderr, "-db is required") {
+			t.Errorf("stderr = %q, want the -db-required message", stderr)
+		}
+	})
+
+	t.Run("apply + flag + non-live path behaves exactly as today", func(t *testing.T) {
+		sqliteAvailable(t)
+		claudeDir := t.TempDir()
+		writeClaudeFixture(t, claudeDir, "proj", "row-abc.jsonl", []string{
+			`{"type":"user","sessionId":"sess-1","message":{"role":"user","content":"row-text-row-abc"}}`,
+		})
+		dbDir := t.TempDir()
+		dbPath := newTestCorpus(t, dbDir, [][2]string{{"row-abc", "row-abc.jsonl"}})
+
+		stdout, stderr, exit := runCapture(t, []string{
+			"-db", dbPath, "-apply", "-authorized-live-write", "-watermark", watermarkArg, "-claude-root", claudeDir,
+		})
+		if exit != 0 {
+			t.Fatalf("exit = %d, want 0; stderr=%s", exit, stderr)
+		}
+		if strings.Contains(stderr, "AUTHORIZED LIVE-CORPUS WRITE") {
+			t.Errorf("banner must not print for a non-live path; stderr=%s", stderr)
+		}
+		if !strings.Contains(stdout, "rows attributed: 1") {
+			t.Errorf("stdout = %q, want exactly one row attributed, same as without the flag", stdout)
+		}
+	})
+
+	t.Run("apply + flag + explicitly-named live path is permitted and banners before writing", func(t *testing.T) {
+		sqliteAvailable(t)
+		// Build a real fixture corpus AT the live-corpus path itself, so this
+		// case can prove the write actually lands there -- ESTATE_CORPUS
+		// still points only at this same temp-dir path, never the real one.
+		claudeDirLive := t.TempDir()
+		writeClaudeFixture(t, claudeDirLive, "proj", "row-live.jsonl", []string{
+			`{"type":"user","sessionId":"sess-1","message":{"role":"user","content":"row-text-row-live"}}`,
+		})
+		liveDBPath := newTestCorpus(t, liveDir, [][2]string{{"row-live", "row-live.jsonl"}})
+		if liveDBPath != livePath {
+			// newTestCorpus always names its file corpus-copy.sqlite3; point
+			// ESTATE_CORPUS at the file it actually created instead.
+			t.Setenv("ESTATE_CORPUS", liveDBPath)
+			livePath = liveDBPath
+		}
+
+		stdout, stderr, exit := runCapture(t, []string{
+			"-db", livePath, "-apply", "-authorized-live-write", "-watermark", watermarkArg, "-claude-root", claudeDirLive,
+		})
+		if exit != 0 {
+			t.Fatalf("exit = %d, want 0; stderr=%s", exit, stderr)
+		}
+		if !strings.Contains(stderr, "AUTHORIZED LIVE-CORPUS WRITE") {
+			t.Errorf("stderr = %q, want the authorization banner", stderr)
+		}
+		if !strings.Contains(stderr, "rows to write: 1") {
+			t.Errorf("stderr = %q, want the banner to state the planned row count before writing", stderr)
+		}
+		if !strings.Contains(stderr, watermarkArg) {
+			t.Errorf("stderr = %q, want the banner to state the pinned watermark", stderr)
+		}
+		if !strings.Contains(stdout, "rows attributed: 1") {
+			t.Errorf("stdout = %q, want the permitted apply to actually write the row", stdout)
+		}
+	})
+}
+
 func sqliteAvailable(t *testing.T) {
 	t.Helper()
 	if _, err := exec.LookPath("sqlite3"); err != nil {
