@@ -21,14 +21,16 @@
 //     zero new rows -- every candidate is already present under its
 //     identity id and is reported outcomeAlready.
 //
-// # Never the live corpus
+// # Never the live corpus, unless explicitly authorized
 //
 // refuseLivePath below is an in-process backstop on top of the
 // ledger-write-guard hook: -apply refuses outright if -db resolves to the
 // live corpus path or the retired agent-dotfiles-supervisor location. This
 // tool's own acceptance evidence is produced entirely against a `cp`'d copy
 // (see the task brief); backfilling the live corpus is a separate, later,
-// explicitly authorized step this tool does not take.
+// explicitly authorized step -- gated by -authorized-live-write, see run()
+// and its doc comment there, so this refusal is not permanently absolute,
+// only absolute by default.
 package main
 
 import (
@@ -56,6 +58,10 @@ func run(args []string, stdout, stderr *os.File) int {
 	apply := fs.Bool("apply", false, "write claude_provenance rows for the plan computed under -watermark")
 	recordWatermark := fs.Bool("record-watermark", false, "print the current time as RFC3339 and exit; touches nothing else")
 	claudeRoot := fs.String("claude-root", "", "root of Claude transcript JSONL files (default ~/.claude/projects)")
+	authorizedLiveWrite := fs.Bool("authorized-live-write", false,
+		"explicit human authorization to run -apply against the live corpus. Default false, never inferable from "+
+			"any other flag or environment variable. Only takes effect when -db ALSO explicitly names the live "+
+			"path -- it never causes a default or inferred path to be treated as live-authorized.")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -82,19 +88,43 @@ func run(args []string, stdout, stderr *os.File) int {
 		fmt.Fprintln(stderr, "provenancebackfill: pass -dry-run or -apply")
 		return 2
 	}
-	if *apply {
-		if reason, live := refuseLivePath(*dbPath); live {
-			fmt.Fprintf(stderr, "provenancebackfill: refusing -apply against %s: %s\n", *dbPath, reason)
-			return 1
-		}
-	}
-
 	root := *claudeRoot
 	if root == "" {
 		root, err = defaultClaudeRoot()
 		if err != nil {
 			fmt.Fprintf(stderr, "provenancebackfill: %v\n", err)
 			return 1
+		}
+	}
+
+	if *apply {
+		if reason, live := refuseLivePath(*dbPath); live {
+			if !*authorizedLiveWrite {
+				fmt.Fprintf(stderr, "provenancebackfill: refusing -apply against %s: %s\n", *dbPath, reason)
+				return 1
+			}
+			// -authorized-live-write permits this ONLY because -db also
+			// explicitly names the live path (refuseLivePath just confirmed
+			// that identity) -- never a default or inferred path. Compute the
+			// plan read-only first so the banner states the exact row count
+			// before a single row is written, then print it to stderr before
+			// buildReport is called again with apply=true below.
+			planned, err := buildReport(*dbPath, root, watermark, false)
+			if err != nil {
+				fmt.Fprintf(stderr, "provenancebackfill: computing authorized live-write plan: %v\n", err)
+				return 1
+			}
+			abs := *dbPath
+			if a, absErr := filepath.Abs(*dbPath); absErr == nil {
+				abs = a
+			}
+			fmt.Fprintln(stderr, "================================================================================")
+			fmt.Fprintln(stderr, "AUTHORIZED LIVE-CORPUS WRITE -- -authorized-live-write was passed explicitly")
+			fmt.Fprintf(stderr, "  path:      %s\n", abs)
+			fmt.Fprintf(stderr, "  reason:    %s\n", reason)
+			fmt.Fprintf(stderr, "  rows to write: %d\n", planned.AttributedCount)
+			fmt.Fprintf(stderr, "  watermark: %s\n", watermark.Format(time.RFC3339))
+			fmt.Fprintln(stderr, "================================================================================")
 		}
 	}
 
