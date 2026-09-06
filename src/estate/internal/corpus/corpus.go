@@ -218,8 +218,9 @@ func Grounding(task string, ps []Param, excluded []Excluded, standing []Standing
 		fmt.Fprintf(&b, "## Standing law -- Agent Memory (%d of %d declared, all shown -- capped, never truncated)\n\n"+
 			"These are separately-sourced law: explicitly declared members of\n"+
 			"corpus.StandingLawSet, not corpus rows. They bind every task"+
-			" unconditionally,\nnot only tasks whose wording happens to match them.\n\n",
-			len(standing), len(standing))
+			" unconditionally,\nnot only tasks whose wording happens to match them.\n\n"+
+			"%s\n\n",
+			len(standing), len(standing), StandingLawAttributionInstruction)
 		for _, s := range standing {
 			fmt.Fprintf(&b, "- [agent-memory] **%s** — %s\n", s.Slug, s.Body)
 			fmt.Fprintf(&b, "  (why this is standing law: %s)\n", s.Reason)

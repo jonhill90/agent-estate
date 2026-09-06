@@ -97,6 +97,22 @@ type StandingLawEntry struct {
 	Body   string
 }
 
+// StandingLawAttributionInstruction is the fixed sentence Grounding() prints
+// alongside the standing-law section, agent-estate#1255's own re-measurement
+// (the K3 gate's second run went 2-of-3: the miss was not disobedience, it
+// was an agent that followed an injected member without citing it, so the
+// output alone could not distinguish "obeyed the law" from "happened to
+// agree with it"). Attribution is made part of the contract here rather than
+// left as a hoped-for behaviour.
+//
+// This is fixed preamble text, not a member body, but it is rendered only
+// alongside the standing-law section and exists purely because that section
+// exists -- so it counts against MaxStandingLawBytes exactly like a member's
+// body would (see StandingLaw() below). If a future member's body no longer
+// leaves room for this sentence, that is a finding to report (shrink the
+// member, or the set), never a reason to raise the cap.
+const StandingLawAttributionInstruction = "When a standing-law member below shapes your answer, say which one by name and state that it came from standing law -- an answer that merely agrees with it, uncited, is not distinguishable from luck and does not satisfy this requirement."
+
 // StandingLaw resolves StandingLawSet against the vault at vaultDir,
 // enforcing the member-count cap, the hash-drift check, and the total
 // byte cap, in that order. A declared member that fails to resolve is an
@@ -153,6 +169,14 @@ func StandingLaw(vaultDir string) ([]StandingLawEntry, error) {
 				MaxStandingLawBytes, m.Slug)
 		}
 		entries = append(entries, StandingLawEntry{Slug: m.Slug, Reason: m.Reason, Body: body})
+	}
+	if len(entries) > 0 {
+		total += len(StandingLawAttributionInstruction)
+		if total > MaxStandingLawBytes {
+			return nil, fmt.Errorf(
+				"standing-law set plus its fixed attribution instruction (%d bytes) exceeds the %d-byte cap -- shrink a member's body or the set",
+				len(StandingLawAttributionInstruction), MaxStandingLawBytes)
+		}
 	}
 	return entries, nil
 }
