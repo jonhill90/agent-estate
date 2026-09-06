@@ -575,7 +575,10 @@ func usage() {
   estate candidates [-db path]          derive quarantined, cited CANDIDATE knowledge
                                          rows (status=candidate, kind=unclassified) from
                                          codex_provenance -- never promotes, never
-                                         classifies; -db defaults to internal/corpus.Path()
+                                         classifies; -db defaults to internal/corpus.Path();
+                                         subcommands: list, show, decide, memory,
+                                         register-source (a catalogue-source citation,
+                                         never a fabricated prompt row)
   estate knowledge                      regenerate the compiled, read-only index over
                                          GitHub stars, the memory vault, the corpus and
                                          Loops-Research -- derived, never authoritative;
@@ -1033,7 +1036,7 @@ func runCandidatesDerive(args []string) {
 			"path -- it never causes a default or inferred path to be treated as live-authorized.")
 	fs.Parse(args)
 	if fs.NArg() != 0 {
-		fmt.Fprintf(os.Stderr, "estate: unrecognised argument %q for candidates -- valid: -db <path>, -apply, -authorized-live-write, or a list/show/decide/memory subcommand\n", fs.Arg(0))
+		fmt.Fprintf(os.Stderr, "estate: unrecognised argument %q for candidates -- valid: -db <path>, -apply, -authorized-live-write, or a list/show/decide/memory/register-source subcommand\n", fs.Arg(0))
 		os.Exit(2)
 	}
 	resolvedDB := resolveCandidatesDBPath(*dbPath)
@@ -1735,6 +1738,10 @@ func main() {
 	case "candidates":
 		if len(os.Args) > 2 && os.Args[2] == "memory" {
 			runCandidatesMemory(os.Args[3:])
+			return
+		}
+		if len(os.Args) > 2 && os.Args[2] == "register-source" {
+			runCandidatesRegisterSource(os.Args[3:])
 			return
 		}
 		if len(os.Args) > 2 && os.Args[2] == "list" {

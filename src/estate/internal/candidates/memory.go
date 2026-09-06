@@ -15,6 +15,17 @@ import (
 
 // Proposal contains reviewed paraphrases, never an automatically copied prompt.
 // AssistantContext is explanatory evidence, never operator authority.
+//
+// DestinationKind/Destination/Reason (this task's own deliverable 2, "Proposal shape") name WHERE an accepted
+// proposal lands and WHY, decided at proposal time rather than left implicit
+// until acceptance: DestinationKind is "memory" (the existing Agent Memory
+// fact mechanism -- Publish) or "repo" (a repo/docs/skill patch, recorded
+// only after integration -- PublishRepo). Destination is the canonical path
+// for that destination: a vault fact path for "memory" (informational only --
+// Publish still derives the real fact path from Slug, so a mismatch here is
+// a reviewer error to catch, not a second source of truth) or the exact repo
+// path for "repo" (PublishRepo requires an exact match before recording a
+// receipt against it).
 type Proposal struct {
 	Slug             string `json:"slug"`
 	Type             string `json:"type"`
@@ -26,6 +37,9 @@ type Proposal struct {
 	Reviewer         string `json:"reviewer"`
 	Supersedes       string `json:"supersedes"`
 	ExistingFactHash string `json:"existing_fact_hash,omitempty"` // explicit adoption of an inspected, unmanaged fact
+	DestinationKind  string `json:"destination_kind"`             // "memory" or "repo"
+	Destination      string `json:"destination"`                  // intended canonical destination path
+	Reason           string `json:"reason"`                       // why this citation belongs at Destination
 }
 
 type MemoryReview struct {
@@ -38,9 +52,27 @@ type MemoryReview struct {
 	Changed           bool     `json:"changed"`
 	FileHash          string   `json:"file_hash,omitempty"`
 	WouldState        string   `json:"would_state,omitempty"`
+	RepoPath          string   `json:"repo_path,omitempty"`   // set once a "repo" destination is recorded promoted
+	RepoCommit        string   `json:"repo_commit,omitempty"` // the integrating commit named in that receipt
 }
 
 func digest(s string) string { h := sha256.Sum256([]byte(s)); return hex.EncodeToString(h[:]) }
+
+// buildCitation renders the one citation string Propose freezes into a
+// revision hash and Publish re-derives to detect a changed source
+// (agent-estate#1251's own "source evidence changed; review a new proposal"
+// contract). Generalized so a "catalogue" row cites
+// Lane B's source id/title/location directly (no prompt/provenance to
+// name), while a "conversation" row keeps the original prompt/provenance/
+// harness/session/file/record shape unchanged.
+func buildCitation(id string, d Detail) string {
+	if d.SourceKind == "catalogue" {
+		return fmt.Sprintf("candidate=%s; catalogue_source=%s; catalogue_locator=%s; content_hash=%s",
+			id, d.CatalogueSourceID, d.CatalogueLocator, d.ContentHash)
+	}
+	return fmt.Sprintf("candidate=%s; prompt=%s; provenance=%s; harness=%s; session=%s; file=%s; record=%d; content_hash=%s",
+		id, d.PromptID, d.ProvenanceID, d.Harness, d.SessionID, d.SourceFile, d.RecordIndex, d.ContentHash)
+}
 
 // Advisory locks serialize this workflow's writers. No persistent lock ownership
 // is inferred from a stale file; the OS releases the lock when the process exits.
@@ -113,6 +145,15 @@ func Propose(db, id string, p Proposal, apply bool) (MemoryReview, error) {
 	if strings.TrimSpace(p.Learning) == "" || strings.TrimSpace(p.OperatorContext) == "" || strings.TrimSpace(p.AssistantContext) == "" {
 		return MemoryReview{}, fmt.Errorf("learning and attributed operator/assistant context required")
 	}
+	if p.DestinationKind != "memory" && p.DestinationKind != "repo" {
+		return MemoryReview{}, fmt.Errorf("destination_kind must be memory or repo")
+	}
+	if strings.TrimSpace(p.Destination) == "" || strings.ContainsAny(p.Destination, "\r\n") {
+		return MemoryReview{}, fmt.Errorf("destination must name a nonempty single-line intended canonical destination")
+	}
+	if strings.TrimSpace(p.Reason) == "" {
+		return MemoryReview{}, fmt.Errorf("reason is required -- why this citation belongs at destination")
+	}
 	unlock := func() {}
 	var err error
 	if apply {
@@ -127,7 +168,7 @@ func Propose(db, id string, p Proposal, apply bool) (MemoryReview, error) {
 		return MemoryReview{}, err
 	}
 	if d.PromptGone || d.ProvenanceGone || d.ContentHash == "" {
-		return MemoryReview{}, fmt.Errorf("cannot propose without resolvable prompt and provenance")
+		return MemoryReview{}, fmt.Errorf("cannot propose without a resolvable citation (prompt/provenance for a conversation candidate, or a registered catalogue source)")
 	}
 	old, err := ReadMemory(db, id)
 	if err != nil {
@@ -136,7 +177,7 @@ func Propose(db, id string, p Proposal, apply bool) (MemoryReview, error) {
 	if old.Proposal.Slug != "" && old.Proposal.Slug != p.Slug {
 		return old, fmt.Errorf("candidate identity is already bound to slug %s", old.Proposal.Slug)
 	}
-	citation := fmt.Sprintf("candidate=%s; prompt=%s; provenance=%s; harness=%s; session=%s; file=%s; record=%d; content_hash=%s", id, d.PromptID, d.ProvenanceID, d.Harness, d.SessionID, d.SourceFile, d.RecordIndex, d.ContentHash)
+	citation := buildCitation(id, d)
 	data, _ := json.Marshal(p)
 	rev := digest(string(data) + citation)
 	if rev == old.Revision {
@@ -174,12 +215,15 @@ func Publish(db, vault, id, action string, apply bool) (MemoryReview, error) {
 	if r.Revision == "" {
 		return r, fmt.Errorf("propose a cited learning first")
 	}
+	if r.Proposal.DestinationKind == "repo" {
+		return r, fmt.Errorf("proposal destination_kind is repo; use PublishRepo, not Publish")
+	}
 	if action == "accept" {
 		d, e := Get(db, id)
 		if e != nil {
 			return r, e
 		}
-		citation := fmt.Sprintf("candidate=%s; prompt=%s; provenance=%s; harness=%s; session=%s; file=%s; record=%d; content_hash=%s", id, d.PromptID, d.ProvenanceID, d.Harness, d.SessionID, d.SourceFile, d.RecordIndex, d.ContentHash)
+		citation := buildCitation(id, d)
 		if d.PromptGone || d.ProvenanceGone || citation != r.Citation {
 			return r, fmt.Errorf("source evidence changed; review a new proposal")
 		}
@@ -373,6 +417,91 @@ func Publish(db, vault, id, action string, apply bool) (MemoryReview, error) {
 	}
 	if err = saveMemory(db, id, r); err != nil {
 		return r, fmt.Errorf("fact written, decision incomplete; retry: %w", err)
+	}
+	return r, nil
+}
+
+// PublishRepo is the "repo/docs/skill patch" counterpart to Publish's
+// vault-fact path (deliverable 3: "acceptance either publishes a fact
+// through the existing memory mechanism ... or produces a repo/docs/skill
+// patch"). It never writes the repo file itself -- the patch is authored,
+// reviewed and committed entirely outside this workflow, by whoever owns
+// that path -- this only RECORDS the receipt (exact path + commit) once
+// that integration has already happened, which is why repoPath/repoCommit
+// are caller-supplied rather than computed: "repo publication is recorded
+// only after integration" is enforced by this being a receipt, not a write.
+func PublishRepo(db, id, action, repoPath, repoCommit string, apply bool) (MemoryReview, error) {
+	if action != "accept" && action != "reject" {
+		return MemoryReview{}, fmt.Errorf("action must be accept or reject")
+	}
+	unlock := func() {}
+	var err error
+	if apply {
+		unlock, err = lockFile(db + ".memory.lock")
+		if err != nil {
+			return MemoryReview{}, err
+		}
+	}
+	defer unlock()
+	r, err := ReadMemory(db, id)
+	if err != nil {
+		return r, err
+	}
+	if r.Revision == "" {
+		return r, fmt.Errorf("propose a cited learning first")
+	}
+	if r.Proposal.DestinationKind != "repo" {
+		return r, fmt.Errorf("proposal destination_kind is %q; use Publish for a memory destination", r.Proposal.DestinationKind)
+	}
+	if action == "accept" {
+		d, e := Get(db, id)
+		if e != nil {
+			return r, e
+		}
+		citation := buildCitation(id, d)
+		if d.PromptGone || d.ProvenanceGone || citation != r.Citation {
+			return r, fmt.Errorf("source evidence changed; review a new proposal")
+		}
+		if strings.TrimSpace(repoPath) == "" || strings.TrimSpace(repoCommit) == "" {
+			return r, fmt.Errorf("repo publication requires a path and commit -- recorded only after integration")
+		}
+		if repoPath != r.Proposal.Destination {
+			return r, fmt.Errorf("repo path %q does not match the proposal's declared destination %q", repoPath, r.Proposal.Destination)
+		}
+		if !regexp.MustCompile(`^[0-9a-f]{7,40}$`).MatchString(repoCommit) {
+			return r, fmt.Errorf("commit must be a git commit SHA (7-40 hex chars)")
+		}
+	}
+	state := "promoted"
+	if action == "reject" {
+		state = "rejected"
+	}
+	if state == "promoted" && r.State == "rejected" {
+		return r, fmt.Errorf("rejected proposal requires a revised proposal before acceptance")
+	}
+	changed := r.State != state
+	if state == "promoted" && (r.RepoPath != repoPath || r.RepoCommit != repoCommit) {
+		changed = true
+	}
+	if !apply {
+		r.WouldState = state
+		return r, nil
+	}
+	if !changed {
+		return r, nil
+	}
+	r.State = state
+	if state == "promoted" {
+		r.PublishedRevision = r.Revision
+		r.RepoPath = repoPath
+		r.RepoCommit = repoCommit
+	} else {
+		r.RepoPath = ""
+		r.RepoCommit = ""
+	}
+	r.Changed = apply
+	if err = saveMemory(db, id, r); err != nil {
+		return r, fmt.Errorf("decision incomplete; retry: %w", err)
 	}
 	return r, nil
 }
