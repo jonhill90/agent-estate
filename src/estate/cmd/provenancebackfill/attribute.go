@@ -64,6 +64,11 @@ func runSQLite(dbPath string, args ...string) (string, error) {
 // length-prefixed identity hash for idempotence; do not invent a second
 // identity scheme"). A rerun's INSERT against an id already present is
 // therefore a genuine primary-key collision, not a heuristic dedup check.
+//
+// buildReport calls this ONLY when apply is true (agent-estate#1237 review):
+// a -dry-run run must never issue a CREATE TABLE against dbPath, live or
+// not -- see buildReport's own comment on attributionTableExists for the
+// read path a dry run takes instead.
 func ensureAttributionTable(dbPath string) error {
 	const ddl = `CREATE TABLE IF NOT EXISTS claude_provenance (
 		id TEXT PRIMARY KEY,
@@ -78,6 +83,22 @@ func ensureAttributionTable(dbPath string) error {
 	);`
 	_, err := runSQLite(dbPath, ddl)
 	return err
+}
+
+// attributionTableExists reports whether claude_provenance already exists,
+// via a plain SELECT against sqlite_master -- never a CREATE, so it is safe
+// to call from a -dry-run path that must not write anything. buildReport
+// uses this instead of ensureAttributionTable when apply is false: a dry run
+// against a db that has never been attributed against before sees "table
+// does not exist yet" as before=0/already-empty, exactly the state that
+// would be true if the table really were absent -- it just never creates it
+// to find that out.
+func attributionTableExists(dbPath string) (bool, error) {
+	out, err := runSQLite(dbPath, "select name from sqlite_master where type='table' and name='claude_provenance';")
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(out) != "", nil
 }
 
 // fetchPromptsForFile returns every prompts row whose source_file equals
