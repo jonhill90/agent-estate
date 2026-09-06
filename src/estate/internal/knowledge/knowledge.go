@@ -1,5 +1,5 @@
 // Package knowledge builds `estate knowledge`'s compiled index -- a
-// derived, regenerable read over five sources that already exist, none
+// derived, regenerable read over six sources that already exist, none
 // of them owned or written by this package:
 //
 //   - GitHub stars (gh api user/starred --paginate)
@@ -15,8 +15,15 @@
 //     #1034, added because the rules every dispatched lane in this repo
 //     is required to obey were, until this source existed, not a
 //     knowledge source themselves
+//   - internal/catalogue's private source register
+//     (~/.local/state/agent-estate/catalogue/register.json,
+//     agent-estate#1139 lane B, 2026-09-06 knowledge-architecture run):
+//     one item per registered source -- its kind, locator, and
+//     authority/scope/access-policy/owner/freshness declarations, never
+//     that source's own extracted content, which stays in the
+//     register's own private cache. See catalogue.go's own doc comment.
 //
-// NEVER AUTHORITATIVE. This package never writes to any of its five
+// NEVER AUTHORITATIVE. This package never writes to any of its six
 // sources, never migrates or rewrites anything, and never chooses a
 // storage format for the operator's own knowledge base -- that is his
 // open decision, not this package's to settle. What Generate produces is
@@ -210,7 +217,7 @@ type GeneratedBy struct {
 	BuiltAt time.Time `json:"built_at"`
 }
 
-const stalenessRule = "stale the moment any of its five sources changes; " +
+const stalenessRule = "stale the moment any of its six sources changes; " +
 	"this Result carries no freshness check of its own beyond generated_at " +
 	"-- regenerate with `estate knowledge` before trusting a count here " +
 	"over a live read of the source"
@@ -241,4 +248,12 @@ type Config struct {
 	// so a test never shells out to the real git binary. nil means "use
 	// the real git binary" (see build_commit.go's defaultGitRunner).
 	RunGit func(args ...string) ([]byte, error)
+	// CataloguePath is internal/catalogue's private register directory
+	// (~/.local/state/agent-estate/catalogue by default -- see
+	// catalogue.DefaultRegisterDir). Empty means "no register configured",
+	// reported by catalogueSource as one honestly-failed source, the same
+	// as an unset VaultDir or LoopsResearch above -- never a fatal
+	// DefaultConfig error, since most machines running `estate knowledge`
+	// have never registered anything into this register.
+	CataloguePath string
 }
