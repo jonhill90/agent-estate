@@ -100,6 +100,7 @@ instrument that cannot see a thing looks exactly like the thing being absent.
 | Adding any script, or tempted by shell/Python | [docs/orientation/go-only.md](docs/orientation/go-only.md) |
 | A rule that used to be a CI gate | [docs/ci-rules-retired.md](docs/ci-rules-retired.md) |
 | `estate knowledge`'s index: what it queries, how it ranks, `coverage`/`contradictions`, `--private` | [docs/knowledge-system.md](docs/knowledge-system.md) |
+| Turning something worth knowing into a cited fact, or finding one already recorded: register/inspect/propose/review/publish/retrieve/refresh | [docs/knowledge-workflow.md](docs/knowledge-workflow.md) |
 | Running as, or reasoning about, the Director's cron loop (`estate tick check/record/escalate`) | [docs/director-brief.md](docs/director-brief.md) and [docs/director-loop.md](docs/director-loop.md) |
 | What phase the meta-harness roadmap is in, or what to build next | [docs/phase-plan.md](docs/phase-plan.md) |
 | Whether the one-independent-review convention is worth its cost | [docs/reviewer-value.md](docs/reviewer-value.md) |
