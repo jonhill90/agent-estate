@@ -1,8 +1,11 @@
 package catalogue
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -182,42 +185,130 @@ func TestBuild_ReturnsAllFourSources(t *testing.T) {
 	for _, s := range cat.Sources {
 		names[s.Name] = true
 	}
-	if !names["codex-rollouts"] || !names["claude-transcripts"] || !names["seed-pdf-a"] || !names["seed-pdf-b"] {
-		t.Fatalf("Sources = %v, want codex-rollouts, claude-transcripts, seed-pdf-a and seed-pdf-b", cat.Sources)
+	if !names["codex-rollouts"] || !names["claude-transcripts"] ||
+		!names["seed-pdf-continual-harness"] || !names["seed-pdf-agentic-engineering-google"] {
+		t.Fatalf("Sources = %v, want codex-rollouts, claude-transcripts, seed-pdf-continual-harness and seed-pdf-agentic-engineering-google", cat.Sources)
 	}
 }
 
-// TestBuildUnresolvedPDFSource_MissingWithSearchEvidence is the contract for
-// the seed-PDF case specifically: HealthMissing, ObservedAt pinned to the
-// recorded PDFSearchObservedAt constant (a real historical instant, not the
-// zero value and not a live time.Now() -- this function does no read, so
-// there is nothing for a call-time timestamp to legitimately measure), no
-// RootPath guessed, and a Detail that both names the requesting issue and
-// cites where this package looked -- never a filename invented to fill the
-// gap.
-func TestBuildUnresolvedPDFSource_MissingWithSearchEvidence(t *testing.T) {
-	src := BuildUnresolvedPDFSource("seed-pdf-a")
+// writeFixturePDF writes a minimal but structurally valid PDF containing n
+// page objects plus one page-tree root, so countPDFPageObjects has real
+// /Type/Page and /Type/Pages markers to distinguish -- never real document
+// content, per agent-estate#1139's constraint on this package's own tests.
+func writeFixturePDF(t *testing.T, path string, n int) []byte {
+	t.Helper()
+	var kids strings.Builder
+	var pages strings.Builder
+	for i := 1; i <= n; i++ {
+		if i > 1 {
+			kids.WriteString(" ")
+		}
+		kids.WriteString(strconv.Itoa(i+1) + " 0 R")
+		pages.WriteString(strconv.Itoa(i+1) + " 0 obj\n<< /Type /Page /Parent 1 0 R >>\nendobj\n")
+	}
+	content := "%PDF-1.4\n1 0 obj\n<< /Type /Pages /Kids [" + kids.String() +
+		"] /Count " + strconv.Itoa(n) + " >>\nendobj\n" + pages.String()
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("writing fixture pdf: %v", err)
+	}
+	return []byte(content)
+}
+
+// TestCountPDFPageObjects checks the marker-counting heuristic against a
+// fixture with a known page count, and specifically that the page-tree
+// root's own /Type /Pages entry is excluded rather than double-counted.
+func TestCountPDFPageObjects(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fixture.pdf")
+	data := writeFixturePDF(t, path, 5)
+	if got := countPDFPageObjects(data); got != 5 {
+		t.Fatalf("countPDFPageObjects = %d, want 5", got)
+	}
+}
+
+// TestBuildSeedPDFSource_Missing covers a descriptor whose path does not
+// exist on this machine -- the case every non-operator machine (e.g. CI)
+// hits, since these two files live only under the operator's own $HOME.
+func TestBuildSeedPDFSource_Missing(t *testing.T) {
+	dir := t.TempDir()
+	d := SeedPDFDescriptor{
+		Name:           "fixture-missing",
+		Path:           filepath.Join(dir, "does-not-exist.pdf"),
+		RecordedSHA256: "deadbeef",
+	}
+	src := BuildSeedPDFSource(d)
 	if src.Health != HealthMissing {
 		t.Fatalf("Health = %v, want HealthMissing", src.Health)
 	}
 	if src.Harness != "pdf" {
 		t.Fatalf("Harness = %q, want \"pdf\"", src.Harness)
 	}
-	if src.RootPath != "" {
-		t.Fatalf("RootPath = %q, want empty -- no candidate path was ever identified", src.RootPath)
+	if !src.ObservedAt.IsZero() {
+		t.Fatalf("ObservedAt = %v, want zero value for an unread source", src.ObservedAt)
 	}
-	if !src.ObservedAt.Equal(PDFSearchObservedAt) {
-		t.Fatalf("ObservedAt = %v, want it pinned to PDFSearchObservedAt (%v) -- a recorded historical instant, not the zero value and not a live time.Now() call", src.ObservedAt, PDFSearchObservedAt)
+}
+
+// TestBuildSeedPDFSource_HashMatch covers the case both real seed PDFs are
+// in: a live file whose computed SHA-256 matches RecordedSHA256. Detail must
+// say so and UnitCount must reflect the live page count, not a hardcoded one.
+func TestBuildSeedPDFSource_HashMatch(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fixture.pdf")
+	data := writeFixturePDF(t, path, 3)
+	sum := sha256.Sum256(data)
+	want := hex.EncodeToString(sum[:])
+
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat before: %v", err)
 	}
-	if src.UnitCount != 0 {
-		t.Fatalf("UnitCount = %d, want 0", src.UnitCount)
+
+	d := SeedPDFDescriptor{Name: "fixture-match", Path: path, RecordedSHA256: want}
+	src := BuildSeedPDFSource(d)
+
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat after: %v", err)
 	}
-	if !strings.Contains(src.Detail, "referent unresolved") {
-		t.Fatalf("Detail = %q, want it to say the referent is unresolved", src.Detail)
+	if !before.ModTime().Equal(after.ModTime()) {
+		t.Fatalf("mtime changed: before %v, after %v", before.ModTime(), after.ModTime())
 	}
-	for _, loc := range PDFSearchLocations {
-		if !strings.Contains(src.Detail, loc) {
-			t.Fatalf("Detail does not contain searched location %q", loc)
-		}
+
+	if src.Health != HealthPopulated {
+		t.Fatalf("Health = %v, want HealthPopulated", src.Health)
+	}
+	if src.UnitCount != 3 {
+		t.Fatalf("UnitCount = %d, want 3", src.UnitCount)
+	}
+	if src.ObservedSHA256 != want {
+		t.Fatalf("ObservedSHA256 = %q, want %q", src.ObservedSHA256, want)
+	}
+	if src.RecordedSHA256 != want {
+		t.Fatalf("RecordedSHA256 = %q, want %q", src.RecordedSHA256, want)
+	}
+	if !strings.Contains(src.Detail, "verified") || strings.Contains(src.Detail, "MISMATCH") {
+		t.Fatalf("Detail = %q, want it to say the hash verified, not mismatched", src.Detail)
+	}
+}
+
+// TestBuildSeedPDFSource_HashMismatch covers the case RecordedSHA256 no
+// longer matches the live file: this must be reported as a mismatch, never
+// silently corrected or silently trusted.
+func TestBuildSeedPDFSource_HashMismatch(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fixture.pdf")
+	writeFixturePDF(t, path, 2)
+
+	d := SeedPDFDescriptor{Name: "fixture-mismatch", Path: path, RecordedSHA256: "0000000000000000000000000000000000000000000000000000000000000000"}
+	src := BuildSeedPDFSource(d)
+
+	if src.Health != HealthPopulated {
+		t.Fatalf("Health = %v, want HealthPopulated (file is readable; the mismatch is a Detail finding, not an unreadable source)", src.Health)
+	}
+	if !strings.Contains(src.Detail, "MISMATCH") {
+		t.Fatalf("Detail = %q, want it to flag the SHA-256 mismatch", src.Detail)
+	}
+	if src.ObservedSHA256 == src.RecordedSHA256 {
+		t.Fatalf("ObservedSHA256 (%q) unexpectedly equals RecordedSHA256 -- fixture is supposed to mismatch", src.ObservedSHA256)
 	}
 }

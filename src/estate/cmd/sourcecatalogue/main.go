@@ -34,14 +34,14 @@ func main() {
 		if claude == "" {
 			claude = catalogue.DefaultClaudeRoot()
 		}
-		cat = catalogue.Catalogue{
-			Sources: []catalogue.Source{
-				catalogue.BuildCodexSource(codex),
-				catalogue.BuildClaudeSource(claude),
-				catalogue.BuildUnresolvedPDFSource("seed-pdf-a"),
-				catalogue.BuildUnresolvedPDFSource("seed-pdf-b"),
-			},
+		sources := []catalogue.Source{
+			catalogue.BuildCodexSource(codex),
+			catalogue.BuildClaudeSource(claude),
 		}
+		for _, d := range catalogue.SeedPDFDescriptors {
+			sources = append(sources, catalogue.BuildSeedPDFSource(d))
+		}
+		cat = catalogue.Catalogue{Sources: sources}
 	}
 
 	enc := json.NewEncoder(os.Stdout)
