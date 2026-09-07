@@ -37,19 +37,25 @@ MOC proposals require eight stable notes sharing a tag without a covering hub.
 Acceptance is explicit. Refresh replaces only the generated link section and
 preserves curated overview prose. Backups precede canonical file changes.
 
-The live fact migration has separate evidence in the local run directory.
-Obsidian aliases alone did not resolve three old bare wikilinks in the measured
-pilot; use explicit ID-path Markdown links. Standing-law loading still assumes
-legacy paths and is outside this push's authorized standing-law changes. Do not
-claim the migration proves compatibility of every existing consumer.
+**Historical (fixed since):** at the time of the live fact migration this
+paragraph originally described, Obsidian aliases alone did not resolve
+three old bare wikilinks in the measured pilot (use explicit ID-path
+Markdown links), and standing-law loading assumed only the legacy
+`agent/facts/` path. Standing-law resolution now supports both the
+legacy path and an alias-walk under `01 - Notes/` (agent-estate#1280,
+`internal/corpus.resolveStandingLawMemberFile`) — a member declared by
+its pre-migration slug still resolves after the note moves. This does
+not claim the migration proved compatibility of every existing consumer,
+only that this specific gap closed.
 
 
 Short canonical usage guide for turning something worth knowing into a
 retrievable, cited fact — and back out again when you need to find it.
 This is the loop, not the mechanism: for what `estate knowledge` actually
-indexes and how it ranks, see `docs/knowledge-system.md`; for exactly where
-each candidate/fact lives at each stage, see the vault's own
-`agent/LIFECYCLE.md`.
+indexes and how it ranks, see `docs/canonical/knowledge-system.md`; for
+exactly where each candidate/fact lives at each stage, see the vault's
+own `99 - Meta/LIFECYCLE.md` (moved from `agent/LIFECYCLE.md` by
+A2-COMPLETION).
 
 Every command below was run against a private, read-only copy of the
 corpus (`sqlite3 -readonly ~/corpus/corpus.sqlite3 ".backup <scratch>"`)
@@ -81,11 +87,26 @@ row that resolves to a real prompt, status `candidate`, kind
 existing row.
 
 **Registering a source** (a repo, a document, a URL — not a
-corpus-derived candidate) is Lane B's catalogue work
-(`src/estate/internal/catalogue/`), not yet merged as of this PR's first
-half. This section will be updated once that command exists; until then,
-a source worth indexing gets a source record under the vault's
-`01 - Sources/` per `run/contract.md`'s frontmatter contract.
+corpus-derived candidate) is `internal/catalogue` (landed,
+agent-estate#1264) via `estate candidates register-source`:
+
+```sh
+go run ./src/estate candidates register-source -id <source-id> -locator <path-or-url> -hash <content-hash> [-apply]
+```
+
+`-id`/`-locator`/`-hash` are supplied by the caller today, describing a
+source that already exists in the register
+(`~/.local/state/agent-estate/catalogue/register.json`) — this command
+does not fabricate one. Replacing those caller-supplied flags with an
+automatic lookup of the registered ID's own pinned revision is separate,
+later work (SPEC §3, not yet implemented); until it lands, verify the
+id/locator/hash you pass match the register's own entry before `-apply`.
+Once registered, the source is retrievable via `estate knowledge`'s
+`source:catalogue-source` index (see `docs/canonical/knowledge-system.md`)
+and citable in a proposal's `destination`. Vault-side source records live
+under `05 - Sources/`, not `01 - Sources/` — see the vault's own
+`99 - Meta/note-subdirs.md` and INMAPS layout, not `run/contract.md`
+(pre-INMAPS naming; superseded).
 
 ## 2. Inspect
 
@@ -105,7 +126,7 @@ c3feed7c6622727d35c7f9ae305fb7c3d67db672d1bc97c2c0a0e60e8b255816  [undecided]  /
 `show` prints one candidate's cited prompt metadata (harness, session,
 source file, content hash) — never the raw prompt text itself; that stays
 in the corpus, disclosed only through `estate knowledge get`'s
-`disclosure` field (see `docs/knowledge-system.md`).
+`disclosure` field (see `docs/canonical/knowledge-system.md`).
 
 ## 3. Review (decide: promote or discard the candidate itself)
 
@@ -187,7 +208,7 @@ index built 8s ago (2026-09-06T20:12:28Z)
 
 [it-d8b0f7e085a8daf0] repo-docs (score 10: how, dispatch, work)
   How does knowledge retrieval work in this repo? — How do I scope a query to one source? (source:<name> scoping)
-  docs/knowledge-system.md#how-does-knowledge-retrieval-work-in-this-repo--...
+  docs/canonical/knowledge-system.md#how-does-knowledge-retrieval-work-in-this-repo--...
 ```
 
 `query` returns small, ranked, cited pointers (never full bodies);
@@ -195,7 +216,7 @@ index built 8s ago (2026-09-06T20:12:28Z)
 full Tier1/Tier2/Tier3 body. Publishable-only by default; `--private`
 lifts that filter for anything entitled to see private material (never
 paste `--private` output anywhere public). Full state/coverage/
-contradiction semantics: `docs/knowledge-system.md`.
+contradiction semantics: `docs/canonical/knowledge-system.md`.
 
 ## 7. Refresh (regenerate the compiled index)
 
