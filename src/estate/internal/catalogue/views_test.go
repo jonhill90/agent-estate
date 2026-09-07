@@ -56,6 +56,34 @@ func TestGenerateSourceView_NeedsReviewMapsToDraft(t *testing.T) {
 	}
 }
 
+// TestGenerateSourceView_TagsNeverCarryKindAsANamespacedTag is this fix's
+// own regression guard (P1.5, inmaps-spec section 3): kind already has
+// its own dedicated frontmatter field on a source view -- putting it into
+// tags a second time as "kind/doc" is both namespaced (violating the
+// flat-lowercase tag rule) and a kind value in tags at all (which section
+// 3 forbids outright). The fixture's own Kind is "kind/doc", so if this
+// regresses, this test fails on the fixture default -- no separate broken
+// fixture is needed to catch it.
+func TestGenerateSourceView_TagsNeverCarryKindAsANamespacedTag(t *testing.T) {
+	out := GenerateSourceView(fixtureEntry(), time.Now())
+	line := ""
+	for _, l := range strings.Split(out, "\n") {
+		if strings.HasPrefix(l, "tags: ") {
+			line = l
+			break
+		}
+	}
+	if line == "" {
+		t.Fatalf("no tags: line found:\n%s", out)
+	}
+	if strings.Contains(line, "/") {
+		t.Fatalf("tags line carries a namespaced (slash-containing) value: %q", line)
+	}
+	if !strings.Contains(out, "kind: \"kind/doc\"") {
+		t.Fatalf("kind's own dedicated frontmatter field is missing or changed:\n%s", out)
+	}
+}
+
 func TestWriteViewsStaging_WritesOneFilePerEntry(t *testing.T) {
 	dir := t.TempDir()
 	entries := []RegisterEntry{fixtureEntry()}

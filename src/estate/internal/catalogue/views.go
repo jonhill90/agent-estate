@@ -11,6 +11,15 @@ import (
 	"time"
 )
 
+// generatedSourceTag is the one flat, lowercase, governed tag a generated
+// Source-type record (a source view, the agents-roster pointer) carries.
+// This is NOT e.Kind: kind already has its own dedicated frontmatter field
+// below (`kind: ...`), and inmaps-spec section 3 (Jon's Second Brain
+// templates: flat lowercase tags; kind belongs in frontmatter, never a
+// tag) forbids putting it in `tags:` a second time as a namespaced value
+// like "kind/doc". Registered in 99 - Meta/tags.md's own vocabulary.
+const generatedSourceTag = "source"
+
 // generatedByActor is this package's own OKF 0.2 `generated.by` actor
 // identifier -- the "<producer>/<version>" convention the spec names for
 // an automated agent, not a human or a process id.
@@ -56,7 +65,7 @@ func GenerateSourceView(e RegisterEntry, now time.Time) string {
 	fmt.Fprintf(&b, "  at: %s\n", now.UTC().Format(time.RFC3339))
 	fmt.Fprintf(&b, "status: %s\n", okfStatus(e.Status))
 	fmt.Fprintf(&b, "id: %s\ncatalogue_id: %s\n", e.ViewID, e.ID)
-	fmt.Fprintf(&b, "title: %s\ndescription: %s\ntags: [%s]\ncreated: %s\nupdated: %s\n", yamlQuote(e.ID), yamlQuote(e.WhyIndexed), yamlQuote(e.Kind), e.RegisteredAt.UTC().Format(time.RFC3339), now.UTC().Format(time.RFC3339))
+	fmt.Fprintf(&b, "title: %s\ndescription: %s\ntags: [%s]\ncreated: %s\nupdated: %s\n", yamlQuote(e.ID), yamlQuote(e.WhyIndexed), yamlQuote(generatedSourceTag), e.RegisteredAt.UTC().Format(time.RFC3339), now.UTC().Format(time.RFC3339))
 	fmt.Fprintf(&b, "locator: %s\n", yamlQuote(e.Locator))
 	fmt.Fprintf(&b, "kind: %s\n", yamlQuote(e.Kind))
 	fmt.Fprintf(&b, "provenance: %s\n", yamlQuote(e.Provenance))
@@ -198,7 +207,7 @@ func WriteViewsStaging(entries []RegisterEntry, stagingDir string, now time.Time
 
 	// The area index is generated navigation, not a duplicate source catalogue.
 	var index strings.Builder
-	fmt.Fprintf(&index, "---\ntype: Source\nid: source-index\ntitle: Sources\ndescription: Registered source pointers and review state.\ntags: [\"kind/doc\"]\ncreated: %s\nupdated: %s\nstatus: stable\nsource: private catalogue register\n---\n\n# Sources\n\nGenerated navigation; originals remain authoritative.\n\n", now.UTC().Format(time.RFC3339), now.UTC().Format(time.RFC3339))
+	fmt.Fprintf(&index, "---\ntype: Source\nid: source-index\ntitle: Sources\ndescription: Registered source pointers and review state.\ntags: [%q]\ncreated: %s\nupdated: %s\nstatus: stable\nsource: private catalogue register\n---\n\n# Sources\n\nGenerated navigation; originals remain authoritative.\n\n", generatedSourceTag, now.UTC().Format(time.RFC3339), now.UTC().Format(time.RFC3339))
 	for _, e := range sorted {
 		fmt.Fprintf(&index, "- [%s](%s) — %s; %s\n", e.ViewID, viewFileName(e), e.Kind, e.Status)
 	}

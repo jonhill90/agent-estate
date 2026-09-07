@@ -51,7 +51,13 @@ func validateINMAPS(vault string, p Proposal) error {
 		return fmt.Errorf("at least one governed tag required")
 	}
 	for _, tag := range p.Tags {
-		if !regexp.MustCompile(`^(kind|lifecycle|project|topic)/[a-z0-9]+(?:-[a-z0-9]+)*$`).MatchString(tag) {
+		// A tag is either one of the closed namespaced axes
+		// (kind/lifecycle/project/topic -- unchanged, per 99 - Meta/tags.md)
+		// OR a flat lowercase word with no slash at all -- inmaps-spec
+		// section 3's own small exception for generated Source-type
+		// records (e.g. "source"), which never carry a kind value as a
+		// tag since kind already has its own dedicated frontmatter field.
+		if !regexp.MustCompile(`^(kind|lifecycle|project|topic)/[a-z0-9]+(?:-[a-z0-9]+)*$|^[a-z0-9]+(?:-[a-z0-9]+)*$`).MatchString(tag) {
 			return fmt.Errorf("invalid tag %q", tag)
 		}
 		if strings.HasPrefix(tag, "topic/") {
@@ -427,8 +433,12 @@ func WriteRosterPointer(vault, roster string) error {
 	}
 	defer unlock()
 	at := time.Now().UTC().Format(time.RFC3339)
-	text := fmt.Sprintf("---\ntype: Source\nid: agents-roster-routing\ntitle: Agent roster\ndescription: Route to canonical agent definitions and assigned seats.\ntags: [\"kind/doc\"]\ncreated: %s\nupdated: %s\nstatus: stable\nsource: %s\n---\n\n# Agent roster\n\n[Open the agent-dotfiles roster](%s).\n\nThis is one routing pointer, not a memory store. The roster distinguishes\ndefinitions from assigned seats and does not claim process liveness. The\nlinked branch is pending review; retarget to the canonical checkout after\nintegration. Per-agent memory format remains reserved to Jon.\n", at, at, scalar(roster), strings.ReplaceAll(roster, " ", "%20"))
-	p := Proposal{Type: "Source", Title: "Agent roster", Description: "Canonical roster routing", Learning: "Pointer", Tags: []string{"kind/doc"}}
+	// tags carries "source" -- a flat, lowercase, governed tag (99 - Meta/
+	// tags.md) -- never a namespaced "kind/doc" value: this note has no
+	// separate kind: frontmatter field to make that redundant, but
+	// inmaps-spec section 3 still forbids a kind value in tags at all.
+	text := fmt.Sprintf("---\ntype: Source\nid: agents-roster-routing\ntitle: Agent roster\ndescription: Route to canonical agent definitions and assigned seats.\ntags: [%q]\ncreated: %s\nupdated: %s\nstatus: stable\nsource: %s\n---\n\n# Agent roster\n\n[Open the agent-dotfiles roster](%s).\n\nThis is one routing pointer, not a memory store. The roster distinguishes\ndefinitions from assigned seats and does not claim process liveness. The\nlinked branch is pending review; retarget to the canonical checkout after\nintegration. Per-agent memory format remains reserved to Jon.\n", "source", at, at, scalar(roster), strings.ReplaceAll(roster, " ", "%20"))
+	p := Proposal{Type: "Source", Title: "Agent roster", Description: "Canonical roster routing", Learning: "Pointer", Tags: []string{"source"}}
 	if e = validateINMAPS(vault, p); e != nil {
 		return e
 	}
