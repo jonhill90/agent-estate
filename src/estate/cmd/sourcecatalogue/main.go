@@ -154,6 +154,9 @@ func runRegister(args []string) {
 	extractionKind := fs.String("extraction-kind", "", "extraction mechanism: pdf, conversation, or repo-docs (others register with extraction marked unavailable)")
 	kind := fs.String("kind", "", "contract.md content-type tag: one of kind/repo, kind/doc, kind/transcript, kind/decision, kind/skill, kind/tool")
 	locator := fs.String("locator", "", "the file or root path this source lives at")
+	remote := fs.String("remote-url", "", "explicit remote URL; never inferred")
+	local := fs.String("local-path", "", "explicit checkout path; absence is recorded")
+	routing := fs.String("routing-surfaces", "", "comma-separated canonical routing paths")
 	provenance := fs.String("provenance", "", "who or what produced this RECORD (not the original) -- e.g. an agent id or 'operator, via sourcecatalogue'")
 	attribution := fs.String("attribution", "", "who or what authored the ORIGINAL this record points at; defaults to \"unknown\" if unset, never left blank")
 	authority := fs.String("authority", "", "how much weight this source's content should carry against a conflicting claim")
@@ -183,9 +186,10 @@ func runRegister(args []string) {
 
 	reg := loadOrExit(*registerDir)
 	entry, created := reg.Register(*registerDir, catalogue.RegisterInput{
-		Kind:            *kind,
-		ExtractionKind:  catalogue.ExtractionKind(*extractionKind),
-		Locator:         *locator,
+		Kind:           *kind,
+		ExtractionKind: catalogue.ExtractionKind(*extractionKind),
+		Locator:        *locator,
+		RemoteURL:      *remote, LocalPath: *local, RoutingSurfaces: splitRouting(*routing),
 		Provenance:      *provenance,
 		Attribution:     *attribution,
 		Authority:       *authority,
@@ -317,4 +321,11 @@ func runRefresh(args []string) {
 	for _, e := range refreshed {
 		printEntry(e, false)
 	}
+}
+
+func splitRouting(s string) []string {
+	if s == "" {
+		return nil
+	}
+	return strings.Split(s, ",")
 }

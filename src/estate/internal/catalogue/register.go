@@ -126,7 +126,11 @@ const (
 // comment for the two fields (ExtractionKind, Status) that are this
 // package's own.
 type RegisterEntry struct {
-	ViewID string `json:"view_id,omitempty"` // Stable INMAPS view identity; ID retains existing catalogue references.
+	RemoteURL       string     `json:"remote_url,omitempty"`
+	LocalPath       string     `json:"local_path,omitempty"`
+	LocalState      LocalState `json:"local_state,omitempty"`
+	RoutingSurfaces []string   `json:"routing_surfaces,omitempty"`
+	ViewID          string     `json:"view_id,omitempty"` // Stable INMAPS view identity; ID retains existing catalogue references.
 	// ID realizes contract `id`. Derived from Locator (identityFor) --
 	// stable across repeated registrations of the same source, never
 	// reassigned, never reused after a record is deleted (contract §1's
@@ -301,6 +305,9 @@ func identityFor(locator string) string {
 // Status, ExtractionStatus, the two timestamps) are this package's own
 // to compute -- a caller never invents them.
 type RegisterInput struct {
+	RemoteURL       string
+	LocalPath       string
+	RoutingSurfaces []string
 	Kind            string
 	ExtractionKind  ExtractionKind
 	Locator         string
@@ -345,13 +352,17 @@ func (reg *Register) Register(registerDir string, rawIn RegisterInput, now time.
 	assignViewIDs(reg.Entries)
 	in := rawIn.applyDefaults()
 	id := identityFor(in.Locator)
-	revision, extractionStatus, cachePath := observe(in.ExtractionKind, in.Locator, cacheDir(registerDir, id))
+	revision, extractionStatus, cachePath := observe(in.ExtractionKind, observationLocator(in.Locator, in.LocalPath), cacheDir(registerDir, id))
 
 	for i := range reg.Entries {
 		if reg.Entries[i].ID != id {
 			continue
 		}
 		e := &reg.Entries[i]
+		e.RemoteURL = in.RemoteURL
+		e.LocalPath = in.LocalPath
+		e.RoutingSurfaces = append([]string(nil), in.RoutingSurfaces...)
+		e.LocalState = localState(in.LocalPath)
 		e.Kind = in.Kind
 		e.ExtractionKind = in.ExtractionKind
 		e.Provenance = in.Provenance
@@ -372,12 +383,14 @@ func (reg *Register) Register(registerDir string, rawIn RegisterInput, now time.
 		// own -- see driftStatus's own doc comment: only an unchanged
 		// revision against what NeedsReview last observed, or an
 		// explicit Acknowledge, clears it.
+		e.LocalState = localState(e.LocalPath)
 		e.Status = driftStatus(e.Status, e.ObservedRevision, revision)
 		e.ObservedRevision = revision
 		return *e, false
 	}
 
 	e := RegisterEntry{
+		RemoteURL: in.RemoteURL, LocalPath: in.LocalPath, LocalState: localState(in.LocalPath), RoutingSurfaces: append([]string(nil), in.RoutingSurfaces...),
 		ID:                  id,
 		Kind:                in.Kind,
 		ExtractionKind:      in.ExtractionKind,
@@ -436,7 +449,8 @@ func (reg *Register) Refresh(registerDir, id string, now time.Time) (RegisterEnt
 			continue
 		}
 		e := &reg.Entries[i]
-		revision, extractionStatus, cachePath := observe(e.ExtractionKind, e.Locator, cacheDir(registerDir, e.ID))
+		revision, extractionStatus, cachePath := observe(e.ExtractionKind, observationLocator(e.Locator, e.LocalPath), cacheDir(registerDir, e.ID))
+		e.LocalState = localState(e.LocalPath)
 		e.Status = driftStatus(e.Status, e.ObservedRevision, revision)
 		e.ObservedRevision = revision
 		e.ExtractionStatus = extractionStatus
@@ -503,4 +517,34 @@ func assignViewIDs(entries []RegisterEntry) {
 			}
 		}
 	}
+}
+
+// LocalState records checkout availability independently of the declared remote.
+type LocalState string
+
+const (
+	LocalUnspecified LocalState = "unspecified"
+	LocalMissing     LocalState = "missing"
+	LocalPresent     LocalState = "present"
+	LocalUnavailable LocalState = "unavailable"
+)
+
+func localState(path string) LocalState {
+	if path == "" {
+		return LocalUnspecified
+	}
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return LocalMissing
+	}
+	if err != nil || !info.IsDir() {
+		return LocalUnavailable
+	}
+	return LocalPresent
+}
+func observationLocator(locator, local string) string {
+	if local != "" {
+		return local
+	}
+	return locator
 }

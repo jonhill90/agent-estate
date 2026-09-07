@@ -65,7 +65,7 @@ func catalogueSource(registerDir string) (SourceResult, []Item) {
 				e.Kind, e.Locator, e.Authority, e.Scope, e.Access, e.ReviewState, e.Status),
 			Tier3: fmt.Sprintf(
 				"provenance: %s\nattribution: %s\nowner: %s\nfreshness: %s\nextraction_status: %s\nobserved_revision: %s\nlast_refreshed_at: %s\nregistered_at: %s",
-				e.Provenance, e.Attribution, e.Owner, e.Freshness, e.ExtractionStatus, e.ObservedRevision, e.LastRefreshedAt, e.RegisteredAt),
+				e.Provenance, e.Attribution, e.Owner, e.Freshness, e.ExtractionStatus, e.ObservedRevision, e.LastRefreshedAt, e.RegisteredAt) + fmt.Sprintf("\nremote_url: %s\nlocal_path: %s\nlocal_state: %s\nrouting_surfaces: %v", e.RemoteURL, e.LocalPath, e.LocalState, e.RoutingSurfaces),
 			Publishable:  publishable,
 			PublishBasis: basis,
 		})

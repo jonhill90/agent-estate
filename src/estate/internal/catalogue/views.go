@@ -67,6 +67,7 @@ func GenerateSourceView(e RegisterEntry, now time.Time) string {
 	fmt.Fprintf(&b, "id: %s\ncatalogue_id: %s\n", e.ViewID, e.ID)
 	fmt.Fprintf(&b, "title: %s\ndescription: %s\ntags: [%s]\ncreated: %s\nupdated: %s\n", yamlQuote(e.ID), yamlQuote(e.WhyIndexed), yamlQuote(generatedSourceTag), e.RegisteredAt.UTC().Format(time.RFC3339), now.UTC().Format(time.RFC3339))
 	fmt.Fprintf(&b, "locator: %s\n", yamlQuote(e.Locator))
+	fmt.Fprintf(&b, "remote_url: %s\nlocal_path: %s\nlocal_state: %s\n", yamlQuote(e.RemoteURL), yamlQuote(e.LocalPath), yamlQuote(string(e.LocalState)))
 	fmt.Fprintf(&b, "kind: %s\n", yamlQuote(e.Kind))
 	fmt.Fprintf(&b, "provenance: %s\n", yamlQuote(e.Provenance))
 	fmt.Fprintf(&b, "attribution: %s\n", yamlQuote(e.Attribution))
@@ -94,6 +95,10 @@ func GenerateSourceView(e RegisterEntry, now time.Time) string {
 	fmt.Fprintf(&b, "# %s\n\n", e.ID)
 	fmt.Fprintf(&b, "**Kind:** %s  \n", e.Kind)
 	fmt.Fprintf(&b, "**Locator:** %s  \n", e.Locator)
+	fmt.Fprintf(&b, "**Remote:** %s  \n**Local checkout:** %s (%s)  \n", e.RemoteURL, e.LocalPath, e.LocalState)
+	for _, surface := range e.RoutingSurfaces {
+		fmt.Fprintf(&b, "**Routing surface:** %s  \n", surface)
+	}
 	fmt.Fprintf(&b, "**Review state:** %s  \n", e.ReviewState)
 	fmt.Fprintf(&b, "**Drift status:** %s  \n\n", e.Status)
 
