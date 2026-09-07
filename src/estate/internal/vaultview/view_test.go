@@ -72,3 +72,29 @@ func TestPartialBatchDoesNotWithdrawUnselectedRows(t *testing.T) {
 		t.Fatal(string(b))
 	}
 }
+
+func TestProjectionPreservesAssociations(t *testing.T) {
+	v := t.TempDir()
+	rows := []Row{{Item: "a", Prompt: "p", At: 1788739200, Kind: "parameter", Weight: "hard", Status: "acted", Body: "Original"}}
+	r, e := Write(v, rows)
+	if e != nil {
+		t.Fatal(e)
+	}
+	p := filepath.Join(v, NotesDir, r.Mapping["a"]+".md")
+	b, _ := os.ReadFile(p)
+	b = []byte(strings.Replace(string(b), "tags: [", "tags: [azure, ", 1) + "\n## Relations\n\n- relates_to: [Other](other.md)\n")
+	os.WriteFile(p, b, 0600)
+	rows[0].Body = "Revised"
+	rows[0].Status = "dropped"
+	if _, e = Write(v, rows); e != nil {
+		t.Fatal(e)
+	}
+	b, _ = os.ReadFile(p)
+	if !strings.Contains(string(b), "azure") || !strings.Contains(string(b), "## Relations") || strings.Contains(string(b), "standing-rule") {
+		t.Fatalf("association lost or stale structural tag: %s", b)
+	}
+	r, e = Write(v, rows)
+	if e != nil || r.Changed != 0 {
+		t.Fatalf("rerun: %+v %v", r, e)
+	}
+}

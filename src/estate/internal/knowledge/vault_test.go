@@ -188,3 +188,25 @@ func TestNestedNoteQueryExcludesRetiredAndDraft(t *testing.T) {
 	}
 	t.Logf("retrieved one current nested note; draft/deprecated excluded; canonical citation %s", items[0].Permalink)
 }
+
+func TestVaultTagsReachExactQuery(t *testing.T) {
+	for _, tags := range []string{"tags: [azure, review]", "tags: [\"azure\", \"review\"]", "tags:\n  - azure\n  - review"} {
+		t.Run(tags, func(t *testing.T) {
+			v := t.TempDir()
+			writeVaultFact(t, v, "one", strings.Replace(fixtureVaultFact, "type: project", "type: project\n"+tags, 1))
+			writeVaultFact(t, v, "decoy", strings.Replace(fixtureVaultFact, "Test fact", "azure prose", 1))
+			res, items := vaultSource(v)
+			p := filepath.Join(t.TempDir(), "index.json")
+			if err := Write(p, Result{Sources: []SourceResult{res}, Items: items}); err != nil {
+				t.Fatal(err)
+			}
+			got := Query(p, "#azure", 10, true)
+			if len(got.Matches) != 1 || !strings.HasSuffix(got.Matches[0].Permalink, "one.md") {
+				t.Fatalf("tag query: %+v", got)
+			}
+			if got := Query(p, "#absent", 10, true); len(got.Matches) != 0 {
+				t.Fatalf("unknown tag matched: %+v", got)
+			}
+		})
+	}
+}

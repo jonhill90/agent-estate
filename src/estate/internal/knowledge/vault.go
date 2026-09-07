@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"github.com/jonhill90/agent-estate/estate/internal/notemeta"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -36,6 +37,7 @@ type vaultFact struct {
 	// query.go already reads Tier1+Tier2); this package changes what
 	// goes into that existing field, not query.go's own logic.
 	Body string
+	Tags []string
 }
 
 // VaultSourceName and VaultItemSourceTag are the exact strings vaultSource
@@ -157,6 +159,7 @@ func vaultSource(vaultDir string) (SourceResult, []Item) {
 			Source:         VaultItemSourceTag,
 			Permalink:      path,
 			StructuralTags: structural,
+			SynapticTags:   hashtag(f.Tags),
 			Tier1:          truncate(tier1, 200),
 			Tier2:          tier2,
 			Tier3:          vaultTier3(path, string(data)),
@@ -207,6 +210,11 @@ func parseVaultFact(data string) (vaultFact, error) {
 	}
 
 	var f vaultFact
+	var err error
+	f.Tags, err = notemeta.Tags(data)
+	if err != nil {
+		return f, err
+	}
 	closed := false
 	for sc.Scan() {
 		line := sc.Text()
