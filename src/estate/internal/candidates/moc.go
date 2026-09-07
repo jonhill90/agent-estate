@@ -3,6 +3,7 @@ package candidates
 import (
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -13,11 +14,47 @@ import (
 const mocStart = "<!-- generated-links:start -->"
 const mocEnd = "<!-- generated-links:end -->"
 
+// walkNotes lists every *.md file under "01 - Notes", at any depth --
+// notes live directly there (the layout MOCProposals/RefreshMOCs were
+// originally tested against) AND nested under earned letter subdirs like
+// "01p - Parameters"/"01f - Facts" (agent-estate#942's note-subdirs
+// registry, the layout the live vault actually uses). filepath.Glob's
+// "*.md" pattern only ever matched the flat case -- against the real
+// vault (every note one directory deeper) it silently returned zero
+// notes, so MOCProposals/RefreshMOCs never saw a single one to group or
+// refresh, no matter how dense a tag became. This was found running C4
+// (Push 4.5) against the vault C2 just tagged: `moc-propose` returned
+// `null` with tag counts well past the >=8 threshold. Recursive by
+// WalkDir, same traversal internal/knowledge/vault.go already uses for
+// the identical directory, so this file no longer disagrees with the
+// package that reads the same tree correctly.
+func walkNotes(vault string) ([]string, error) {
+	var notes []string
+	root := filepath.Join(vault, "01 - Notes")
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() && strings.HasSuffix(d.Name(), ".md") {
+			notes = append(notes, p)
+		}
+		return nil
+	})
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	sort.Strings(notes)
+	return notes, nil
+}
+
 // MOCProposals emits drafts only; a hub must already link the whole cluster to
 // suppress a proposal. Refresh changes only a delimited generated link section.
 func MOCProposals(vault string, apply bool) ([]string, error) {
 	groups := map[string][]string{}
-	notes, e := filepath.Glob(filepath.Join(vault, "01 - Notes", "*.md"))
+	notes, e := walkNotes(vault)
 	if e != nil {
 		return nil, e
 	}
@@ -157,7 +194,10 @@ func RefreshMOCs(vault string, apply bool) (int, error) {
 		defer unlock()
 	}
 	hubs, _ := filepath.Glob(filepath.Join(vault, "02 - MOCs", "*.md"))
-	notes, _ := filepath.Glob(filepath.Join(vault, "01 - Notes", "*.md"))
+	notes, e := walkNotes(vault)
+	if e != nil {
+		return 0, e
+	}
 	changes := map[string][]byte{}
 	for _, hub := range hubs {
 		b, e := os.ReadFile(hub)

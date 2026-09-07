@@ -183,6 +183,49 @@ func TestINMAPSGuardsAndMOC(t *testing.T) {
 	}
 }
 
+// TestMOCProposalsAndRefreshSeeNestedNoteSubdirs is the regression for a
+// real defect found running Push 4.5's C4 against the live vault:
+// MOCProposals/RefreshMOCs used filepath.Glob("01 - Notes/*.md") -- a
+// FLAT, non-recursive pattern -- while the live vault's own note-subdirs
+// registry (agent-estate#942) puts every real note one directory deeper,
+// under "01 - Notes/01p - Parameters" or "01 - Notes/01f - Facts". Against
+// that layout the glob matched zero files, so moc-propose returned no
+// proposals no matter how far past the >=8 threshold a tag's count ran --
+// measured directly: `moc-propose` printed `null` against a vault with
+// several tags counted in the dozens. This test puts its 8 fixture notes
+// in a nested subdir, the shape the flat glob could not see, so a
+// regression back to Glob fails it immediately.
+func TestMOCProposalsAndRefreshSeeNestedNoteSubdirs(t *testing.T) {
+	v := t.TempDir()
+	for _, d := range []string{"01 - Notes/01f - Facts", "99 - Meta"} {
+		os.MkdirAll(filepath.Join(v, d), 0700)
+	}
+	os.WriteFile(filepath.Join(v, "99 - Meta/tags.md"), []byte("`kind/decision`"), 0600)
+	for n := 1; n <= 8; n++ {
+		name := fmt.Sprintf("20260907%04d.md", n)
+		os.WriteFile(filepath.Join(v, "01 - Notes/01f - Facts", name), []byte("---\nstatus: stable\ntitle: Nested Example\ntags: [\"kind/decision\"]\n---\n"), 0600)
+	}
+	got, e := MOCProposals(v, true)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if len(got) != 1 {
+		t.Fatalf("8 nested notes past the threshold produced %d proposals, want 1: %v", len(got), got)
+	}
+	if e = ReviewMOC(v, filepath.Base(got[0]), "process:test", true, true); e != nil {
+		t.Fatal(e)
+	}
+	os.WriteFile(filepath.Join(v, "01 - Notes/01f - Facts/202609070009.md"), []byte("---\nstatus: stable\ntitle: Nested Ninth\ntags: [\"kind/decision\"]\n---\n"), 0600)
+	if _, e = RefreshMOCs(v, true); e != nil {
+		t.Fatal(e)
+	}
+	hub := filepath.Join(v, "02 - MOCs/kind-decision.md")
+	raw, _ := os.ReadFile(hub)
+	if !strings.Contains(string(raw), "202609070009.md") {
+		t.Fatalf("refresh did not pick up a new nested note: %s", raw)
+	}
+}
+
 func TestSourceDriftInvalidatesWithoutRewritingMeaning(t *testing.T) {
 	v := t.TempDir()
 	os.MkdirAll(filepath.Join(v, "99 - Meta"), 0700)
