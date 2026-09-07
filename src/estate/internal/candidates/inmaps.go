@@ -3,6 +3,7 @@ package candidates
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/jonhill90/agent-estate/estate/internal/notemeta"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -169,7 +170,7 @@ func writeSet(vault string, changes map[string][]byte) error {
 	}
 	return nil
 }
-func noteBytes(id, noteID, status string, r MemoryReview, at string) []byte {
+func noteBytes(id, noteID, status string, r MemoryReview, at string, previous ...string) []byte {
 	p := r.Proposal
 	typ := p.Type
 	if typ == "user" || typ == "feedback" || typ == "project" || typ == "reference" {
@@ -179,6 +180,13 @@ func noteBytes(id, noteID, status string, r MemoryReview, at string) []byte {
 	result := []byte(fmt.Sprintf("---\ntype: %s\nid: %s\ntitle: %s\ndescription: %s\ntags: %s\ncreated: %s\nupdated: %s\nstatus: %s\nsource: %s\nsources: [{id: %s, resource: %s}]\ngenerated: {by: process:estate-candidates, at: %s}\nverified: [{by: %s, at: %s}]\ncandidate_id: %s\nmemory_revision: %s\nmemory_status: %s\nsupersedes: %s\n---\n\n# %s\n\n%s\n\nOperator context (reviewed paraphrase): %s\n\nAssistant context (not operator instruction): %s\n", typ, scalar(noteID), scalar(p.Title), scalar(p.Description), tags, at, at, status, scalar(r.Citation), scalar(id), scalar(r.Citation), at, scalar(p.Reviewer), at, id, r.Revision, map[string]string{"draft": "proposed", "stable": "promoted", "deprecated": "rejected"}[status], scalar(p.Supersedes), p.Title, p.Learning, p.OperatorContext, p.AssistantContext))
 	if status == "draft" {
 		result = []byte(regexp.MustCompile(`(?m)^verified:.*\n`).ReplaceAllString(string(result), ""))
+	}
+	for _, old := range previous {
+		merged, err := notemeta.Merge(string(result), old)
+		if err != nil {
+			return nil
+		}
+		result = []byte(merged)
 	}
 	return result
 }
@@ -315,7 +323,10 @@ func publishINMAPS(db, vault, id, action string, r MemoryReview, apply bool) (Me
 				}
 			}
 		}
-		data := noteBytes(id, strings.TrimSuffix(filepath.Base(nextPath), ".md"), "stable", r, at)
+		data := noteBytes(id, strings.TrimSuffix(filepath.Base(nextPath), ".md"), "stable", r, at, oldRaw, string(draftBytes))
+		if data == nil {
+			return r, fmt.Errorf("invalid existing associative metadata")
+		}
 		if b, e := os.ReadFile(filepath.Join(vault, nextPath)); e == nil {
 			if field(string(b), "memory_revision") != r.Revision {
 				return r, fmt.Errorf("reserved note collision")

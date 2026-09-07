@@ -221,3 +221,29 @@ questions and thoughts remain draft, and withdrawn items become deprecated.
 Repeated unchanged input writes zero files. The optional positive integer argument
 limits a migration to a deterministic prefix; use only with verified batch backups.
 The command does not retire legacy views or modify the shared knowledge index.
+
+## Associative tag maintenance
+
+Vault frontmatter tags now enter the existing synaptic search field. Quote
+`#azure` in the shell to request an exact tag filter, rather than a prose match:
+
+```sh
+ESTATE_KNOWLEDGE_INDEX=/tmp/private-knowledge.json estate knowledge
+ESTATE_KNOWLEDGE_INDEX=/tmp/private-knowledge.json estate knowledge query --private --json 'source:vault-fact #azure'
+```
+
+Use `candidates memory -action tag -proposal <batch.json> -vault <vault>`
+for a validated dry run; add `-apply` to write. Batch JSON maps canonical
+vault-relative note paths to arrays of existing governed flat tags. Additions
+are idempotent, preserve note meaning and use the existing backup writer.
+`-action tag-vocabulary` accepts a JSON map of flat tags to meanings; invoke
+it only for an authorized vocabulary extension. Neither command implies
+human verification or changes a note's authority. Candidate-backed published
+notes currently refuse tagging because their persisted full-file publication
+receipt needs a coordinated update; migrated notes and corpus projections
+are supported. This refusal must be resolved before tagging such publications.
+
+Both candidate note generation and corpus projection regeneration retain
+associative tags and the `## Relations` section. Projection-owned structural
+and month tags regenerate, so withdrawal removes `standing-rule`. This is
+preservation support, not a relation proposer or a completed vault-wide pass.

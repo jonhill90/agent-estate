@@ -27,10 +27,30 @@ func runCandidatesMemory(args []string) {
 	repoCommit := fs.String("repo-commit", "", "for a repo-destination accept: the commit SHA that integrated it")
 	fs.Parse(args)
 	fail := func(err error) { fmt.Fprintln(os.Stderr, "estate:", err); os.Exit(1) }
-	if strings.HasPrefix(*action, "moc-") || *action == "refresh" || *action == "roster-link" {
+	if strings.HasPrefix(*action, "moc-") || *action == "refresh" || *action == "roster-link" || *action == "tag" || *action == "tag-vocabulary" {
 		var out any
 		var err error
 		switch *action {
+		case "tag-vocabulary":
+			var b []byte
+			b, err = os.ReadFile(*proposal)
+			if err == nil {
+				var additions map[string]string
+				err = json.Unmarshal(b, &additions)
+				if err == nil {
+					out, err = candidates.ExtendTags(*vault, additions, *apply)
+				}
+			}
+		case "tag":
+			var b []byte
+			b, err = os.ReadFile(*proposal)
+			if err == nil {
+				var batch map[string][]string
+				err = json.Unmarshal(b, &batch)
+				if err == nil {
+					out, err = candidates.TagNotes(*vault, batch, *apply)
+				}
+			}
 		case "roster-link":
 			if *apply {
 				err = candidates.WriteRosterPointer(*vault, *roster)

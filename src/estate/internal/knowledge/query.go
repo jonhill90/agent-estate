@@ -628,6 +628,8 @@ func searchableText(it Item) string {
 // extractTagFilters's own doc comment for why a bare word is never treated
 // as a tag filter even though bare tags exist (vault.go's f.Type,
 // stars.go's "github-stars").
+var synapticFilterPattern = regexp.MustCompile(`^#[a-zA-Z0-9]+(?:-[a-zA-Z0-9]+)*$`)
+
 var tagFilterPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]*:[A-Za-z0-9][A-Za-z0-9_.-]*$`)
 
 // extractTagFilters splits a raw question into its exact-tag-filter tokens
@@ -649,7 +651,7 @@ func extractTagFilters(question string) (tags []string, remaining string) {
 	var rest []string
 	seen := map[string]bool{}
 	for _, f := range fields {
-		if tagFilterPattern.MatchString(f) {
+		if tagFilterPattern.MatchString(f) || synapticFilterPattern.MatchString(f) {
 			lower := strings.ToLower(f)
 			if !seen[lower] {
 				seen[lower] = true

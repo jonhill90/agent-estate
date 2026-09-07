@@ -242,3 +242,69 @@ func TestWriteRosterPointerTargetsMOCsHub(t *testing.T) {
 		t.Fatal("roster pointer lost its id frontmatter")
 	}
 }
+
+func TestNoteRegenerationPreservesAssociations(t *testing.T) {
+	r := MemoryReview{Proposal: Proposal{Type: "Fact", Title: "T", Description: "D", Learning: "new", Tags: []string{"review"}}}
+	old := "---\ntags: [azure]\n---\n\n## Relations\n\n- relates_to: [Other](other.md)\n"
+	got := string(noteBytes("c", "202609070001", "stable", r, "2026-09-07T00:00:00Z", old))
+	if !strings.Contains(got, "azure") || !strings.Contains(got, "## Relations") || !strings.Contains(got, "new") {
+		t.Fatal(got)
+	}
+}
+
+func TestTagNotesGovernedIdempotentAndAtomic(t *testing.T) {
+	v := t.TempDir()
+	os.MkdirAll(filepath.Join(v, "99 - Meta"), 0700)
+	os.MkdirAll(filepath.Join(v, "01 - Notes/01f - Facts"), 0700)
+	os.WriteFile(filepath.Join(v, "99 - Meta/tags.md"), []byte("`azure` `review`"), 0600)
+	rel := "01 - Notes/01f - Facts/202609070001.md"
+	p := filepath.Join(v, rel)
+	original := "---\nid: 202609070001\ntype: Fact\ntags:\n  - review\nstatus: stable\n---\nMeaning unchanged.\ntags: body-example\n"
+	os.WriteFile(p, []byte(original), 0600)
+	if _, e := TagNotes(v, map[string][]string{rel: {"unregistered"}}, true); e == nil {
+		t.Fatal("accepted unknown tag")
+	}
+	b, _ := os.ReadFile(p)
+	if string(b) != original {
+		t.Fatal("failed batch changed note")
+	}
+	if n, e := TagNotes(v, map[string][]string{rel: {"azure"}}, true); e != nil || n != 1 {
+		t.Fatalf("%d %v", n, e)
+	}
+	b, _ = os.ReadFile(p)
+	if !strings.Contains(string(b), "Meaning unchanged.") || !strings.Contains(string(b), "azure") {
+		t.Fatal(string(b))
+	}
+	if !strings.Contains(string(b), "tags: body-example") {
+		t.Fatal("body modified")
+	}
+	if n, e := TagNotes(v, map[string][]string{rel: {"azure"}}, true); e != nil || n != 0 {
+		t.Fatalf("rerun %d %v", n, e)
+	}
+}
+
+func TestTagNotesRefusesPublicationReceiptAndSymlink(t *testing.T) {
+	v := t.TempDir()
+	os.MkdirAll(filepath.Join(v, "99 - Meta"), 0700)
+	os.MkdirAll(filepath.Join(v, "01 - Notes"), 0700)
+	os.WriteFile(filepath.Join(v, "99 - Meta/tags.md"), []byte("`azure`"), 0600)
+	rel := "01 - Notes/202609070001.md"
+	p := filepath.Join(v, rel)
+	raw := "---\nid: 202609070001\ntype: Fact\ncandidate_id: c\n---\nMeaning\n"
+	os.WriteFile(p, []byte(raw), 0600)
+	if _, e := TagNotes(v, map[string][]string{rel: {"azure"}}, true); e == nil {
+		t.Fatal("stranded a publication receipt")
+	}
+	outside := filepath.Join(t.TempDir(), "target.md")
+	os.WriteFile(outside, []byte(strings.Replace(raw, "candidate_id: c\n", "", 1)), 0600)
+	os.Remove(p)
+	os.Symlink(outside, p)
+	before, _ := os.ReadFile(outside)
+	if _, e := TagNotes(v, map[string][]string{rel: {"azure"}}, true); e == nil {
+		t.Fatal("followed a symlink")
+	}
+	after, _ := os.ReadFile(outside)
+	if string(before) != string(after) {
+		t.Fatal("changed outside file")
+	}
+}

@@ -5,6 +5,7 @@ package vaultview
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/jonhill90/agent-estate/estate/internal/notemeta"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -168,6 +169,10 @@ func write(vault string, rows []Row, retireMissing bool) (Result, error) {
 		}
 		body := regexp.MustCompile(`(^|[\s(])#([A-Za-z0-9_]+)`).ReplaceAllString(row.Body, `${1}\#${2}`)
 		s := fmt.Sprintf("---\ntype: %s\ntitle: %s\ndescription: %s\ntags: [%s]\nid: %s\ncorpus_item: %s\nprompt_id: %s\ncreated: %s\nupdated: %s\nsource: %s\n%s\nstatus: %s\ncorpus_status: %s\nweight: %s\n---\n\n# %s\n\n%s\n\nProjection of corpus item `%s`, source prompt `%s`. The corpus is authoritative. Questions and thoughts are not decisions.\n", kinds[row.Kind], quote(title), quote("Corpus "+row.Kind+"; consult the cited item and source prompt for authority."), strings.Join(tags, ", "), quote(id), quote(row.Item), quote(row.Prompt), stamp.Format(time.RFC3339), stamp.Format(time.RFC3339), quote("corpus:item:"+row.Item+"; prompt:"+row.Prompt), marker, status, quote(row.Status), quote(row.Weight), strings.ReplaceAll(title, "#", "\\#"), body, row.Item, row.Prompt)
+		s, err = notemeta.Merge(s, old[id+".md"])
+		if err != nil {
+			return r, err
+		}
 		writes[id+".md"] = s
 	}
 	// A row removed from selection remains addressable but never active.
