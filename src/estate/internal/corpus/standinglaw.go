@@ -25,6 +25,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -204,11 +205,20 @@ var aliasesLineRE = regexp.MustCompile(`(?m)^aliases:\s*\[(.*)\]\s*$`)
 // vault relayout keeps resolving after one. Two shapes are tried, in
 // order:
 //
-//  1. The legacy path, agent/facts/<slug>.md -- unchanged for a vault that
-//     has not been migrated (every existing test fixture uses this shape,
-//     and it stays the fast, unambiguous path when it exists).
-//  2. Alias resolution under 01 - Notes/ (agent-estate's INMAPS relayout,
-//     run/inmaps-spec.md): every note migrated by the W1 fact migration
+//  1. The legacy path, agent/facts/<slug>.md -- retained for a vault that
+//     has not been migrated (existing test fixtures still use this
+//     shape). A2-COMPLETION (run/iteration-queue.md, run/inmaps-spec.md
+//     §7b's last item) removed agent/ from the real vault entirely, so
+//     this arm can no longer succeed there; it stays as a fast,
+//     unambiguous path for any fixture or vault state that still has it,
+//     existence-probed rather than assumed gone.
+//  2. Alias resolution under 01 - Notes/, walked RECURSIVELY (not a flat
+//     ReadDir) so a member resolves regardless of which earned subdirectory
+//     (registry: 99 - Meta/note-subdirs.md, e.g. 01f - Facts, 01p -
+//     Parameters) its note actually lives under -- P9 (run/iteration-queue.md)
+//     moved every W1 fact one level deeper than a flat ReadDir would see,
+//     and this must not silently stop resolving standing-law members the
+//     day that happened. Every note migrated by the W1 fact migration
 //     carries `aliases: [<old-slug>]` in its frontmatter specifically so a
 //     reference to the old slug keeps resolving post-move (see
 //     run/w1-migration-report.md for the full old-slug -> new-ID mapping
@@ -227,24 +237,34 @@ func resolveStandingLawMemberFile(vaultDir, slug string) (path string, raw []byt
 	}
 
 	notesDir := filepath.Join(vaultDir, "01 - Notes")
-	entries, direrr := os.ReadDir(notesDir)
-	if direrr != nil {
-		return "", nil, fmt.Errorf(
-			"not found at legacy path %s, and %s could not be searched by alias: %w",
-			legacy, notesDir, direrr)
-	}
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
-			continue
+	var found string
+	var foundRaw []byte
+	walkErr := filepath.WalkDir(notesDir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
 		}
-		p := filepath.Join(notesDir, e.Name())
+		if d.IsDir() || !strings.HasSuffix(d.Name(), ".md") {
+			return nil
+		}
+		if found != "" {
+			return nil // already resolved -- keep walking cheaply to EOF rather than plumbing an early-stop
+		}
 		b, rerr := os.ReadFile(p)
 		if rerr != nil {
-			continue // unreadable candidate -- keep searching, do not fail the whole resolution on it
+			return nil // unreadable candidate -- keep searching, do not fail the whole resolution on it
 		}
 		if noteDeclaresAlias(string(b), slug) {
-			return p, b, nil
+			found, foundRaw = p, b
 		}
+		return nil
+	})
+	if walkErr != nil {
+		return "", nil, fmt.Errorf(
+			"not found at legacy path %s, and %s could not be searched by alias: %w",
+			legacy, notesDir, walkErr)
+	}
+	if found != "" {
+		return found, foundRaw, nil
 	}
 	return "", nil, fmt.Errorf(
 		"not found at legacy path %s, and no file under %s declares %q as an alias",

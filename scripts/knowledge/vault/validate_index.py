@@ -1,21 +1,37 @@
 #!/usr/bin/env python3
-"""Validate agent/index.md against INDEX-CONTRACT.md.
+"""Validate Start Here.md's `## Facts` section against
+99 - Meta/index-contract.md.
 
-Four checks across legacy facts and migrated INMAPS notes:
-  1. every index.md bullet resolves to an existing facts/*.md file
-  2. every facts/*.md file has required frontmatter: type, created, source
-  3. no facts/*.md file is orphaned (unreferenced by index.md or by any
-     other fact's [[wikilink]]/markdown link)
-  4. no index.md bullet is missing a source link entirely
+Four checks:
+  1. every `## Facts` bullet resolves to an existing 01 - Notes/**/*.md file
+  2. every such fact file has required frontmatter: type, created, source
+  3. no fact file is orphaned (unreferenced by the Facts section, by any
+     02 - MOCs/*.md hub, or by any other fact's [[wikilink]]/markdown link)
+  4. no Facts bullet is missing a source link entirely
 
 Reports violations. Does not repair anything. Exit 0 = contract holds
 (warnings may still be printed). Exit 1 = at least one hard violation.
 
 Lives at 99 - Meta/tools/ (moved from agent/tools/ under the agent/
-dissolution, run/inmaps-spec.md §7b) but still validates agent/index.md
-and agent/facts/ -- vault_root() below computes the vault root from this
-file's OWN location, then explicitly targets agent/, rather than assuming
-(as the pre-move version did) that its own parent directory IS agent/.
+dissolution, run/inmaps-spec.md §7b). A2-COMPLETION (run/iteration-queue.md,
+the last item on §7b's disposition map) retired agent/ entirely:
+agent/index.md's role -- the file actually loaded at session start, the
+sole okf_version carrier, the subject of this validator -- moved onto
+Start Here.md itself. agent/INDEX-CONTRACT.md became
+99 - Meta/index-contract.md, content otherwise unchanged. There is no
+agent/ left; vault_dir() below computes the vault root directly from this
+file's own location, no longer detouring through a retired agent/
+subdirectory.
+
+Index-link subdir support (P9, run/iteration-queue.md): the link regex
+below is built from 99 - Meta/note-subdirs.md's own registry table rather
+than hardcoding each subdir name a second time -- adding a row there is
+enough for a link into that subdir to validate; nothing here needs a
+matching edit. Accepts both a root-relative link (as used inside
+Start Here.md itself, e.g. "01 - Notes/01f - Facts/<id>.md") and a
+one-level-down link (as used inside a 02 - MOCs/*.md hub or another fact
+under 01 - Notes/, e.g. "../01 - Notes/01f - Facts/<id>.md") -- the same
+regex validates links written from either depth.
 
 Run from 99 - Meta/:  python3 tools/validate_index.py
 """
@@ -31,13 +47,43 @@ WIKILINK_RE = re.compile(r"\[\[([a-zA-Z0-9_-]+)\]\]")
 FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n", re.S)
 REQUIRED_FRONTMATTER = ("type", "created", "source")
 RECOMMENDED_FRONTMATTER = ("title", "description")
+SUBDIR_ROW_RE = re.compile(r"^\| `(\d{2}[a-z])` \| `01 - Notes/([^`/]+)/` \|", re.M)
+FACTS_SECTION_RE = re.compile(r"^## Facts\n(.*?)(?=^## |\Z)", re.M | re.S)
 
 
-def vault_root():
+def vault_dir():
     here = os.path.dirname(os.path.abspath(__file__))  # .../99 - Meta/tools
     meta_dir = os.path.dirname(here)                    # .../99 - Meta
-    vault = os.path.dirname(meta_dir)                   # vault root
-    return os.path.join(vault, "agent")                 # agent/ -- unmoved this batch
+    return os.path.dirname(meta_dir)                    # vault root
+
+
+def registered_note_subdirs(vault_dir_path):
+    """Read 99 - Meta/note-subdirs.md's own table and return the set of
+    registered subdirectory names (e.g. "01f - Facts", "01p - Parameters").
+    Missing or unparseable registry is treated as zero registered subdirs
+    -- a link into an unregistered subdir then correctly fails to
+    validate, same as before this subdir existed, rather than silently
+    accepting anything."""
+    registry = Path(vault_dir_path) / "99 - Meta" / "note-subdirs.md"
+    if not registry.is_file():
+        return set()
+    rows = SUBDIR_ROW_RE.findall(registry.read_text(encoding="utf-8"))
+    return {name for _prefix, name in rows}
+
+
+def build_link_re(subdirs):
+    """A link target is (optionally "../")01 - Notes/<optionally one
+    registered subdir>/(<12-digit-id>|index).md -- built from the
+    registry, never a second hardcoded list. The leading "../" is
+    optional so the same regex validates links written from Start Here.md
+    itself (vault root, no "../" needed) and links written one level down
+    (02 - MOCs/*.md hubs, other 01 - Notes/**/*.md facts)."""
+    if subdirs:
+        alt = "|".join(re.escape(s) for s in sorted(subdirs))
+        subdir_part = f"(?:(?:{alt})/)?"
+    else:
+        subdir_part = ""
+    return re.compile(r"(?:\.\./)?01 - Notes/" + subdir_part + r"(?:\d{12}|index)\.md")
 
 
 def load_frontmatter_keys(path):
@@ -48,24 +94,46 @@ def load_frontmatter_keys(path):
     return set(re.findall(r"^([a-zA-Z_]+):", m.group(1), re.M))
 
 
-def links_in_text(text):
-    """Return (md_targets, wikilink_targets) found anywhere in text."""
-    md_targets = {unquote(p) for _, p in MD_LINK_RE.findall(text)
-                  if unquote(p).startswith("facts/") or
-                  re.fullmatch(r"\.\./01 - Notes/(?:01p - Parameters/)?(?:\d{12}|index)\.md", unquote(p))}
+def links_in_text(text, notes_link_re):
+    """Return (md_targets, wikilink_targets) found anywhere in text.
+
+    md_targets is normalized to a vault-root-relative path (leading
+    "../" stripped) regardless of which depth the link was written from
+    -- fact_files below is keyed the same way, since Start Here.md itself
+    sits at the vault root. Without this, a link written one level down
+    (a 02 - MOCs/*.md hub, another fact under 01 - Notes/) would carry
+    its own "../" into md_targets and never match a fact_files key that
+    was never given one."""
+    md_targets = set()
+    for _, p in MD_LINK_RE.findall(text):
+        target = unquote(p)
+        if notes_link_re.fullmatch(target):
+            md_targets.add(target.removeprefix("../"))
     wiki_targets = set(WIKILINK_RE.findall(text))
     return md_targets, wiki_targets
 
 
-def main():
-    root = vault_root()
-    facts_dir = os.path.join(root, "facts")
-    index_path = os.path.join(root, "index.md")
+def facts_section(start_here_text):
+    m = FACTS_SECTION_RE.search(start_here_text)
+    if not m:
+        return ""
+    return m.group(1)
 
-    paths = list(Path(facts_dir).glob("*.md"))
-    paths += [p for p in (Path(root).parent / "01 - Notes").rglob("*.md")
-              if re.fullmatch(r"\d{12}", p.stem) or p.parent.name == "01p - Parameters" and p.name == "index.md"]
-    fact_files = {os.path.relpath(p, root): p for p in paths}
+
+def main():
+    vault = vault_dir()
+    start_here_path = os.path.join(vault, "Start Here.md")
+
+    subdirs = registered_note_subdirs(vault)
+    notes_link_re = build_link_re(subdirs)
+
+    # Fact files: every 01 - Notes/**/<12-digit-id>.md, keyed relative to
+    # the vault root (root-relative, matching how Start Here.md's own
+    # Facts bullets link them -- unlike the pre-A2 scheme, which kept
+    # facts/ under agent/ and keyed relative to that).
+    paths = [p for p in (Path(vault) / "01 - Notes").rglob("*.md")
+              if re.fullmatch(r"\d{12}", p.stem)]
+    fact_files = {os.path.relpath(p, vault): p for p in paths}
     aliases = {}
     for key, path in fact_files.items():
         text = path.read_text(encoding="utf-8")
@@ -90,29 +158,34 @@ def main():
             else:
                 found.update(targets)
         return found
-    index_text = Path(index_path).read_text(encoding="utf-8")
+
+    start_here_text = Path(start_here_path).read_text(encoding="utf-8")
+    facts_text = facts_section(start_here_text)
 
     hard_violations = []
     warnings = []
 
-    # --- check 1 + 4: walk index.md bullets ---
+    # --- check 1 + 4: walk Start Here.md's ## Facts bullets ---
     referenced_by_index = set()
-    for lineno, line in enumerate(index_text.splitlines(), start=1):
+    # lineno offset: facts_text starts after the "## Facts" line itself
+    facts_start_line = start_here_text[:start_here_text.index(facts_text)].count("\n") + 1 if facts_text else 0
+    for offset, line in enumerate(facts_text.splitlines()):
+        lineno = facts_start_line + offset + 1
         m = BULLET_RE.match(line)
         if not m:
             continue
         body = m.group(1)
-        md_targets, wiki_targets = links_in_text(body)
+        md_targets, wiki_targets = links_in_text(body, notes_link_re)
         if not md_targets and not wiki_targets:
             hard_violations.append(
-                f"index.md:{lineno}: bullet has no source link — {body[:70]!r}"
+                f"Start Here.md:{lineno}: bullet has no source link — {body[:70]!r}"
             )
             continue
         for target in resolve(md_targets, wiki_targets):
             referenced_by_index.add(target)
             if target not in fact_files:
                 hard_violations.append(
-                    f"index.md:{lineno}: links to {target}, which does not exist"
+                    f"Start Here.md:{lineno}: links to {target}, which does not exist"
                 )
 
     # --- check 2: frontmatter on every fact file ---
@@ -137,18 +210,32 @@ def main():
         # not this file itself is a real fact/target — a broken link inside
         # a fact body is not this contract's concern, only what it points at
         text = Path(path).read_text(encoding="utf-8")
-        md_targets, wiki_targets = links_in_text(text)
+        md_targets, wiki_targets = links_in_text(text, notes_link_re)
         referenced_by_facts |= resolve(md_targets, wiki_targets)
 
+    # --- generated hubs (P10, run/iteration-queue.md): 02 - MOCs/*.md
+    # each bulk-list one area's notes (e.g. Parameters.md lists every
+    # 01p - Parameters/*.md note) -- a note reachable only through its own
+    # generated hub, not through Start Here.md's Facts section directly,
+    # is not orphaned; scan every hub the same way the Facts section is
+    # scanned.
+    referenced_by_hubs = set()
+    mocs_dir = Path(vault) / "02 - MOCs"
+    if mocs_dir.is_dir():
+        for hub in sorted(mocs_dir.glob("*.md")):
+            text = hub.read_text(encoding="utf-8")
+            md_targets, wiki_targets = links_in_text(text, notes_link_re)
+            referenced_by_hubs |= resolve(md_targets, wiki_targets)
+
     # --- check 3: orphaned facts ---
-    referenced = referenced_by_index | referenced_by_facts
+    referenced = referenced_by_index | referenced_by_facts | referenced_by_hubs
     orphaned = sorted(set(fact_files) - referenced)
     for fn in orphaned:
         hard_violations.append(
-            f"{fn}: orphaned — not referenced by index.md or by any other fact"
+            f"{fn}: orphaned — not referenced by Start Here.md, a hub, or any other fact"
         )
 
-    print(f"Checked {len(fact_files)} fact file(s) against {index_path}")
+    print(f"Checked {len(fact_files)} fact file(s) against {start_here_path}")
     print()
 
     if warnings:

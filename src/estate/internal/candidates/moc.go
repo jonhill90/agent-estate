@@ -87,7 +87,7 @@ func MOCProposals(vault string, apply bool) ([]string, error) {
 		proposed = append(proposed, path)
 	}
 	if apply && len(changes) > 0 {
-		unlock, e := lockFile(filepath.Join(vault, "agent/.candidate-memory.lock"))
+		unlock, e := lockFile(filepath.Join(vault, "99 - Meta/.candidate-memory.lock"))
 		if e != nil {
 			return nil, e
 		}
@@ -112,7 +112,7 @@ func mocLinks(paths []string) string {
 // explicit actor; absent review never creates a live hub.
 func ReviewMOC(vault, name, reviewer string, accept, apply bool) error {
 	if apply {
-		unlock, e := lockFile(filepath.Join(vault, "agent/.candidate-memory.lock"))
+		unlock, e := lockFile(filepath.Join(vault, "99 - Meta/.candidate-memory.lock"))
 		if e != nil {
 			return e
 		}
@@ -150,7 +150,7 @@ func ReviewMOC(vault, name, reviewer string, accept, apply bool) error {
 }
 func RefreshMOCs(vault string, apply bool) (int, error) {
 	if apply {
-		unlock, e := lockFile(filepath.Join(vault, "agent/.candidate-memory.lock"))
+		unlock, e := lockFile(filepath.Join(vault, "99 - Meta/.candidate-memory.lock"))
 		if e != nil {
 			return 0, e
 		}

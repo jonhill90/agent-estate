@@ -280,7 +280,10 @@ func TestKnowledgeQueryCoverageStaleNeverPureTopLevel(t *testing.T) {
 	})
 
 	vaultDir := t.TempDir()
-	factsDir := filepath.Join(vaultDir, "agent", "facts")
+	// "01 - Notes", not the retired "agent/facts" -- A2-COMPLETION
+	// (run/iteration-queue.md, run/inmaps-spec.md §7b) repointed the
+	// freshness stat to match vaultSource's own read target.
+	factsDir := filepath.Join(vaultDir, "01 - Notes")
 	if err := os.MkdirAll(factsDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
