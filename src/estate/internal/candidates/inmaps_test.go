@@ -54,6 +54,23 @@ func TestINMAPSLifecycle(t *testing.T) {
 	if first.NotePath == "" {
 		t.Fatal("missing canonical path")
 	}
+	// agent/ dissolution (run/inmaps-spec.md §7b, P5 batch 1): the change
+	// log moved from agent/log.md to 99 - Meta/log.md -- writeSet must
+	// write there, not resurrect a dead agent/log.md path. Assert both
+	// directions: the new path has real content, and the old path was
+	// never created (a silent split-brain -- writes landing at both
+	// locations across different code paths -- would pass a check that
+	// only tested the new path in isolation).
+	logBytes, e := os.ReadFile(filepath.Join(vault, "99 - Meta/log.md"))
+	if e != nil {
+		t.Fatalf("99 - Meta/log.md not written by an INMAPS accept: %v", e)
+	}
+	if !strings.Contains(string(logBytes), "process:estate-candidates") {
+		t.Fatalf("99 - Meta/log.md missing expected entry: %s", logBytes)
+	}
+	if _, e := os.Stat(filepath.Join(vault, "agent/log.md")); !os.IsNotExist(e) {
+		t.Fatal("agent/log.md was written -- the dead pre-dissolution path must never be resurrected")
+	}
 	again, err := Publish(db, vault, id, "accept", true)
 	if err != nil || again.Changed {
 		t.Fatalf("retry: %+v %v", again, err)

@@ -77,8 +77,13 @@ func validateINMAPS(vault string, p Proposal) error {
 
 // writeSet backs up every existing target before writing. A returned write error
 // restores the complete set; the saved review permits retry after process loss.
+//
+// logPath moved from agent/log.md to 99 - Meta/log.md under the agent/
+// dissolution (run/inmaps-spec.md §7b, P5 batch 1) -- repointed in the same
+// change that moved the file, per that section's own binding rule (never
+// move content ahead of its readers).
 func writeSet(vault string, changes map[string][]byte) error {
-	logPath := filepath.Join(vault, "agent/log.md")
+	logPath := filepath.Join(vault, "99 - Meta/log.md")
 	if _, ok := changes[logPath]; !ok {
 		previous, e := os.ReadFile(logPath)
 		if e != nil && !os.IsNotExist(e) {
