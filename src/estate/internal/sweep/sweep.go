@@ -130,17 +130,26 @@ func Run(records []ledger.Record, cfg Config) []Result {
 			out = append(out, r)
 			continue
 		}
-		attempted++
 		if cfg.Remove == nil {
+			attempted++
 			r.Reason = "would remove: " + r.Reason + " -- report only, nothing was removed"
 			out = append(out, r)
 			continue
 		}
 		if err := cfg.Remove(rec); err != nil {
+			// A refusal costs nothing toward this run's bound. The bound
+			// exists to cap network round trips a REMOVAL costs (see
+			// Config.Max's doc comment) -- a refusal is a local git status
+			// plus one bounded fetch/compare, not the thing the bound was
+			// sized to limit. Charging it anyway is agent-estate#1247: the
+			// same handful of eligible-but-refused records sort first every
+			// run, so they alone exhausted the bound and nothing after them
+			// was ever tried, forever.
 			r.Reason = "kept: " + err.Error()
 			out = append(out, r)
 			continue
 		}
+		attempted++
 		r.Removed = true
 		r.Reason = "removed: " + r.Reason
 		out = append(out, r)

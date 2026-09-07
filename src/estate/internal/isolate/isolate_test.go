@@ -332,7 +332,21 @@ func TestRemoveCleansUpBothWorktreeAndBranch(t *testing.T) {
 // Remove must not destroy work: a worktree with uncommitted changes is a
 // dispatch whose output has not been collected yet.
 func TestRemoveRefusesToDiscardUncommittedWork(t *testing.T) {
+	// agent-estate#1247: DirtyStatus classifies dirty paths against
+	// origin/main, so it needs a real origin to fetch from -- an unreachable
+	// origin is its own, separately-tested refusal shape (see
+	// TestRemoveRefusesWhenTheRemoteCannotBeConsulted), not this one.
 	root := repo(t)
+	bare := t.TempDir()
+	if out, err := exec.Command("git", "init", "-q", "--bare", bare).CombinedOutput(); err != nil {
+		t.Fatalf("git init --bare: %v: %s", err, out)
+	}
+	if out, err := exec.Command("git", "-C", root, "remote", "add", "origin", bare).CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v: %s", err, out)
+	}
+	if out, err := exec.Command("git", "-C", root, "push", "-q", "origin", "HEAD:main").CombinedOutput(); err != nil {
+		t.Fatalf("git push: %v: %s", err, out)
+	}
 	w, err := Create(root, "has-work")
 	if err != nil {
 		t.Fatal(err)
@@ -349,6 +363,11 @@ func TestRemoveRefusesToDiscardUncommittedWork(t *testing.T) {
 	// the guarantee unowned.
 	if !strings.Contains(err.Error(), "collect or commit it first") {
 		t.Errorf("the refusal must come from our dirty check, not git's; got: %v", err)
+	}
+	// agent-estate#1247's own acceptance: name the differing file, so a
+	// reader never has to go read the code to find out why.
+	if !strings.Contains(err.Error(), "unsaved.txt") {
+		t.Errorf("the refusal must name the file it refused over; got: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(w.Path, "unsaved.txt")); err != nil {
 		t.Fatalf("the refused Remove destroyed the work anyway: %v", err)
@@ -947,5 +966,128 @@ func TestIsDispatchWorktreeGivesTwoTurnsDistinctIDs(t *testing.T) {
 	}
 	if idA == idB {
 		t.Fatalf("two distinct dispatch turns resolved the same id %q", idA)
+	}
+}
+
+// agent-estate#1247: the fix. A worktree's only dirty path can be content
+// that is ALREADY on origin/main, byte-for-byte -- main advanced past the
+// worktree's base after the dispatch started, and the same content got
+// produced independently on both sides (the realistic case is deterministic
+// generated output). That worktree holds nothing origin does not already
+// hold durably, so Remove must proceed rather than refuse forever.
+func TestRemoveProceedsWhenTheOnlyDirtyContentMatchesOriginMainByteForByte(t *testing.T) {
+	root := repo(t)
+	bare := t.TempDir()
+	if out, err := exec.Command("git", "init", "-q", "--bare", bare).CombinedOutput(); err != nil {
+		t.Fatalf("git init --bare: %v: %s", err, out)
+	}
+	if out, err := exec.Command("git", "-C", root, "remote", "add", "origin", bare).CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v: %s", err, out)
+	}
+	if out, err := exec.Command("git", "-C", root, "push", "-q", "origin", "HEAD:main").CombinedOutput(); err != nil {
+		t.Fatalf("git push: %v: %s", err, out)
+	}
+
+	w, err := Create(root, "superseded")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// main advances past the worktree's base, in the shared checkout, and
+	// the new content is pushed to origin -- simulating another dispatch (or
+	// a human) landing this exact content while this worktree was still
+	// running.
+	generated := []byte("deterministic build output, produced twice\n")
+	if err := os.WriteFile(filepath.Join(root, "generated.txt"), generated, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "-A"}, {"commit", "-qm", "main advances"}, {"push", "-q", "origin", "HEAD:main"}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = root
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+
+	// The dispatch worktree independently produces the identical bytes,
+	// uncommitted -- its only dirty content.
+	if err := os.WriteFile(filepath.Join(w.Path, "generated.txt"), generated, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	state, differing, err := w.DirtyStatus()
+	if err != nil {
+		t.Fatalf("DirtyStatus: %v", err)
+	}
+	if state != DirtyStateSuperseded {
+		t.Fatalf("DirtyStatus = %v (%q); want DirtyStateSuperseded -- the dirty content is byte-identical to origin/main", state, differing)
+	}
+	if err := w.Remove(); err != nil {
+		t.Fatalf("Remove must proceed: the only dirty content already exists, byte-for-byte, on origin/main: %v", err)
+	}
+}
+
+// The other half of the same fix: content that is NOT byte-identical to
+// origin/main must still refuse exactly as before -- and now must name the
+// differing file, which the old refusal never did (agent-estate#1247's own
+// diagnosis: the deadlock took a code read because the message named
+// nothing).
+func TestRemoveStillRefusesAndNamesTheFileWhenDirtyContentDiffersByOneByte(t *testing.T) {
+	root := repo(t)
+	bare := t.TempDir()
+	if out, err := exec.Command("git", "init", "-q", "--bare", bare).CombinedOutput(); err != nil {
+		t.Fatalf("git init --bare: %v: %s", err, out)
+	}
+	if out, err := exec.Command("git", "-C", root, "remote", "add", "origin", bare).CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v: %s", err, out)
+	}
+	if out, err := exec.Command("git", "-C", root, "push", "-q", "origin", "HEAD:main").CombinedOutput(); err != nil {
+		t.Fatalf("git push: %v: %s", err, out)
+	}
+
+	w, err := Create(root, "unique-by-one-byte")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	onOrigin := []byte("deterministic build output, produced twice\n")
+	if err := os.WriteFile(filepath.Join(root, "generated.txt"), onOrigin, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "-A"}, {"commit", "-qm", "main advances"}, {"push", "-q", "origin", "HEAD:main"}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = root
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+
+	// One byte different from what origin/main has -- e.g. a run that did
+	// not quite reproduce, or genuinely unique work under the same name.
+	differs := []byte("deterministic build output, produced twicE\n")
+	if err := os.WriteFile(filepath.Join(w.Path, "generated.txt"), differs, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	state, differing, err := w.DirtyStatus()
+	if err != nil {
+		t.Fatalf("DirtyStatus: %v", err)
+	}
+	if state != DirtyStateUnique {
+		t.Fatalf("DirtyStatus = %v; want DirtyStateUnique -- the dirty content differs from origin/main by one byte", state)
+	}
+	if differing != "generated.txt" {
+		t.Fatalf("DirtyStatus named %q as the differing path; want generated.txt", differing)
+	}
+
+	err = w.Remove()
+	if err == nil {
+		t.Fatal("Remove must refuse: the dirty content is not, byte-for-byte, on origin/main")
+	}
+	if !strings.Contains(err.Error(), "generated.txt") {
+		t.Errorf("the refusal must name the differing file so a reader never has to go read the code to find out why; got: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(w.Path, "generated.txt")); err != nil {
+		t.Fatalf("the refused Remove destroyed the unique content anyway: %v", err)
 	}
 }
