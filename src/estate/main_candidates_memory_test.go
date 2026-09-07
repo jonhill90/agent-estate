@@ -26,6 +26,7 @@ func TestCandidatesMemoryCLI(t *testing.T) {
 	}
 	id := candidateIDIn(t, db)
 	vault := t.TempDir()
+ env = append(env,"AGENT_MEMORY_VAULT="+vault)
 	os.MkdirAll(filepath.Join(vault, "agent", "facts"), 0700)
 	os.WriteFile(filepath.Join(vault, "agent", "index.md"), []byte("# Facts\n"), 0600)
 	proposal := filepath.Join(t.TempDir(), "proposal.json")

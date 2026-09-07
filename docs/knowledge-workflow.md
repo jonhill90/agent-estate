@@ -1,5 +1,49 @@
 # Knowledge workflow — register, inspect, propose, review, publish, retrieve, refresh
 
+## INMAPS write path (push 2)
+
+Agent Memory uses `00 - Inbox`, `01 - Notes`, `02 - MOCs`, `03 - Agents`,
+`04 - Projects`, `05 - Sources`, and `99 - Meta`. Earlier layout/path examples
+below describe push 1. Existing legacy vaults remain supported, but an INMAPS
+vault writes through Inbox to permanent IDs, never back to slug filenames.
+
+From this repository's root, with explicit isolated corpus/vault paths:
+
+```sh
+go run ./src/estate candidates memory -db "$CORPUS_COPY" -vault "$FIXTURE_VAULT" -id "$CANDIDATE_ID" -action propose -proposal "$PROPOSAL_JSON" -apply
+go run ./src/estate candidates memory -db "$CORPUS_COPY" -vault "$FIXTURE_VAULT" -id "$CANDIDATE_ID" -action accept -apply
+go run ./src/estate candidates memory -db "$CORPUS_COPY" -vault "$FIXTURE_VAULT" -id "$CANDIDATE_ID" -action reject -apply
+go run ./src/estate candidates memory -vault "$FIXTURE_VAULT" -action moc-propose -apply
+go run ./src/estate candidates memory -vault "$FIXTURE_VAULT" -action moc-accept -id moc-kind-decision.md -reviewer process:reviewer -apply
+go run ./src/estate candidates memory -vault "$FIXTURE_VAULT" -action refresh -apply
+```
+
+Proposals include type, title, description, learning, governed `tags`, attributed
+operator/assistant context, reviewer, destination kind/path and reason. Use
+Fact/Thought/Question/Parameter/Research/MOC/Project/Source types. Legacy type
+names normalize to Fact only for the new writer. `supersedes` must name the exact
+published revision when revising; propose and accept again. The old note retains
+its ID, becomes deprecated and points to the replacement. Rejection preserves
+history while excluding it from current retrieval. Approval alone is not publication.
+`existing_fact_hash` permits explicit adoption of an inspected migrated note.
+
+Notes use YYYYMMDD plus a four-digit daily sequence; source view IDs use
+SRC-YYYY-MM-DD-NNN. Existing catalogue hash IDs remain stable citation identities,
+with a persisted ViewID for the new filename. Source refresh optionally accepts
+`-vault` to mark dependent notes needs_review; acknowledging a source never
+silently reaccepts a dependent learning. Use a private working knowledge index.
+
+MOC proposals require eight stable notes sharing a tag without a covering hub.
+Acceptance is explicit. Refresh replaces only the generated link section and
+preserves curated overview prose. Backups precede canonical file changes.
+
+The live fact migration has separate evidence in the local run directory.
+Obsidian aliases alone did not resolve three old bare wikilinks in the measured
+pilot; use explicit ID-path Markdown links. Standing-law loading still assumes
+legacy paths and is outside this push's authorized standing-law changes. Do not
+claim the migration proves compatibility of every existing consumer.
+
+
 Short canonical usage guide for turning something worth knowing into a
 retrievable, cited fact — and back out again when you need to find it.
 This is the loop, not the mechanism: for what `estate knowledge` actually

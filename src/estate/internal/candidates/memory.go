@@ -27,22 +27,25 @@ import (
 // path for "repo" (PublishRepo requires an exact match before recording a
 // receipt against it).
 type Proposal struct {
-	Slug             string `json:"slug"`
-	Type             string `json:"type"`
-	Title            string `json:"title"`
-	Description      string `json:"description"`
-	Learning         string `json:"learning"`
-	OperatorContext  string `json:"operator_context"`
-	AssistantContext string `json:"assistant_context"`
-	Reviewer         string `json:"reviewer"`
-	Supersedes       string `json:"supersedes"`
-	ExistingFactHash string `json:"existing_fact_hash,omitempty"` // explicit adoption of an inspected, unmanaged fact
-	DestinationKind  string `json:"destination_kind"`             // "memory" or "repo"
-	Destination      string `json:"destination"`                  // intended canonical destination path
-	Reason           string `json:"reason"`                       // why this citation belongs at Destination
+	Tags             []string `json:"tags,omitempty"`
+	Slug             string   `json:"slug"`
+	Type             string   `json:"type"`
+	Title            string   `json:"title"`
+	Description      string   `json:"description"`
+	Learning         string   `json:"learning"`
+	OperatorContext  string   `json:"operator_context"`
+	AssistantContext string   `json:"assistant_context"`
+	Reviewer         string   `json:"reviewer"`
+	Supersedes       string   `json:"supersedes"`
+	ExistingFactHash string   `json:"existing_fact_hash,omitempty"` // explicit adoption of an inspected, unmanaged fact
+	DestinationKind  string   `json:"destination_kind"`             // "memory" or "repo"
+	Destination      string   `json:"destination"`                  // intended canonical destination path
+	Reason           string   `json:"reason"`                       // why this citation belongs at Destination
 }
 
 type MemoryReview struct {
+	NotePath          string   `json:"note_path,omitempty"`
+	PendingNotePath   string   `json:"pending_note_path,omitempty"`
 	Proposal          Proposal `json:"proposal"`
 	State             string   `json:"state"` // proposed is not promoted
 	Revision          string   `json:"revision"`
@@ -134,7 +137,7 @@ func Propose(db, id string, p Proposal, apply bool) (MemoryReview, error) {
 	if p.ExistingFactHash != "" && !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(p.ExistingFactHash) {
 		return MemoryReview{}, fmt.Errorf("existing_fact_hash must be the inspected fact's SHA-256")
 	}
-	if p.Type != "user" && p.Type != "feedback" && p.Type != "project" && p.Type != "reference" {
+	if !regexp.MustCompile(`^(Fact|Thought|Question|Parameter|Research|MOC|Project|Source|user|feedback|project|reference)$`).MatchString(p.Type) {
 		return MemoryReview{}, fmt.Errorf("invalid fact type")
 	}
 	for _, s := range []string{p.Title, p.Description, p.Reviewer} {
@@ -186,7 +189,7 @@ func Propose(db, id string, p Proposal, apply bool) (MemoryReview, error) {
 	if p.Supersedes != old.PublishedRevision {
 		return old, fmt.Errorf("supersedes must equal current published revision %q", old.PublishedRevision)
 	}
-	r := MemoryReview{Proposal: p, State: "proposed", Revision: rev, PublishedRevision: old.PublishedRevision, Vault: old.Vault, Citation: citation, Changed: apply, FileHash: old.FileHash}
+	r := MemoryReview{Proposal: p, State: "proposed", Revision: rev, PublishedRevision: old.PublishedRevision, Vault: old.Vault, Citation: citation, Changed: apply, FileHash: old.FileHash, NotePath: old.NotePath}
 	if apply {
 		err = saveMemory(db, id, r)
 	}
@@ -241,6 +244,9 @@ func Publish(db, vault, id, action string, apply bool) (MemoryReview, error) {
 	}
 	if r.Vault != "" && r.Vault != vault {
 		return r, fmt.Errorf("candidate already bound to another vault")
+	}
+	if inmaps(vault) {
+		return publishINMAPS(db, vault, id, action, r, apply)
 	}
 	agent := filepath.Join(vault, "agent")
 	for _, dir := range []string{agent, filepath.Join(agent, "facts")} {

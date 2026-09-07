@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jonhill90/agent-estate/estate/internal/candidates"
 	"github.com/jonhill90/agent-estate/estate/internal/catalogue"
 )
 
@@ -149,7 +150,7 @@ func contractEnumFlag(flagName, value string, allowed map[string]bool, allowedLi
 func runRegister(args []string) {
 	fs := flag.NewFlagSet("sourcecatalogue register", flag.ExitOnError)
 	registerDir := registerDirFlag(fs)
-	viewsDir := fs.String("views-dir", "", "if set, regenerate every source view under this staging directory after registering (never the live vault)")
+	viewsDir := fs.String("views-dir", "", "explicit destination root for backed-up generated source views and area index")
 	extractionKind := fs.String("extraction-kind", "", "extraction mechanism: pdf, conversation, or repo-docs (others register with extraction marked unavailable)")
 	kind := fs.String("kind", "", "contract.md content-type tag: one of kind/repo, kind/doc, kind/transcript, kind/decision, kind/skill, kind/tool")
 	locator := fs.String("locator", "", "the file or root path this source lives at")
@@ -248,8 +249,9 @@ func runShow(args []string) {
 
 func runRefresh(args []string) {
 	fs := flag.NewFlagSet("sourcecatalogue refresh", flag.ExitOnError)
+	vault := fs.String("vault", "", "explicit INMAPS vault: mark source-dependent notes needs_review with backups")
 	registerDir := registerDirFlag(fs)
-	viewsDir := fs.String("views-dir", "", "if set, regenerate every source view under this staging directory after refreshing")
+	viewsDir := fs.String("views-dir", "", "explicit destination root for backed-up generated source views and area index")
 	all := fs.Bool("all", false, "refresh every entry in the register")
 	ack := fs.Bool("ack", false, "acknowledge a needs_review entry back to active, without a revision change (requires exactly one id, not -all)")
 	asJSON := fs.Bool("json", false, "print the refreshed entry/entries as JSON")
@@ -294,6 +296,12 @@ func runRefresh(args []string) {
 		}
 		refreshed = append(refreshed, entry)
 		if entry.Status == catalogue.StatusNeedsReview {
+			if *vault != "" {
+				if _, err := candidates.MarkSourceDrift(*vault, entry.ID); err != nil {
+					fmt.Fprintln(os.Stderr, err)
+					os.Exit(1)
+				}
+			}
 			fmt.Fprintf(os.Stderr, "sourcecatalogue: %s flipped to needs_review -- content changed since last review\n", entry.ID)
 		}
 	}
