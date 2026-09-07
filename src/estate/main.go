@@ -433,6 +433,20 @@ func sweepConfig(repoRoot string, landed isolate.Landed, apply bool) sweep.Confi
 			return err == nil
 		},
 		Max: maxSweepPerRun,
+		// Wired in both modes: apply mode never calls it (Remove already
+		// performs the identical check itself before mutating anything),
+		// but report mode needs it to say "would remove"/"would keep" in
+		// agreement with what apply mode would actually do
+		// (agent-estate#1247's follow-up -- report mode used to judge on
+		// ledger state alone). Read-only: Reattach and DirtyStatus never
+		// write anything.
+		DirtyCheck: func(rec ledger.Record) (isolate.DirtyState, string, error) {
+			corpse, rerr := isolate.Reattach(repoRoot, rec.Worktree, rec.Branch, rec.Base)
+			if rerr != nil {
+				return isolate.DirtyStateUnique, "", rerr
+			}
+			return corpse.DirtyStatus()
+		},
 	}
 	if !apply {
 		// No Remover: internal/sweep decides and explains, and removes

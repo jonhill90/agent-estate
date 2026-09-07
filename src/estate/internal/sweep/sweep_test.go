@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jonhill90/agent-estate/estate/internal/isolate"
 	"github.com/jonhill90/agent-estate/estate/internal/ledger"
 	"github.com/jonhill90/agent-estate/estate/internal/reclaim"
 )
@@ -342,6 +343,175 @@ func TestEveryRecordIsAccountedFor(t *testing.T) {
 	for _, r := range results {
 		if strings.TrimSpace(r.Reason) == "" {
 			t.Fatalf("%s was decided with no reason given", r.Record.ID)
+		}
+	}
+}
+
+// dirtyWorld is a fixture's shared ground truth for what each worktree ID's
+// uncommitted content actually looks like. Both report mode's DirtyCheck
+// and apply mode's Remove are built from the SAME world below, mirroring
+// production: main.go's real DirtyCheck and real Remove both ultimately
+// call the identical isolate.Worktree.DirtyStatus. A test built this way
+// can only pass if sweep.go's own logic keeps the two modes in agreement --
+// it cannot pass by coincidence.
+type dirtyWorld map[string]struct {
+	state     isolate.DirtyState
+	differing string
+	err       error
+}
+
+// reportCfg wires DirtyCheck from world; Remove stays nil (report mode).
+func reportCfg(probe reclaim.Probe, world dirtyWorld) Config {
+	return Config{
+		Root:   root,
+		Probe:  probe,
+		Exists: func(string) bool { return true },
+		DirtyCheck: func(rec ledger.Record) (isolate.DirtyState, string, error) {
+			w := world[rec.ID]
+			return w.state, w.differing, w.err
+		},
+	}
+}
+
+// applyCfg wires Remove from the SAME world -- refusing exactly when
+// DirtyStateUnique or an error, exactly as isolate.Worktree.Remove itself
+// does (see Remove's own "only DirtyStateUnique refuses" comment).
+func applyCfg(probe reclaim.Probe, world dirtyWorld, removed *[]string) Config {
+	return Config{
+		Root:   root,
+		Probe:  probe,
+		Exists: func(string) bool { return true },
+		Remove: func(rec ledger.Record) error {
+			w := world[rec.ID]
+			if w.err != nil {
+				return fmt.Errorf("isolate: cannot tell whether %s holds uncommitted work, so refusing to remove it: %w", rec.Worktree, w.err)
+			}
+			if w.state == isolate.DirtyStateUnique {
+				return fmt.Errorf("isolate: %s holds uncommitted work not present, byte-for-byte, in origin/main (%s); refusing to remove it -- collect or commit it first", rec.Worktree, w.differing)
+			}
+			*removed = append(*removed, rec.ID)
+			return nil
+		},
+	}
+}
+
+// TestReportAndApplyAgree is agent-estate#1247's follow-up acceptance
+// criterion 1: report and apply, run against the identical fixture set,
+// must classify every worktree the same way -- no record report calls
+// "would remove" that apply then refuses. Before this fix, report mode
+// judged eligibility from ledger state alone and never consulted
+// DirtyCheck at all, so a record whose only dirty content was unique to
+// the worktree was reported "would remove" and then refused by apply,
+// every time -- exactly the disagreement this test would have caught.
+func TestReportAndApplyAgree(t *testing.T) {
+	world := dirtyWorld{
+		"clean":       {state: isolate.DirtyStateClean},
+		"superseded":  {state: isolate.DirtyStateSuperseded},
+		"unique":      {state: isolate.DirtyStateUnique, differing: "src/estate/main.go"},
+		"cannot-tell": {err: errors.New("fetch timed out")},
+	}
+	records := []ledger.Record{
+		rec("clean", ledger.Complete),
+		rec("superseded", ledger.Complete),
+		rec("unique", ledger.Failed),
+		rec("cannot-tell", ledger.Failed),
+	}
+
+	var removed []string
+	reportResults := Run(records, reportCfg(alive, world))
+	applyResults := Run(records, applyCfg(alive, world, &removed))
+
+	for _, id := range []string{"clean", "superseded", "unique", "cannot-tell"} {
+		rr := find(t, reportResults, id)
+		ar := find(t, applyResults, id)
+
+		reportSaysRemove := strings.HasPrefix(rr.Reason, "would remove:")
+		applyDidRemove := ar.Removed
+
+		if reportSaysRemove != applyDidRemove {
+			t.Fatalf("%s: report and apply DISAGREE -- report: %q (says remove=%v); apply: %q (removed=%v)",
+				id, rr.Reason, reportSaysRemove, ar.Reason, applyDidRemove)
+		}
+	}
+
+	// The specific failure this fix closes: report claiming "would
+	// remove" for a record apply then refuses.
+	for _, id := range []string{"unique", "cannot-tell"} {
+		rr := find(t, reportResults, id)
+		if strings.HasPrefix(rr.Reason, "would remove:") {
+			t.Fatalf("%s: report said %q, but this worktree holds content apply would refuse to remove", id, rr.Reason)
+		}
+		if !strings.HasPrefix(rr.Reason, "would keep:") {
+			t.Fatalf("%s: expected a would-keep verdict, got %q", id, rr.Reason)
+		}
+	}
+	for _, id := range []string{"clean", "superseded"} {
+		rr := find(t, reportResults, id)
+		if !strings.HasPrefix(rr.Reason, "would remove:") {
+			t.Fatalf("%s: expected a would-remove verdict, got %q", id, rr.Reason)
+		}
+	}
+	if len(removed) != 2 {
+		t.Fatalf("expected apply to actually remove exactly the 2 safe records, got %v", removed)
+	}
+}
+
+// TestReportModeNamesTheThreeTypedStates: agent-estate#1247's own rule --
+// "no dirty files", "dirty but all superseded", and "dirty with unique
+// content" are three distinct states, never collapsed to two (or to one
+// bare "would remove"/"would keep" that hides which of the first two
+// applied).
+func TestReportModeNamesTheThreeTypedStates(t *testing.T) {
+	world := dirtyWorld{
+		"clean":      {state: isolate.DirtyStateClean},
+		"superseded": {state: isolate.DirtyStateSuperseded},
+		"unique":     {state: isolate.DirtyStateUnique, differing: "SKILL.md"},
+	}
+	records := []ledger.Record{
+		rec("clean", ledger.Complete),
+		rec("superseded", ledger.Complete),
+		rec("unique", ledger.Complete),
+	}
+	results := Run(records, reportCfg(alive, world))
+
+	clean := find(t, results, "clean")
+	if !strings.Contains(clean.Reason, isolate.DirtyStateClean.String()) {
+		t.Fatalf("clean record's reason does not name its state: %s", clean.Reason)
+	}
+	superseded := find(t, results, "superseded")
+	if !strings.Contains(superseded.Reason, isolate.DirtyStateSuperseded.String()) {
+		t.Fatalf("superseded record's reason does not name its state: %s", superseded.Reason)
+	}
+	unique := find(t, results, "unique")
+	if !strings.Contains(unique.Reason, "SKILL.md") {
+		t.Fatalf("unique record's refusal does not name the differing file: %s", unique.Reason)
+	}
+	if clean.Reason == superseded.Reason {
+		t.Fatal("clean and superseded produced identical reasons -- the two states collapsed")
+	}
+}
+
+// TestReportModeWithDirtyCheckStillMutatesNothing: acceptance criterion 4
+// -- wiring DirtyCheck must not give report mode any new power to remove
+// anything. Even when every record is judged safe to remove (Clean or
+// Superseded), Remove is nil, so nothing is ever called.
+func TestReportModeWithDirtyCheckStillMutatesNothing(t *testing.T) {
+	world := dirtyWorld{
+		"clean":      {state: isolate.DirtyStateClean},
+		"superseded": {state: isolate.DirtyStateSuperseded},
+	}
+	records := []ledger.Record{
+		rec("clean", ledger.Complete),
+		rec("superseded", ledger.Failed),
+	}
+	c := reportCfg(alive, world)
+	if c.Remove != nil {
+		t.Fatal("test fixture bug: report config must not carry a Remover")
+	}
+	results := Run(records, c)
+	for _, r := range results {
+		if r.Removed {
+			t.Fatalf("%s was reported removed in report mode", r.Record.ID)
 		}
 	}
 }
