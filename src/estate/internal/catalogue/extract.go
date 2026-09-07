@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 )
 
 // observe computes extractionKind's current revision marker for
@@ -18,20 +19,28 @@ import (
 // or (for pdf) a read-only pdftotext invocation that writes only to
 // cacheDir, never back to locator.
 //
+// localPath is used only by ExtractionRepoPointer (P8) -- every other
+// kind ignores it and returns checkoutState "" (not applicable to that
+// kind, distinct from LocalCheckoutAbsent, which is repo-pointer-
+// specific and means "applicable, but nothing found").
+//
 // An extractionKind not listed below still returns a value: extraction
 // unavailable, stated as such, never a silent empty success --
 // brief-lane-b.md deliverable 3's "visible honesty" requirement.
-func observe(extractionKind ExtractionKind, locator, cacheDir string) (revision, extractionStatus, cachePath string) {
+func observe(extractionKind ExtractionKind, locator, localPath, cacheDir string) (revision, extractionStatus, cachePath string, checkoutState LocalCheckoutState) {
 	switch extractionKind {
 	case ExtractionPDF:
-		return observePDF(locator, cacheDir)
+		revision, extractionStatus, cachePath = observePDF(locator, cacheDir)
 	case ExtractionConversation:
-		return observeConversation(locator)
+		revision, extractionStatus, cachePath = observeConversation(locator)
 	case ExtractionRepoDocs:
-		return observeRepoDocs(locator, cacheDir)
+		revision, extractionStatus, cachePath = observeRepoDocs(locator, cacheDir)
+	case ExtractionRepoPointer:
+		revision, extractionStatus, checkoutState = observeRepoPointer(localPath)
 	default:
-		return "", fmt.Sprintf("could not extract: extraction kind %q has no known extraction path -- registered honestly with health only", extractionKind), ""
+		extractionStatus = fmt.Sprintf("could not extract: extraction kind %q has no known extraction path -- registered honestly with health only", extractionKind)
 	}
+	return revision, extractionStatus, cachePath, checkoutState
 }
 
 // observePDF hashes locator's full bytes for drift detection (identical
@@ -167,4 +176,44 @@ func observeRepoDocs(locator, cacheDir string) (revision, extractionStatus, cach
 		return revision, fmt.Sprintf("could not extract: writing manifest cache: %v", err), ""
 	}
 	return revision, fmt.Sprintf("extracted: file listing (%d files) written to cache", len(manifest)), out
+}
+
+// observeRepoPointer handles P8's repo-pointer kind: it never reads or
+// extracts any file content -- its only observation is the local
+// checkout's current commit, when localPath resolves to a real directory
+// on this machine. A blank or nonexistent localPath is
+// LocalCheckoutAbsent, a recorded state, never an error and never a
+// reason to fall back to guessing a path from the record's own
+// RemoteURL (P8's own binding rule).
+//
+// Revision is `git rev-parse HEAD`'s own output -- a single read-only
+// git invocation, the same shell-out-to-a-real-CLI convention
+// internal/corpus already uses for sqlite3. A checkout present but not a
+// git repository, or a rev-parse failure, is reported in
+// extractionStatus as "could not extract", never silently treated as
+// LocalCheckoutAbsent -- those are two different facts (no checkout at
+// all vs. a checkout that could not be read).
+func observeRepoPointer(localPath string) (revision, extractionStatus string, checkoutState LocalCheckoutState) {
+	if localPath == "" {
+		return "", "not applicable: no local_path recorded -- remote_url is on record but no local checkout to observe", LocalCheckoutAbsent
+	}
+	info, err := os.Stat(localPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Sprintf("not applicable: no local checkout found at %s -- remote_url is on record but nothing was read locally", localPath), LocalCheckoutAbsent
+		}
+		return "", fmt.Sprintf("could not extract: stat %s: %v", localPath, err), LocalCheckoutAbsent
+	}
+	if !info.IsDir() {
+		return "", fmt.Sprintf("could not extract: %s exists but is not a directory", localPath), LocalCheckoutAbsent
+	}
+
+	cmd := exec.Command("git", "rev-parse", "HEAD")
+	cmd.Dir = localPath
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Sprintf("could not extract: local checkout present at %s but `git rev-parse HEAD` failed: %v", localPath, err), LocalCheckoutPresent
+	}
+	revision = strings.TrimSpace(string(out))
+	return revision, "not applicable: repo-pointer records the checkout's current commit only, via read-only `git rev-parse HEAD`; no file content extracted", LocalCheckoutPresent
 }
