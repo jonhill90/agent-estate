@@ -152,20 +152,20 @@ func TestINMAPSGuardsAndMOC(t *testing.T) {
 		name := fmt.Sprintf("20260906%04d.md", n)
 		os.WriteFile(filepath.Join(v, "01 - Notes", name), []byte("---\nstatus: stable\ntitle: Example\ntags: [\"kind/decision\"]\n---\n"), 0600)
 		if n == 7 {
-			got, e := MOCProposals(v, true)
+			got, _, e := MOCProposals(v, true)
 			if e != nil || len(got) != 0 {
 				t.Fatalf("seven: %v %v", got, e)
 			}
 		}
 	}
-	got, e := MOCProposals(v, true)
+	got, _, e := MOCProposals(v, true)
 	if e != nil || len(got) != 1 {
 		t.Fatalf("eight: %v %v", got, e)
 	}
 	if e = ReviewMOC(v, filepath.Base(got[0]), "process:test", true, true); e != nil {
 		t.Fatal(e)
 	}
-	got, e = MOCProposals(v, true)
+	got, _, e = MOCProposals(v, true)
 	if e != nil || len(got) != 0 {
 		t.Fatalf("hub suppression: %v %v", got, e)
 	}
@@ -180,6 +180,160 @@ func TestINMAPSGuardsAndMOC(t *testing.T) {
 	raw, _ = os.ReadFile(hub)
 	if !strings.Contains(string(raw), "Curated overview.") || !strings.Contains(string(raw), "202609060009.md") {
 		t.Fatal("refresh lost overview or new link")
+	}
+}
+
+// TestMOCProposalsAndRefreshSeeNestedNoteSubdirs is the regression for a
+// real defect found running Push 4.5's C4 against the live vault:
+// MOCProposals/RefreshMOCs used filepath.Glob("01 - Notes/*.md") -- a
+// FLAT, non-recursive pattern -- while the live vault's own note-subdirs
+// registry (agent-estate#942) puts every real note one directory deeper,
+// under "01 - Notes/01p - Parameters" or "01 - Notes/01f - Facts". Against
+// that layout the glob matched zero files, so moc-propose returned no
+// proposals no matter how far past the >=8 threshold a tag's count ran --
+// measured directly: `moc-propose` printed `null` against a vault with
+// several tags counted in the dozens. This test puts its 8 fixture notes
+// in a nested subdir, the shape the flat glob could not see, so a
+// regression back to Glob fails it immediately.
+func TestMOCProposalsAndRefreshSeeNestedNoteSubdirs(t *testing.T) {
+	v := t.TempDir()
+	for _, d := range []string{"01 - Notes/01f - Facts", "99 - Meta"} {
+		os.MkdirAll(filepath.Join(v, d), 0700)
+	}
+	os.WriteFile(filepath.Join(v, "99 - Meta/tags.md"), []byte("`kind/decision`"), 0600)
+	for n := 1; n <= 8; n++ {
+		name := fmt.Sprintf("20260907%04d.md", n)
+		os.WriteFile(filepath.Join(v, "01 - Notes/01f - Facts", name), []byte("---\nstatus: stable\ntitle: Nested Example\ntags: [\"kind/decision\"]\n---\n"), 0600)
+	}
+	got, _, e := MOCProposals(v, true)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if len(got) != 1 {
+		t.Fatalf("8 nested notes past the threshold produced %d proposals, want 1: %v", len(got), got)
+	}
+	// The generated link must name the note's REAL nested path, not just
+	// its bare filename -- a link built from filepath.Base(p) alone
+	// (agent-estate#942's own subdir layout notwithstanding) points
+	// Obsidian at a file that does not exist, since every real note here
+	// lives one directory deeper than "01 - Notes" itself.
+	draft, _ := os.ReadFile(got[0])
+	if !strings.Contains(string(draft), "01f%20-%20Facts/20260907") {
+		t.Fatalf("generated link does not name the note's nested subdir: %s", draft)
+	}
+	if e = ReviewMOC(v, filepath.Base(got[0]), "process:test", true, true); e != nil {
+		t.Fatal(e)
+	}
+	os.WriteFile(filepath.Join(v, "01 - Notes/01f - Facts/202609070009.md"), []byte("---\nstatus: stable\ntitle: Nested Ninth\ntags: [\"kind/decision\"]\n---\n"), 0600)
+	if _, e = RefreshMOCs(v, true); e != nil {
+		t.Fatal(e)
+	}
+	hub := filepath.Join(v, "02 - MOCs/kind-decision.md")
+	raw, _ := os.ReadFile(hub)
+	if !strings.Contains(string(raw), "01f%20-%20Facts/202609070009.md") {
+		t.Fatalf("refresh did not link the new nested note by its real path: %s", raw)
+	}
+}
+
+// TestWalkNotesExcludesNonNoteMarkdownFiles is the negative case
+// TestMOCProposalsAndRefreshSeeNestedNoteSubdirs never covered: that test
+// only proves a real, canonically-named nested note is INCLUDED; nothing
+// proved a non-note .md file is EXCLUDED. walkNotes's first recursive
+// pass (a bare ".md" suffix check) admitted ANY markdown file under
+// "01 - Notes" -- a per-subdir index.md or README, say -- while
+// internal/knowledge/vault.go's own traversal of the identical directory
+// has always filtered to the exact 12-digit canonical shape
+// (agent-estate#1272, `^\d{12}\.md$`). Nothing of that non-conforming
+// shape exists under "01 - Notes" today, so the looser check was latent,
+// not live -- but it traded the old blind spot (missing every note) for a
+// false-positive one (treating a future non-note file as one). This test
+// puts a "README.md" and an "index.md" beside 8 real, canonically-named
+// notes in the SAME nested subdir and asserts neither non-note file is
+// ever counted toward the threshold, walked, or linked.
+func TestWalkNotesExcludesNonNoteMarkdownFiles(t *testing.T) {
+	v := t.TempDir()
+	for _, d := range []string{"01 - Notes/01f - Facts", "99 - Meta"} {
+		os.MkdirAll(filepath.Join(v, d), 0700)
+	}
+	os.WriteFile(filepath.Join(v, "99 - Meta/tags.md"), []byte("`kind/decision`"), 0600)
+	os.WriteFile(filepath.Join(v, "01 - Notes/01f - Facts/README.md"), []byte("---\nstatus: stable\ntitle: Not A Note\ntags: [\"kind/decision\"]\n---\n"), 0600)
+	os.WriteFile(filepath.Join(v, "01 - Notes/01f - Facts/index.md"), []byte("---\nstatus: stable\ntitle: Also Not A Note\ntags: [\"kind/decision\"]\n---\n"), 0600)
+	for n := 1; n <= 8; n++ {
+		name := fmt.Sprintf("20260907%04d.md", n)
+		os.WriteFile(filepath.Join(v, "01 - Notes/01f - Facts", name), []byte("---\nstatus: stable\ntitle: Real Note\ntags: [\"kind/decision\"]\n---\n"), 0600)
+	}
+	notes, e := walkNotes(v)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if len(notes) != 8 {
+		t.Fatalf("walkNotes returned %d entries, want exactly the 8 canonically-named notes (README.md/index.md must be excluded): %v", len(notes), notes)
+	}
+	for _, p := range notes {
+		if filepath.Base(p) == "README.md" || filepath.Base(p) == "index.md" {
+			t.Fatalf("walkNotes included a non-note file: %s", p)
+		}
+	}
+	got, _, e := MOCProposals(v, true)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if len(got) != 1 {
+		t.Fatalf("8 real notes past the threshold produced %d proposals, want 1: %v", len(got), got)
+	}
+	draft, _ := os.ReadFile(got[0])
+	if strings.Contains(string(draft), "README.md") || strings.Contains(string(draft), "index.md") {
+		t.Fatalf("generated links included a non-note file: %s", draft)
+	}
+}
+
+// TestMOCProposalsSkipsUngovernedTagsRatherThanAborting is the regression
+// for a second real defect found in the same C4 run: every real vault note
+// carries structural/time tags (note, MM-YYYY, standing-rule) that are
+// NOT in 99 - Meta/tags.md's governed vocabulary (they are generated
+// bookkeeping, never MOC-eligible) -- and those groups clear the >=8
+// threshold on nearly any vault with more than a handful of notes.
+// MOCProposals treated validateINMAPS's rejection of an ungoverned tag as
+// a hard error and returned it immediately, aborting the ENTIRE proposal
+// batch before a single governed, genuinely MOC-worthy tag was ever
+// reached. Measured directly against the live vault: `moc-propose` failed
+// with "tag outside vocabulary: 07-2026" and produced zero proposals for
+// tags like azure/deploy/estate that were all well past 8.
+//
+// Also covers agent-estate#1282's second review finding: the skip must be
+// VISIBLE, not silent. Before that fix, the ungoverned tag, its reason,
+// and its note count were all dropped at the `continue` -- an operator
+// reading N proposals had zero signal that dozens of equally-dense tag
+// groups were discarded, indistinguishable from "nothing else was dense
+// enough." skipped must name the tag and its note count.
+func TestMOCProposalsSkipsUngovernedTagsRatherThanAborting(t *testing.T) {
+	v := t.TempDir()
+	os.MkdirAll(filepath.Join(v, "01 - Notes"), 0700)
+	os.MkdirAll(filepath.Join(v, "99 - Meta"), 0700)
+	os.WriteFile(filepath.Join(v, "99 - Meta/tags.md"), []byte("`azure`"), 0600)
+	for n := 1; n <= 9; n++ {
+		name := fmt.Sprintf("20260907%04d.md", n)
+		// "ungoverned" is NOT in tags.md's vocabulary; "azure" is. Both
+		// clear the threshold. If the ungoverned one aborts the batch,
+		// "azure" -- sorted after "ungoverned" alphabetically -- would
+		// never be reached at all.
+		os.WriteFile(filepath.Join(v, "01 - Notes", name), []byte("---\nstatus: stable\ntitle: Example\ntags: [\"ungoverned\",\"azure\"]\n---\n"), 0600)
+	}
+	got, skipped, e := MOCProposals(v, true)
+	if e != nil {
+		t.Fatalf("an ungoverned tag past the threshold aborted the whole batch: %v", e)
+	}
+	if len(got) != 1 || !strings.Contains(got[0], "moc-azure") {
+		t.Fatalf("expected exactly one proposal for the governed tag 'azure', got %v", got)
+	}
+	if len(skipped) != 1 {
+		t.Fatalf("the ungoverned skip was not reported at all: skipped=%v", skipped)
+	}
+	if !strings.Contains(skipped[0], "ungoverned") {
+		t.Fatalf("skipped does not name the tag that was skipped: %v", skipped)
+	}
+	if !strings.Contains(skipped[0], "9") {
+		t.Fatalf("skipped does not carry the note count (9) for the skipped tag: %v", skipped)
 	}
 }
 

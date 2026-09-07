@@ -3,8 +3,10 @@ package candidates
 import (
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -13,18 +15,85 @@ import (
 const mocStart = "<!-- generated-links:start -->"
 const mocEnd = "<!-- generated-links:end -->"
 
+// noteFilename is the exact 12-digit canonical note ID shape -- matched
+// verbatim from internal/knowledge/vault.go (agent-estate#1272's proven
+// shape), not approximated. A bare ".md" suffix check (this file's own
+// first pass at the recursive fix below) admits ANY markdown file under
+// "01 - Notes", including a per-subdir index.md or README that is not a
+// note at all; vault.go already excludes those correctly. Nothing of that
+// shape exists under "01 - Notes" today (checked directly), so the
+// looser check was latent, not live -- but it traded the old blind spot
+// (missing every real note) for a false-positive one (treating a future
+// non-note file as one), which is the exact failure class this match is
+// meant to close by mirroring #1272's own filter rather than
+// reconstructing an equivalent one.
+var noteFilename = regexp.MustCompile(`^\d{12}\.md$`)
+
+// walkNotes lists every canonical note under "01 - Notes", at any depth --
+// notes live directly there (the layout MOCProposals/RefreshMOCs were
+// originally tested against) AND nested under earned letter subdirs like
+// "01p - Parameters"/"01f - Facts" (agent-estate#942's note-subdirs
+// registry, the layout the live vault actually uses). filepath.Glob's
+// "*.md" pattern only ever matched the flat case -- against the real
+// vault (every note one directory deeper) it silently returned zero
+// notes, so MOCProposals/RefreshMOCs never saw a single one to group or
+// refresh, no matter how dense a tag became. This was found running C4
+// (Push 4.5) against the vault C2 just tagged: `moc-propose` returned
+// `null` with tag counts well past the >=8 threshold. Recursive by
+// WalkDir and filtered by noteFilename, both taken directly from
+// internal/knowledge/vault.go's own traversal of the identical directory
+// -- symlinks excluded too, same as that package -- so this file no
+// longer disagrees with, or merely approximates, the package that reads
+// the same tree correctly.
+func walkNotes(vault string) ([]string, error) {
+	var notes []string
+	root := filepath.Join(vault, "01 - Notes")
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() && d.Type()&os.ModeSymlink == 0 && noteFilename.MatchString(d.Name()) {
+			notes = append(notes, p)
+		}
+		return nil
+	})
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	sort.Strings(notes)
+	return notes, nil
+}
+
 // MOCProposals emits drafts only; a hub must already link the whole cluster to
 // suppress a proposal. Refresh changes only a delimited generated link section.
-func MOCProposals(vault string, apply bool) ([]string, error) {
+//
+// skipped names every tag that cleared the >=8 threshold but was NOT
+// proposed because it is not in 99 - Meta/tags.md's governed vocabulary
+// (agent-estate#1282 review, item 2) -- one entry per tag, "<tag>
+// (<N> notes)". Before this field existed, that skip happened at a bare
+// `continue` with the tag, the reason, and the count all dropped: an
+// operator running moc-propose got N proposals with zero signal that
+// dozens of equally-dense tag groups had been silently discarded, which
+// reads identically to "nothing else was dense enough" -- the same
+// silent-absence failure this repo's own conventions exist to prevent
+// (corpus.Grounding's "N additional row(s) excluded as...", sweep's
+// Result always populating Reason even on refusal, invariant 6's "unknown
+// means not offered, never broken"). This does not solve which tags
+// SHOULD be governed -- that judgement call is explicitly out of scope
+// here -- it only makes today's skip visible instead of silent.
+func MOCProposals(vault string, apply bool) (proposed []string, skipped []string, err error) {
 	groups := map[string][]string{}
-	notes, e := filepath.Glob(filepath.Join(vault, "01 - Notes", "*.md"))
+	notes, e := walkNotes(vault)
 	if e != nil {
-		return nil, e
+		return nil, nil, e
 	}
 	for _, p := range notes {
 		b, e := os.ReadFile(p)
 		if e != nil {
-			return nil, e
+			return nil, nil, e
 		}
 		if field(string(b), "status") != "stable" {
 			continue
@@ -42,7 +111,6 @@ func MOCProposals(vault string, apply bool) ([]string, error) {
 		}
 	}
 	hubs, _ := filepath.Glob(filepath.Join(vault, "02 - MOCs", "*.md"))
-	var proposed []string
 	changes := map[string][]byte{}
 	tags := []string{}
 	for tag := range groups {
@@ -58,7 +126,7 @@ func MOCProposals(vault string, apply bool) ([]string, error) {
 		for _, hub := range hubs {
 			b, e := os.ReadFile(hub)
 			if e != nil {
-				return nil, e
+				return nil, nil, e
 			}
 			all := field(string(b), "status") == "stable"
 			for _, p := range paths {
@@ -76,11 +144,31 @@ func MOCProposals(vault string, apply bool) ([]string, error) {
 		}
 		p := Proposal{Type: "MOC", Title: tag, Description: "Connections for " + tag, Learning: "Review this cluster before accepting its hub.", Tags: []string{tag}}
 		if e := validateINMAPS(vault, p); e != nil {
-			return nil, e
+			// A structural/time tag (note, MM-YYYY, standing-rule) groups
+			// past the threshold on nearly every real vault -- they are
+			// not in 99 - Meta/tags.md's governed vocabulary because
+			// they are never meant to head a MOC, only an associative or
+			// axis-based tag is. Before this fix, the first such tag
+			// reached (guaranteed, since these are near-universal) made
+			// validateINMAPS's tag-vocabulary check fail and this whole
+			// function returned that as a hard error, aborting proposals
+			// for every OTHER, genuinely governed tag that also cleared
+			// the threshold -- found running Push 4.5 C4 against the
+			// live vault: `moc-propose` failed outright with "tag
+			// outside vocabulary: 07-2026" and produced zero proposals
+			// for azure/deploy/estate/etc., which were all well past 8.
+			// Skipping an ungoverned tag is the correct reading of "not
+			// MOC-eligible," not an error to abort the batch over --
+			// every other validateINMAPS failure this call can actually
+			// produce (bad type, missing title/description/learning) is
+			// impossible here since MOCProposals constructs every field
+			// of p itself except Tags. Recorded in skipped, not dropped.
+			skipped = append(skipped, fmt.Sprintf("%s (%d notes)", tag, len(paths)))
+			continue
 		}
 		path := filepath.Join(vault, "00 - Inbox", "moc-"+strings.ReplaceAll(tag, "/", "-")+".md")
 		at := time.Now().UTC().Format(time.RFC3339)
-		body := fmt.Sprintf("---\ntype: MOC\nid: %s\ntitle: %s\ndescription: %s\ntags: [%s]\ncreated: %s\nupdated: %s\nstatus: draft\nsource: %s\n---\n\n# %s\n\n## Overview\n\nReview these connections before accepting.\n\n%s\n", scalar(strings.TrimSuffix(filepath.Base(path), ".md")), scalar(tag), scalar(p.Description), scalar(tag), at, at, scalar("Derived from cited stable notes"), tag, mocLinks(paths))
+		body := fmt.Sprintf("---\ntype: MOC\nid: %s\ntitle: %s\ndescription: %s\ntags: [%s]\ncreated: %s\nupdated: %s\nstatus: draft\nsource: %s\n---\n\n# %s\n\n## Overview\n\nReview these connections before accepting.\n\n%s\n", scalar(strings.TrimSuffix(filepath.Base(path), ".md")), scalar(tag), scalar(p.Description), scalar(tag), at, at, scalar("Derived from cited stable notes"), tag, mocLinks(paths, vault))
 		if _, e := os.Stat(path); os.IsNotExist(e) {
 			changes[path] = []byte(body)
 		}
@@ -89,21 +177,39 @@ func MOCProposals(vault string, apply bool) ([]string, error) {
 	if apply && len(changes) > 0 {
 		unlock, e := lockFile(filepath.Join(vault, "99 - Meta/.candidate-memory.lock"))
 		if e != nil {
-			return nil, e
+			return nil, nil, e
 		}
 		defer unlock()
 		if e = writeSet(vault, changes); e != nil {
-			return nil, e
+			return nil, nil, e
 		}
 	}
-	return proposed, nil
+	return proposed, skipped, nil
 }
-func mocLinks(paths []string) string {
+// mocLinks builds the generated-links section, one wikilink per note, from
+// the SAME MOC-relative root every hub actually sits under: "00 - Inbox"
+// and "02 - MOCs" are both direct children of vault, exactly one level up
+// from "01 - Notes" -- so "../01 - Notes/" is correct for either location,
+// but only if what follows it is the note's REAL path under "01 - Notes",
+// not just its filename. Before this fix it was filepath.Base(p) alone,
+// which produced "../01%20-%20Notes/<id>.md" for every note regardless of
+// which earned letter subdir (agent-estate#942: "01p - Parameters", "01f
+// - Facts") it actually lives in -- a link Obsidian cannot resolve, since
+// every real note in this vault lives one directory deeper than that.
+// Found generating the first real MOC drafts against the live, nested
+// vault for Push 4.5 C4: `moc-estate.md`'s own links all 404'd.
+func mocLinks(paths []string, vault string) string {
 	sort.Strings(paths)
 	lines := []string{mocStart}
+	notesRoot := filepath.Join(vault, "01 - Notes")
 	for _, p := range paths {
 		b, _ := os.ReadFile(p)
-		lines = append(lines, "- ["+field(string(b), "title")+"](../01%20-%20Notes/"+filepath.Base(p)+")")
+		rel, err := filepath.Rel(notesRoot, p)
+		if err != nil {
+			rel = filepath.Base(p)
+		}
+		href := strings.ReplaceAll(filepath.ToSlash(rel), " ", "%20")
+		lines = append(lines, "- ["+field(string(b), "title")+"](../01%20-%20Notes/"+href+")")
 	}
 	return strings.Join(append(lines, mocEnd), "\n")
 }
@@ -157,7 +263,10 @@ func RefreshMOCs(vault string, apply bool) (int, error) {
 		defer unlock()
 	}
 	hubs, _ := filepath.Glob(filepath.Join(vault, "02 - MOCs", "*.md"))
-	notes, _ := filepath.Glob(filepath.Join(vault, "01 - Notes", "*.md"))
+	notes, e := walkNotes(vault)
+	if e != nil {
+		return 0, e
+	}
 	changes := map[string][]byte{}
 	for _, hub := range hubs {
 		b, e := os.ReadFile(hub)
@@ -199,7 +308,7 @@ func RefreshMOCs(vault string, apply bool) (int, error) {
 		if start < 0 || end < start {
 			return 0, fmt.Errorf("hub lacks generated section: %s", hub)
 		}
-		next := raw[:start] + mocLinks(paths) + raw[end+len(mocEnd):]
+		next := raw[:start] + mocLinks(paths, vault) + raw[end+len(mocEnd):]
 		if next != raw {
 			next = replaceField(next, "updated", time.Now().UTC().Format(time.RFC3339))
 			changes[hub] = []byte(next)

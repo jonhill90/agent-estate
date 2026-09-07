@@ -59,7 +59,19 @@ func runCandidatesMemory(args []string) {
 			}
 			out = map[string]bool{"applied": *apply && err == nil}
 		case "moc-propose":
-			out, err = candidates.MOCProposals(*vault, *apply)
+			var skipped []string
+			out, skipped, err = candidates.MOCProposals(*vault, *apply)
+			if len(skipped) > 0 {
+				// Visible, not silent (agent-estate#1282 review, item 2):
+				// stderr is this CLI's existing channel for exactly this
+				// shape of report -- see sweepWorktrees's own
+				// fmt.Fprintln(os.Stderr, ...) lines -- so an operator
+				// reading stdout's proposal list also sees, on the same
+				// run, every equally-dense tag that did NOT become one and
+				// why, rather than a proposal count indistinguishable from
+				// "nothing else was dense enough."
+				fmt.Fprintf(os.Stderr, "estate: %d tag(s) past the threshold were not proposed (not in the governed vocabulary): %s\n", len(skipped), strings.Join(skipped, ", "))
+			}
 		case "moc-accept", "moc-reject":
 			err = candidates.ReviewMOC(*vault, *id, *reviewer, *action == "moc-accept", *apply)
 			out = map[string]bool{"applied": *apply && err == nil}
