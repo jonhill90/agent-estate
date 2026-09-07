@@ -206,6 +206,77 @@ func TestStandingLawEmptySetWithNoVaultIsFine(t *testing.T) {
 	}
 }
 
+// writeMigratedFixtureNote writes a synthetic INMAPS-relayout note under
+// 01 - Notes/, carrying an `aliases:` frontmatter line for oldSlug, mirroring
+// what the W1 fact migration actually produces (id + aliases added,
+// original body untouched) -- never a copy of any real vault content.
+func writeMigratedFixtureNote(t *testing.T, vaultDir, id, oldSlug, body string) string {
+	t.Helper()
+	dir := filepath.Join(vaultDir, "01 - Notes")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	content := "---\nid: \"" + id + "\"\naliases: [" + oldSlug + "]\ntype: fixture\ntitle: " + oldSlug + "\n---\n" + body + "\n"
+	path := filepath.Join(dir, id+".md")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256([]byte(content))
+	return hex.EncodeToString(sum[:])
+}
+
+// TestStandingLawResolvesMigratedMemberByAlias is the P0 fix's own required
+// proof: a member declared by its pre-migration slug must still resolve
+// once the vault has moved that fact to 01 - Notes/<id>.md under the
+// INMAPS relayout -- agent/facts/<slug>.md no longer exists at all, so
+// resolution must succeed via the note's own `aliases:` frontmatter, not
+// the legacy path.
+func TestStandingLawResolvesMigratedMemberByAlias(t *testing.T) {
+	vault := t.TempDir()
+	hash := writeMigratedFixtureNote(t, vault, "202609060005", "member-fact",
+		"member body text -- this one is declared law, now living under 01 - Notes.")
+
+	// Prove the legacy path genuinely does not exist -- this is testing
+	// alias resolution, not accidentally falling back to the old branch.
+	if _, err := os.Stat(filepath.Join(vault, "agent", "facts", "member-fact.md")); err == nil {
+		t.Fatal("fixture setup bug: legacy path exists, so this would not exercise alias resolution")
+	}
+
+	withStandingLawSet(t, []StandingLawMember{
+		{Slug: "member-fact", HashPrefix: hash[:12], Reason: "fixture reason"},
+	})
+
+	entries, err := StandingLaw(vault)
+	if err != nil {
+		t.Fatalf("StandingLaw() failed to resolve a migrated member by alias: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Slug != "member-fact" {
+		t.Fatalf("StandingLaw() resolved %+v, want exactly the one declared member", entries)
+	}
+	if !strings.Contains(entries[0].Body, "member body text") {
+		t.Fatalf("StandingLaw() resolved the wrong content for the migrated member: %+v", entries[0])
+	}
+}
+
+// TestStandingLawMigratedMemberHashDriftStillRefuses proves the hash-pin
+// mechanism survives the migration path unweakened: a migrated note whose
+// bytes no longer match the declared prefix must refuse exactly like the
+// legacy-path case does, not be waved through because it was found by
+// alias instead of by direct path.
+func TestStandingLawMigratedMemberHashDriftStillRefuses(t *testing.T) {
+	vault := t.TempDir()
+	writeMigratedFixtureNote(t, vault, "202609060005", "drifted-fact",
+		"original reviewed body, now migrated")
+
+	withStandingLawSet(t, []StandingLawMember{
+		{Slug: "drifted-fact", HashPrefix: "deadbeefdead", Reason: "fixture reason"},
+	})
+
+	if _, err := StandingLaw(vault); err == nil {
+		t.Fatal("StandingLaw() accepted a migrated member whose file hash does not match the declared prefix")
+	}
+}
+
 // TestGroundingLabelsStandingLawSeparatelyFromCorpusLaw proves requirement
 // 3: the rendered preamble marks standing law as Agent-Memory-sourced,
 // distinct from the "OPERATOR PARAMETERS" corpus section, so an agent can
