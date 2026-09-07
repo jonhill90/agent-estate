@@ -68,7 +68,7 @@ var Registry = []Feature{
 		Name:   "Codex transcript ingestion (cmd/codexingest)",
 		Status: Delivered,
 		Evidence: "PR #1240, merged and ran: 4,360 codex provenance rows live in " +
-			"~/corpus/ledger.sqlite3 (re-verify: sqlite3 -readonly ~/corpus/ledger.sqlite3 " +
+			"~/corpus/ledger.sqlite3 (renamed corpus.sqlite3, agent-estate#P6; re-verify: sqlite3 -readonly ~/corpus/corpus.sqlite3 " +
 			"\"select count(*) from codex_provenance\")",
 	},
 	{
@@ -107,7 +107,7 @@ var Registry = []Feature{
 			"in agent-estate#1139: Hard() now excludes status IN (dropped, needs_review) " +
 			"and returns what it excluded so the omission is reported, never silent " +
 			"(Grounding() renders an 'excluded as not-currently-law' line with per-status " +
-			"counts). Re-verified 2026-09-06: sqlite3 -readonly ~/corpus/ledger.sqlite3 " +
+			"counts). Re-verified 2026-09-06: sqlite3 -readonly ~/corpus/corpus.sqlite3 " +
 			"\"select status, count(*) from items where weight='hard' and kind in " +
 			"('parameter','directive','correction') group by status\" -> acted 1843, " +
 			"acknowledged 299, resolved 236, open 52, dropped 32, needs_review 10 " +

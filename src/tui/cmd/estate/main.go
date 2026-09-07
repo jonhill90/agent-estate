@@ -122,7 +122,7 @@ func main() {
 				"-ledger's shared prompt/decision ledger (7,311 items / 1,104 live hard parameters measured "+
 				"2026-09-03, against the shared ledger's 72/0). Opened read-only via the file:...?mode=ro URI "+
 				"form, never copied (src/estate/internal/corpus's own precedent for this exact file). Left "+
-				"unset, defaults to $HOME/corpus/ledger.sqlite3, the same path "+
+				"unset, defaults to $HOME/corpus/corpus.sqlite3, the same path "+
 				"src/estate/internal/corpus.Path() resolves; left unresolvable there too, the library pane's "+
 				"[c]-cycled operator Source renders itself \"not configured\" rather than refusing to start -- "+
 				"unlike -ledger, no flag makes this mandatory.")

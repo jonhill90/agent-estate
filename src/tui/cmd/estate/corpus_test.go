@@ -14,7 +14,7 @@ func TestDefaultCorpusPath_JoinsHomeCorpusLedger(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	got := defaultCorpusPath()
-	want := filepath.Join(home, "corpus", "ledger.sqlite3")
+	want := filepath.Join(home, "corpus", "corpus.sqlite3")
 	if got != want {
 		t.Fatalf("got %q, want %q -- must match src/estate/internal/corpus.Path()'s own default", got, want)
 	}
@@ -28,8 +28,8 @@ func TestDefaultCorpusPath_EmptyHomeIsUndiscoverable(t *testing.T) {
 }
 
 func TestCorpusReadOnlyURI_UsesModeRoImmutable(t *testing.T) {
-	got := corpusReadOnlyURI("/some/path/ledger.sqlite3")
-	want := "file:/some/path/ledger.sqlite3?mode=ro&immutable=1"
+	got := corpusReadOnlyURI("/some/path/corpus.sqlite3")
+	want := "file:/some/path/corpus.sqlite3?mode=ro&immutable=1"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -96,7 +96,7 @@ func TestOperatorCorpusReadsThroughTheReadOnlyURI(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	corpus := filepath.Join(dir, "ledger.sqlite3")
+	corpus := filepath.Join(dir, "corpus.sqlite3")
 	setup := `
 CREATE TABLE prompts (id TEXT PRIMARY KEY, at INTEGER, context TEXT, text_clean TEXT, text_raw TEXT);
 CREATE TABLE items (id TEXT PRIMARY KEY, prompt_id TEXT, kind TEXT, weight TEXT, status TEXT, status_reason TEXT, resolved_to TEXT, body TEXT);

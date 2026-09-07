@@ -12,7 +12,7 @@
 // an os.Stat, or (for Codex rollouts specifically) the same read-only
 // internal/rollout parse cmd/capturehealth already uses -- os.Open only,
 // never O_RDWR, never os.Create, never os.Remove, and nothing here calls
-// os.Chtimes. It also never opens ~/corpus/ledger.sqlite3: a catalogue of
+// os.Chtimes. It also never opens ~/corpus/corpus.sqlite3: a catalogue of
 // sources is not itself a corpus query.
 //
 // Two sources are seeded because two are real: Codex rollout JSONL under

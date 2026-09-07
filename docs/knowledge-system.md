@@ -21,7 +21,7 @@ Five sources, none of them owned or written by this package
 
 - GitHub stars (`gh api user/starred`)
 - the Agent Memory vault (`$AGENT_MEMORY_VAULT/agent/facts/*.md`)
-- the operator's prompt/parameter corpus (`~/corpus/ledger.sqlite3`'s
+- the operator's prompt/parameter corpus (`~/corpus/corpus.sqlite3`'s
   `live_parameters` view only — never the raw `prompts` table)
 - `~/source/repos/Personal/Loops-Research`, numbered markdown files
 - this repository's own rules: `AGENTS.md`/`CLAUDE.md` and every

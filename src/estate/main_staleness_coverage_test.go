@@ -54,7 +54,7 @@ func writeVaultFixture(t *testing.T, mtime time.Time) string {
 }
 
 // writeCorpusFixture creates a scratch file standing in for
-// ~/corpus/ledger.sqlite3 (ESTATE_CORPUS) with the given mtime -- a
+// ~/corpus/corpus.sqlite3 (ESTATE_CORPUS) with the given mtime -- a
 // zero-byte placeholder is enough, since freshness comparison only ever
 // stats it, never reads its content.
 func writeCorpusFixture(t *testing.T, mtime time.Time) string {

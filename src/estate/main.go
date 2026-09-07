@@ -1027,7 +1027,7 @@ func decisionOrUndecided(status string) string {
 // runCandidatesDerive gives Derive the same live-corpus write gate its
 // siblings (candidates decide, cmd/codexingest) already carry
 // (agent-estate#1251) -- bare `estate candidates` used to resolve the
-// default corpus path (the live ~/corpus/ledger.sqlite3) and write to it
+// default corpus path (the live ~/corpus/corpus.sqlite3) and write to it
 // unconditionally, with no -apply and no RefuseLivePath check anywhere on
 // this path. This reuses internal/livepath.RefuseLivePath rather than
 // writing a second identity check: the SAME "refuse unless

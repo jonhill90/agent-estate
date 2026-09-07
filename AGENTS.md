@@ -22,7 +22,7 @@ somewhere polite.
 
 **Exhaust the record before a question reaches him**, in this order:
 
-1. **Query the corpus.** `~/corpus/ledger.sqlite3` — the same path
+1. **Query the corpus.** `~/corpus/corpus.sqlite3` — the same path
    `internal/corpus.Path()` resolves for every dispatch's own grounding, so
    the two cannot drift apart unnoticed
    (`src/estate/internal/corpus/agents_md_test.go` fails the build if they
@@ -30,6 +30,10 @@ somewhere polite.
    constraints in `live_parameters` (re-run the count yourself before citing
    it further — it grows). Views: `live_parameters`, `open_questions`,
    `unacknowledged`, `possibility_count`.
+   Renamed from `ledger.sqlite3` (agent-estate#P6): the old name is kept as
+   a compat symlink to this file, but every consumer in this repo now
+   names the file directly — see `99 - Meta`'s disambiguation note for
+   which "ledger" is which.
    `~/.local/state/agent-dotfiles-supervisor/ledger.sqlite3` is a **different,
    nearly-empty database** (0 live parameters measured the same day) — do not
    query it for this rule (agent-estate#942).

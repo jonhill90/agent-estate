@@ -116,7 +116,7 @@ func corpusSourceName(kind string) string {
 // without this package ever holding the words themselves).
 //
 // dbPath must already be a real, stat-able file; the caller (Generate)
-// resolves ~/corpus/ledger.sqlite3 (agent-estate#942's own trap: CLAUDE.md
+// resolves ~/corpus/corpus.sqlite3 (agent-estate#942's own trap: CLAUDE.md
 // documents the wrong path) before calling this. Opened, per the
 // operator's own stated requirement, only as
 // file:<path>?mode=ro&immutable=1.
@@ -136,7 +136,7 @@ func corpusSource(dbPath string) (SourceResult, []Item) {
 	// github-stars) each resolve to something a caller can follow (a path, a
 	// path plus a root note, a URL); this one used to give only an item id
 	// and a disclaimer, unfollowable by a caller who does not already know
-	// ~/corpus/ledger.sqlite3. dbPath is used here rather than a fresh call
+	// ~/corpus/corpus.sqlite3. dbPath is used here rather than a fresh call
 	// to internal/corpus.Path(): dbPath is the exact file this function just
 	// stat'd and is about to query below, so citing it can never diverge from
 	// where the item actually came from -- a second, independent resolution

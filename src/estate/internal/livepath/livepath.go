@@ -1,5 +1,9 @@
 // Package livepath is the ONE live-corpus-path guard every command that
-// might write to a SQLite copy of ~/corpus/ledger.sqlite3 shares. It was
+// might write to a SQLite copy of ~/corpus/corpus.sqlite3 (renamed from
+// ledger.sqlite3, agent-estate#P6; the old name is kept as a compat
+// symlink -- this package's identity-based comparison, see
+// RefuseLivePath's own doc comment, resolves either name to the same
+// file without needing to know both spellings) shares. It was
 // factored out of cmd/provenancebackfill (agent-estate#1139) so a second
 // ingestion command (cmd/codexingest) reuses the exact same refusal rather
 // than forking a second copy of it -- the task brief that created
