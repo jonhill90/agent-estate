@@ -15,7 +15,7 @@ are kept, unmaintained, under `reference/` so a rule can be read in the form
 it was once encoded, and git history has the rest. Nothing there is run,
 tested, or fixed; recovering a rule from it means reimplementing that rule in
 Go. The rules retired along with the CI workflows that ran them, and the
-status of each, are in [`docs/ci-rules-retired.md`](../ci-rules-retired.md)
+status of each, are in [`docs/historical/ci-rules-retired.md`](../historical/ci-rules-retired.md)
 — do not cite any of them as enforced.
 
 ## The guards that actually run
@@ -42,6 +42,6 @@ establish, at more length than a table can.
 the completion gate, the fix-pass evidence gate and the UI evidence gate were
 all mechanisms of the deleted supervisor, and none was reimplemented. What each
 of those five rules actually *said* is recorded in
-[`docs/ci-rules-retired.md`](../ci-rules-retired.md), along with
+[`docs/historical/ci-rules-retired.md`](../historical/ci-rules-retired.md), along with
 `gh-comment-gate.sh` and `mark-pr-external.sh` — read it there rather than
 recovering a rule from `reference/`'s source.

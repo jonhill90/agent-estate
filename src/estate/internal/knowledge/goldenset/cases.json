@@ -109,8 +109,8 @@
     "id": "docs-02",
     "question": "What did the retired collision-check.sh guard refuse, and how was a lane considered 'in flight'?",
     "expected_source": "repo-docs",
-    "expected_identifier": "docs/ci-rules-retired.md#ci-rules-retired-with-the-shell-supervisor--rules-retired-with-their-scripts-not-with-a-workflow",
-    "rationale": "docs/ci-rules-retired.md's \"Rules retired with their scripts, not with a workflow\" section states it directly: collision-check.sh refused 'a dispatch whose files overlap an in-flight lane's files', and 'In flight' is defined there as 'every ledger task not recorded complete/failed/cancelled that has a recorded worktree path.' No other file in the index carries this."
+    "expected_identifier": "docs/historical/ci-rules-retired.md#ci-rules-retired-with-the-shell-supervisor--rules-retired-with-their-scripts-not-with-a-workflow",
+    "rationale": "docs/historical/ci-rules-retired.md's \"Rules retired with their scripts, not with a workflow\" section states it directly: collision-check.sh refused 'a dispatch whose files overlap an in-flight lane's files', and 'In flight' is defined there as 'every ledger task not recorded complete/failed/cancelled that has a recorded worktree path.' No other file in the index carries this."
   },
   {
     "id": "camelcase-01",

@@ -193,7 +193,7 @@ func resolveURL(u string, doHTTP httpStatus, doGH ghAPI) (tick.Resolution, strin
 // resolveProse checks each path/sha/issue-or-PR candidate token Validate
 // would already have extracted, and accepts if any one of them resolves.
 // This mirrors Validate's own tolerance for prose ("fixed the thing in
-// docs/phase-plan.md") rather than requiring the whole artifact to be one
+// docs/canonical/phase-plan.md") rather than requiring the whole artifact to be one
 // bare token.
 func resolveProse(a, srcHead string) (tick.Resolution, string) {
 	cands := tick.Candidates(a)

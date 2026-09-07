@@ -111,7 +111,7 @@
     "id": "nl-13",
     "question": "what should I check before treating something an operator said as a binding rule",
     "expected_source": "repo-docs",
-    "expected_identifier": "docs/director-brief.md#director-standing-brief--4-the-corpus--before-a-parameter-binds-you",
+    "expected_identifier": "docs/canonical/director-brief.md#director-standing-brief--4-the-corpus--before-a-parameter-binds-you",
     "rationale": "Target is docs/director-brief.md's own \"4. The corpus -- Before a parameter binds you\" section, chosen before any query ran (agent-estate#1169: this file had zero fixture coverage despite being one of the 12 repo-docs files in the index). Measured on this checkout, scratch index built from a5b3d76: rank 1, default/public, unscoped.",
     "note": "natural-language stratum (#1073/#1169) -- agent-estate#1169's per-file coverage pass: docs/director-brief.md had no case at all before this one.",
     "target_text": "Director — standing brief — 4. The corpus — Before a parameter binds you -- 1. **Join it to its source prompt and read what he actually typed.** At least\n   one hard parameter is fabricated: he ranted about scripts hidden in\n   `~/.local`, and an itemiser filed *\"~/.local holds state like logs and\n   status, never scripts\"* — a storage policy he never stated — as his law.\n2. **A parameter distilled from a question is not law.** He asked \"do we need\n   Sonnet for the workers?\" and it was filed as a hard rule. If the source\n   prompt ends in a question mark and no answer is recorded, treat it as an\n   open question, not a constraint.\n3. **A parameter you cannot join is not law** and must not be cited in a plan,\n   a PR, or a decision.\n4. **When a joined parameter conflicts with observed repo state, that is an\n   intent conflict** — escalate it under §5. That is pre…"
@@ -138,7 +138,7 @@
     "id": "nl-16",
     "question": "what does it mean if a knowledge query returns nothing",
     "expected_source": "repo-docs",
-    "expected_identifier": "docs/knowledge-system.md#how-does-knowledge-retrieval-work-in-this-repo--what-happens-when-nothing-or-the-wrong-thing-answers-a-question",
+    "expected_identifier": "docs/canonical/knowledge-system.md#how-does-knowledge-retrieval-work-in-this-repo--what-happens-when-nothing-or-the-wrong-thing-answers-a-question",
     "rationale": "Target is docs/knowledge-system.md's own \"What happens when nothing (or the wrong thing) answers a question?\" section, chosen before any query ran (agent-estate#1169: this is the document agent-estate#1169's own issue names as \"where the grounding sends every lane\" and it had zero fixture coverage). Measured on this checkout, scratch index built from a5b3d76: rank 1, default/public, unscoped.",
     "note": "natural-language stratum (#1073/#1169) -- agent-estate#1169's per-file coverage pass: docs/knowledge-system.md had no case at all before this one, despite being the document every lane is directed to.",
     "target_text": "How does knowledge retrieval work in this repo? — What happens when nothing (or the wrong thing) answers a question? -- Four distinct absences, on purpose never collapsed into one \"nothing here\"\nshape, each with its own exit code from `estate knowledge query`:\n\n| exit | state | means |\n|---|---|---|\n| 0 | `matched` (or `matched_withheld_majority`) | at least one publishable item scored above zero and was returned |\n| 1 | `no_match` | the index was read fine; nothing in it scored above zero against this question — a real, empty answer, not a failure |\n| 2 | `index_missing` / `index_unreadable` | the compiled index itself could not be read at all — run `estate knowledge` first |\n| 3 | `withheld_private` | something answers this question, but every matching item is private and this call did not ask for private material |\n\n**In practice, exit 3 fires when the public sources themselves were absent or\nunreadable…"
@@ -147,7 +147,7 @@
     "id": "nl-17",
     "question": "what risk in the roadmap has not been addressed yet",
     "expected_source": "repo-docs",
-    "expected_identifier": "docs/phase-plan.md#phase-plan-the-meta-harness--the-risk-that-has-not-changed",
+    "expected_identifier": "docs/canonical/phase-plan.md#phase-plan-the-meta-harness--the-risk-that-has-not-changed",
     "rationale": "Target is docs/phase-plan.md's own \"The risk that has not changed\" section, chosen before any query ran (agent-estate#1169: docs/phase-plan.md had zero fixture coverage). Measured on this checkout, scratch index built from a5b3d76: rank 1, default/public, unscoped.",
     "note": "natural-language stratum (#1073/#1169) -- agent-estate#1169's per-file coverage pass: docs/phase-plan.md had no case at all before this one.",
     "target_text": "Phase plan — the meta-harness — The risk that has not changed -- Phases 0, 3, 4 and 6 live in `src/estate`, which `src/progress` scores as\n\"app\" while showing the operator nothing. Every tick report names which of\n`src/tui` / `src/estate` moved. A run of `src/estate`-only weeks is a signal to\nreorder, not to keep scoring."
@@ -156,7 +156,7 @@
     "id": "nl-18",
     "question": "does the director loop verify that the work it kicked off actually succeeded",
     "expected_source": "repo-docs",
-    "expected_identifier": "docs/director-loop.md#the-directors-loop--what-is-not-verified-here",
+    "expected_identifier": "docs/canonical/director-loop.md#the-directors-loop--what-is-not-verified-here",
     "rationale": "Target is docs/director-loop.md's own \"What is not verified here\" section, chosen before any query ran (agent-estate#1169: docs/director-loop.md had zero fixture coverage). Measured on this checkout, scratch index built from a5b3d76: rank 1, default/public, unscoped.",
     "note": "natural-language stratum (#1073/#1169) -- agent-estate#1169's per-file coverage pass: docs/director-loop.md had no case at all before this one.",
     "target_text": "The Director's loop — What is not verified here -- That the cron survives a session restart — it does not. Replacing this stopgap\nwith real loop and graph engineering is Phase 6 of `docs/phase-plan.md`, and\nuntil then a dead session means a dead loop with no external alarm."
@@ -165,7 +165,7 @@
     "id": "nl-19",
     "question": "how should a spend ledger handle harnesses reporting cost differently",
     "expected_source": "repo-docs",
-    "expected_identifier": "docs/spend-observation.md#what-a-turn-actually-costs-what-can-be-observed-harness-by-harness--what-this-means-for-a-spend-ledger",
+    "expected_identifier": "docs/canonical/spend-observation.md#what-a-turn-actually-costs-what-can-be-observed-harness-by-harness--what-this-means-for-a-spend-ledger",
     "rationale": "Target is docs/spend-observation.md's own \"What this means for a spend ledger\" section, chosen before any query ran (agent-estate#1169: docs/spend-observation.md had zero fixture coverage). Measured on this checkout, scratch index built from a5b3d76: rank 1, default/public, unscoped.",
     "note": "natural-language stratum (#1073/#1169) -- agent-estate#1169's per-file coverage pass: docs/spend-observation.md had no case at all before this one.",
     "target_text": "What a turn actually costs — what can be observed, harness by harness — What this means for a spend ledger -- | harness | dollar cost, per turn | token counts, per turn | source |\n|---|---|---|---|\n| claude | **yes** — `total_cost_usd`, Anthropic's own billed figure | yes — `usage.*` | same stdout envelope the estate already reads for `result` |\n| codex | **no** — codex reports no dollar figure anywhere | yes — `turn.completed.usage` (`--json` must be added to the invocation) | stdout, once `--json` is added |\n\nSo a per-turn spend ledger can *honestly* carry:\n- `claude`: a real, harness-reported `CostUSD`, plus token counts.\n- `codex`: token counts only, `CostUSD` absent (typed absence, not a zero\n  or an estimate).\n\nThis is implemented in `internal/harness.Turn.Spend` (a new field alongside\nthe existing `Result`, same \"read what the harness itself produced\" shape)\nand recorded on `ledger.Record`…"
@@ -174,7 +174,7 @@
     "id": "nl-20",
     "question": "is the extra review step actually worth the tokens it costs",
     "expected_source": "repo-docs",
-    "expected_identifier": "docs/reviewer-value.md#do-the-reviewers-earn-their-tokens--what-it-cost",
+    "expected_identifier": "docs/canonical/reviewer-value.md#do-the-reviewers-earn-their-tokens--what-it-cost",
     "rationale": "Target is docs/reviewer-value.md's own \"What it cost\" section, chosen before any query ran (agent-estate#1169: docs/reviewer-value.md had zero fixture coverage). Measured on this checkout, scratch index built from a5b3d76: rank 1, default/public, unscoped.",
     "note": "natural-language stratum (#1073/#1169) -- agent-estate#1169's per-file coverage pass: docs/reviewer-value.md had no case at all before this one.",
     "target_text": "Do the reviewers earn their tokens? — What it cost -- Pairing each review's `dispatched`→`complete` timestamps: **51 review turns\ntotaled ~11,006 seconds (≈183 agent-minutes), averaging 216 seconds each.**\nThe 21 non-review (authoring / fix-pass) turns in the same window totaled\n~7,242 seconds (≈121 agent-minutes), averaging 345 seconds each — individual\nauthor turns ran longer, but there were more than twice as many review turns,\nso **review consumed about 52% more total agent-minutes than authoring did**,\nand outnumbered authoring turns 2.4:1. This does not separate cost by model\ntier (this estate deliberately dispatches cheaper tiers for review and\nreserves the expensive tier for judgment calls — a real mitigation this\nnumber doesn't show) and it does not include the token cost of the fix\npasses review's findings then required, which is f…"
@@ -183,7 +183,7 @@
     "id": "nl-21",
     "question": "of the retired CI rules which ones does anything still call",
     "expected_source": "repo-docs",
-    "expected_identifier": "docs/ci-rules-retired.md#ci-rules-retired-with-the-shell-supervisor--what-still-runs",
+    "expected_identifier": "docs/historical/ci-rules-retired.md#ci-rules-retired-with-the-shell-supervisor--what-still-runs",
     "rationale": "Target is docs/ci-rules-retired.md's own \"What still runs\" section, chosen before any query ran (agent-estate#1169: docs/ci-rules-retired.md had zero fixture coverage). Measured on this checkout, scratch index built from a5b3d76: rank 1, default/public, unscoped.",
     "note": "natural-language stratum (#1073/#1169) -- agent-estate#1169's per-file coverage pass: docs/ci-rules-retired.md had no case at all before this one.",
     "target_text": "CI rules retired with the shell supervisor — What still runs -- - `estate-ci.yml` — `go build`, `go vet`, `go test` over `src/estate`.\n- `tui-ci.yml` — the same over `src/tui`.\n\nBoth are real and both must stay green."
@@ -203,7 +203,7 @@
     "id": "nl-23",
     "question": "how does an agent keep context across a long running workflow",
     "expected_source": "repo-docs",
-    "expected_identifier": "docs/director-brief.md#director-standing-brief--3-how-you-run--the-stop-condition-made-mechanical",
+    "expected_identifier": "docs/canonical/director-brief.md#director-standing-brief--3-how-you-run--the-stop-condition-made-mechanical",
     "rationale": "Target is docs/director-brief.md's own \"The stop condition, made mechanical\" section -- the tick log that carries state between one `/loop` tick's fresh context and the next -- chosen before any query ran (agent-estate#1162: a discriminating case built around 'agent'/'workflow'/'context', terms github-stars is saturated with -- nine agent-orchestration/memory repos outrank this section in the runner's actual default/public unscoped arm). Measured fresh on this checkout: default/public unscoped rank 10; --private, source:repo-docs scoped rank 1.",
     "note": "natural-language stratum (#1073/#1162) -- the second of three discriminating cases; same fix as nl-22's note -- verified against the runner's real unscoped mode (default/public), not a --private-vs---private comparison.",
     "target_text": "Director — standing brief — 3. How you run — The stop condition, made mechanical -- Nothing in this estate records ticks, and a `/loop` tick is a fresh context\nwith no memory of the last one. So you must write the record yourself:\n\nAppend one line per tick to `docs/tick-log.jsonl`:\n`{\"at\":\"<iso8601>\",\"phase_item\":\"<id>\",\"src_head\":\"<git log -1 --format=%H -- src/>\",\"artifact\":\"<what a human can look at, or null>\"}`\n\n**Stop ticking and escalate when the last three entries share the same\n`phase_item` and the same `src_head` with `artifact: null`.** That is\ndeterminable with one `tail -3`. A stop condition with no implementation is a\nsentence, not a guard. In practice, run `estate tick check`: it applies the\nreal rule (agent-estate#959, #923), not the literal wording above — see\n`internal/tick`'s own doc comment for exactly how and why it departs. **A\nstalled tick that has…",

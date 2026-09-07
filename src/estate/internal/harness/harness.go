@@ -49,7 +49,7 @@ type Turn struct {
 	// SessionID extracts the harness's own conversation handle for this turn,
 	// from the same finished command's stdout Result and Spend read --
 	// claude's `session_id`, codex's `thread_id`. This is the piece
-	// docs/phase-plan.md's Phase 3 says the estate throws away today: a lane
+	// docs/canonical/phase-plan.md's Phase 3 says the estate throws away today: a lane
 	// that dies mid-turn cannot be resumed because nothing recorded the
 	// handle the harness itself already reported. An error means the
 	// harness reported no usable handle for this turn; the caller records
@@ -68,7 +68,7 @@ type Turn struct {
 // src/tui/internal/cost.Figure.Known uses for the identical problem.
 //
 // CostUSD is deliberately absent for any harness that does not itself state
-// a dollar figure (codex, as of this writing -- see docs/spend-observation.md).
+// a dollar figure (codex, as of this writing -- see docs/canonical/spend-observation.md).
 // This package refuses to fill that gap by multiplying token counts against
 // a price table it would have to keep in sync with the provider's own
 // billing: that is estimating, and #975 is explicit that estimating is
@@ -223,11 +223,11 @@ func claudeResult(stdout []byte) (string, error) {
 // own number, not this package's), inline (no second subprocess), and it is
 // the one figure that already folds in sub-agent models (see modelUsage
 // below) the way ccusage's own after-the-fact log scrape does not (see
-// docs/spend-observation.md).
+// docs/canonical/spend-observation.md).
 //
 // modelUsage is why total_cost_usd cannot be attributed to one model: a
 // single turn runs sonnet AND dispatches haiku sub-agents, and modelUsage
-// carries each model's own share. See docs/spend-observation.md for the
+// carries each model's own share. See docs/canonical/spend-observation.md for the
 // real captured payload this was checked against, and Spend.ByModel's doc
 // comment for why a scalar "the model for this turn" is the wrong shape.
 type claudeSpendEnvelope struct {
@@ -281,7 +281,7 @@ func claudeSpend(stdout []byte) (Spend, error) {
 
 // claudeSessionID reads the same envelope claudeResult and claudeSpend
 // already parse for its "session_id" field -- the handle
-// docs/spend-observation.md's captured payload shows sitting right beside
+// docs/canonical/spend-observation.md's captured payload shows sitting right beside
 // "result" and "total_cost_usd" in claude -p --output-format json's single
 // JSON object. Absent or blank is an error, never an empty string, so the
 // caller records this turn's handle as genuinely unreported rather than "".
@@ -362,7 +362,7 @@ type codexEvent struct {
 
 // codexSpend reads codex exec --json's "turn.completed" event for its
 // per-turn token usage. Codex reports no dollar figure anywhere in its own
-// output (see docs/spend-observation.md), so Spend.CostUSD is always nil
+// output (see docs/canonical/spend-observation.md), so Spend.CostUSD is always nil
 // here -- filling it by multiplying tokens against a price table this
 // package would have to maintain is exactly the estimating #975 rules out.
 // A stream with several turns (a resumed/forked session) is not something
@@ -396,7 +396,7 @@ func codexSpend(stdout []byte) (Spend, error) {
 
 // codexSessionID reads codex exec --json's "thread.started" event for its
 // thread_id -- codex's own shape for the same conversation handle claude
-// calls session_id (see docs/spend-observation.md's real captured stream:
+// calls session_id (see docs/canonical/spend-observation.md's real captured stream:
 // {"type":"thread.started","thread_id":"01a06826-ac92-7b62-8418-247dee57b779"}
 // is the first line codex --json ever emits). Unlike codexSpend's
 // turn.completed, a thread has exactly one thread.started per invocation

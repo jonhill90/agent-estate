@@ -32,7 +32,7 @@ func TestAggregate_ClaudeTurnWithDollarCost(t *testing.T) {
 }
 
 // TestAggregate_CodexTurnWithTokensNoDollars covers #975's second required
-// case: codex never reports a dollar figure (docs/spend-observation.md), so
+// case: codex never reports a dollar figure (docs/canonical/spend-observation.md), so
 // this must show up as tokens with TurnsWithCost == 0, never as $0.00.
 func TestAggregate_CodexTurnWithTokensNoDollars(t *testing.T) {
 	rep := Aggregate([]ledger.Record{

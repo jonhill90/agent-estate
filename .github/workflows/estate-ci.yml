@@ -14,3 +14,7 @@ jobs:
         run: go vet ./src/estate/...
       - name: test
         run: go test ./src/estate/...
+      - name: docs-lint self-test
+        run: python3 -m unittest discover -s scripts/docs-lint -p 'test_*.py' -v
+      - name: docs-lint
+        run: python3 scripts/docs-lint/lint_docs.py

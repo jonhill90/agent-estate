@@ -878,10 +878,10 @@ func (r ratchet) ok() bool {
 // cases to maintain, and a per-file case is a shallower probe of a large
 // file than #1073's original AGENTS.md cases were of AGENTS.md, since one
 // case cannot exercise everything in a 16-section file. nl-13..nl-21 (one
-// per previously-uncovered file: docs/director-brief.md, docs/tui/SPEC.md,
-// docs/tui/PRD.md, docs/knowledge-system.md, docs/phase-plan.md,
-// docs/director-loop.md, docs/spend-observation.md, docs/reviewer-value.md,
-// docs/ci-rules-retired.md) were each written from a caller's own need
+// per previously-uncovered file: docs/canonical/director-brief.md, docs/tui/SPEC.md,
+// docs/tui/PRD.md, docs/canonical/knowledge-system.md, docs/canonical/phase-plan.md,
+// docs/canonical/director-loop.md, docs/canonical/spend-observation.md, docs/canonical/reviewer-value.md,
+// docs/historical/ci-rules-retired.md) were each written from a caller's own need
 // against that file's actual content, never from a section's own title, and
 // each was measured landing at rank 1-3 on a fresh scratch index before
 // being checked in -- the same "chosen before any query ran, verified

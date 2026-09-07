@@ -25,7 +25,7 @@ func TestKnowledgeGrounding_MentionsSourceScoping(t *testing.T) {
 	if !strings.Contains(got, "agent-estate#1081") {
 		t.Errorf("knowledge grounding does not cite agent-estate#1081:\n%s", got)
 	}
-	if !strings.Contains(got, "docs/knowledge-system.md") {
+	if !strings.Contains(got, "docs/canonical/knowledge-system.md") {
 		t.Errorf("knowledge grounding does not point at the knowledge doc for the full scoping rules:\n%s", got)
 	}
 }

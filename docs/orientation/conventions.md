@@ -25,7 +25,7 @@
   motivated this (PR #1219/agent-estate#1220), the forgery this closes
   (`gate_test.go`'s `TestBypass_ForgedVerdictCommentImpersonatesReviewer`,
   agent-estate#934), and the cost/benefit case for review generally, see
-  [`docs/reviewer-value.md`](../reviewer-value.md).
+  [`docs/canonical/reviewer-value.md`](../canonical/reviewer-value.md).
 - This is checked at merge, not just at dispatch — but read the command's name
   as a question, not an action. **`estate merge <repo> <pr> <reviewer-lane>`
   evaluates and exits; it does not merge anything.** It decides whether the PR
@@ -62,7 +62,7 @@
 - A UI PR needs a captured frame, not a description, as evidence. **This is a
   convention now, not a gate** — `.github/workflows/ui-evidence.yml` was
   retired on 2026-09-02 (see
-  [`docs/ci-rules-retired.md`](../ci-rules-retired.md)) and nothing fails a
+  [`docs/historical/ci-rules-retired.md`](../historical/ci-rules-retired.md)) and nothing fails a
   PR that omits the frame. The capture helper is `src/tui/cmd/vhscapture`,
   run from `src/tui`; `src/tui/testdata/vhs/README.md` explains its colour
   floor and what is and is not measured. Local only — it is not wired into

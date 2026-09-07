@@ -162,7 +162,7 @@ func TestUnreadableOutputIsAnErrorNotAnEmptyResult(t *testing.T) {
 
 // realClaudeEnvelope is claude -p --output-format json's real stdout,
 // captured live 2026-09-03 against a real turn ("reply pong") -- see
-// docs/spend-observation.md for the full payload and how it was taken.
+// docs/canonical/spend-observation.md for the full payload and how it was taken.
 // Trimmed to the fields claudeSpend actually reads plus enough surrounding
 // shape to prove trailing fields don't break parsing.
 const realClaudeEnvelope = `{"is_error":false,"duration_api_ms":2220,"num_turns":1,
@@ -214,7 +214,7 @@ func TestClaudeSpendWithNoModelUsageLeavesByModelNil(t *testing.T) {
 }
 
 // realClaudeEnvelopeWithModelUsage is the two-model payload from
-// docs/spend-observation.md: Claude Code dispatched a haiku sub-agent
+// docs/canonical/spend-observation.md: Claude Code dispatched a haiku sub-agent
 // inside a sonnet turn, and modelUsage carries each model's own share.
 const realClaudeEnvelopeWithModelUsage = `{"is_error":false,"total_cost_usd":0.1883826,
 "usage":{"input_tokens":2,"cache_creation_input_tokens":30393,
@@ -241,7 +241,7 @@ func TestClaudeSpendParsesModelUsageIntoByModel(t *testing.T) {
 	if !ok || sonnet.CostUSD == nil || *sonnet.CostUSD != 0.1877916 {
 		t.Errorf("sonnet entry = %+v, want costUSD 0.1877916", sonnet)
 	}
-	// The reconciliation check docs/spend-observation.md's #981 section
+	// The reconciliation check docs/canonical/spend-observation.md's #981 section
 	// states: the two model costs sum exactly to the turn's total_cost_usd.
 	sum := *haiku.CostUSD + *sonnet.CostUSD
 	if s.CostUSD == nil || sum != *s.CostUSD {
@@ -250,7 +250,7 @@ func TestClaudeSpendParsesModelUsageIntoByModel(t *testing.T) {
 }
 
 // realCodexTurnCompleted is codex exec --json's real "turn.completed" line,
-// captured live 2026-09-03 -- see docs/spend-observation.md.
+// captured live 2026-09-03 -- see docs/canonical/spend-observation.md.
 const realCodexJSONL = `{"type":"thread.started","thread_id":"01a06826-ac92-7b62-8418-247dee57b779"}
 {"type":"turn.started"}
 {"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"pong"}}
@@ -283,7 +283,7 @@ func TestCodexSpendWithNoTurnCompletedEventIsAnError(t *testing.T) {
 
 // TestClaudeSessionIDReadsTheRealEnvelope proves the handle agent-estate#990
 // exists to record can actually be read out of a real captured claude -p
-// envelope -- the same session_id docs/spend-observation.md pasted next to
+// envelope -- the same session_id docs/canonical/spend-observation.md pasted next to
 // its own total_cost_usd.
 func TestClaudeSessionIDReadsTheRealEnvelope(t *testing.T) {
 	got, err := claudeSessionID([]byte(realClaudeEnvelope))

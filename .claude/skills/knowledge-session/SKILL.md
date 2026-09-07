@@ -25,7 +25,7 @@ commands for each step.
 
 - The mechanism `estate knowledge` uses to rank and disclose results
   (BM25 weighting, `coverage`/`contradictions`/`disclosure` states) — see
-  `docs/knowledge-system.md`, linked from the workflow guide.
+  `docs/canonical/knowledge-system.md`, linked from the workflow guide.
 - Exactly where a candidate/fact lives at each lifecycle stage — see the
   vault's own `agent/LIFECYCLE.md` ($AGENT_MEMORY_VAULT), linked from the
   workflow guide's step 5.
