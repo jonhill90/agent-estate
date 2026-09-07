@@ -226,6 +226,40 @@ func TestMOCProposalsAndRefreshSeeNestedNoteSubdirs(t *testing.T) {
 	}
 }
 
+// TestMOCProposalsSkipsUngovernedTagsRatherThanAborting is the regression
+// for a second real defect found in the same C4 run: every real vault note
+// carries structural/time tags (note, MM-YYYY, standing-rule) that are
+// NOT in 99 - Meta/tags.md's governed vocabulary (they are generated
+// bookkeeping, never MOC-eligible) -- and those groups clear the >=8
+// threshold on nearly any vault with more than a handful of notes.
+// MOCProposals treated validateINMAPS's rejection of an ungoverned tag as
+// a hard error and returned it immediately, aborting the ENTIRE proposal
+// batch before a single governed, genuinely MOC-worthy tag was ever
+// reached. Measured directly against the live vault: `moc-propose` failed
+// with "tag outside vocabulary: 07-2026" and produced zero proposals for
+// tags like azure/deploy/estate that were all well past 8.
+func TestMOCProposalsSkipsUngovernedTagsRatherThanAborting(t *testing.T) {
+	v := t.TempDir()
+	os.MkdirAll(filepath.Join(v, "01 - Notes"), 0700)
+	os.MkdirAll(filepath.Join(v, "99 - Meta"), 0700)
+	os.WriteFile(filepath.Join(v, "99 - Meta/tags.md"), []byte("`azure`"), 0600)
+	for n := 1; n <= 9; n++ {
+		name := fmt.Sprintf("20260907%04d.md", n)
+		// "ungoverned" is NOT in tags.md's vocabulary; "azure" is. Both
+		// clear the threshold. If the ungoverned one aborts the batch,
+		// "azure" -- sorted after "ungoverned" alphabetically -- would
+		// never be reached at all.
+		os.WriteFile(filepath.Join(v, "01 - Notes", name), []byte("---\nstatus: stable\ntitle: Example\ntags: [\"ungoverned\",\"azure\"]\n---\n"), 0600)
+	}
+	got, e := MOCProposals(v, true)
+	if e != nil {
+		t.Fatalf("an ungoverned tag past the threshold aborted the whole batch: %v", e)
+	}
+	if len(got) != 1 || !strings.Contains(got[0], "moc-azure") {
+		t.Fatalf("expected exactly one proposal for the governed tag 'azure', got %v", got)
+	}
+}
+
 func TestSourceDriftInvalidatesWithoutRewritingMeaning(t *testing.T) {
 	v := t.TempDir()
 	os.MkdirAll(filepath.Join(v, "99 - Meta"), 0700)

@@ -113,7 +113,26 @@ func MOCProposals(vault string, apply bool) ([]string, error) {
 		}
 		p := Proposal{Type: "MOC", Title: tag, Description: "Connections for " + tag, Learning: "Review this cluster before accepting its hub.", Tags: []string{tag}}
 		if e := validateINMAPS(vault, p); e != nil {
-			return nil, e
+			// A structural/time tag (note, MM-YYYY, standing-rule) groups
+			// past the threshold on nearly every real vault -- they are
+			// not in 99 - Meta/tags.md's governed vocabulary because
+			// they are never meant to head a MOC, only an associative or
+			// axis-based tag is. Before this fix, the first such tag
+			// reached (guaranteed, since these are near-universal) made
+			// validateINMAPS's tag-vocabulary check fail and this whole
+			// function returned that as a hard error, aborting proposals
+			// for every OTHER, genuinely governed tag that also cleared
+			// the threshold -- found running Push 4.5 C4 against the
+			// live vault: `moc-propose` failed outright with "tag
+			// outside vocabulary: 07-2026" and produced zero proposals
+			// for azure/deploy/estate/etc., which were all well past 8.
+			// Skipping an ungoverned tag is the correct reading of "not
+			// MOC-eligible," not an error to abort the batch over --
+			// every other validateINMAPS failure this call can actually
+			// produce (bad type, missing title/description/learning) is
+			// impossible here since MOCProposals constructs every field
+			// of p itself except Tags.
+			continue
 		}
 		path := filepath.Join(vault, "00 - Inbox", "moc-"+strings.ReplaceAll(tag, "/", "-")+".md")
 		at := time.Now().UTC().Format(time.RFC3339)
