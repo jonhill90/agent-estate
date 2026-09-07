@@ -600,14 +600,19 @@ func TestEndToEndDryRunApplyRerunIsIdempotent(t *testing.T) {
 }
 
 // TestRefuseLivePath is the in-process backstop: -apply must refuse against
-// the well-known live corpus locations regardless of the hook.
+// the well-known live corpus locations regardless of the hook. This checks
+// against the REAL, unmocked $HOME with no ESTATE_CORPUS override, so it can
+// only ever assert on corpus.Path()'s own current default string -- unlike
+// TestRefuseLivePathTildeVsHome below, it has no real file on disk to
+// resolve identity against on a CI runner (no ~/corpus at all there), so a
+// second case for the ledger.sqlite3 compat symlink (agent-estate#P6)
+// belongs in that isolated-fixture test instead, not here.
 func TestRefuseLivePath(t *testing.T) {
 	cases := []struct {
 		path string
 		live bool
 	}{
 		{filepath.Join(os.Getenv("HOME"), "corpus", "corpus.sqlite3"), true},
-		{filepath.Join(os.Getenv("HOME"), "corpus", "ledger.sqlite3"), true}, // compat symlink, agent-estate#P6
 		{"/Users/jon/.local/state/agent-dotfiles-supervisor/ledger.sqlite3", true},
 		{"/tmp/corpus-copy.sqlite3", false},
 	}
