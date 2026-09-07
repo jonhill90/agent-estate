@@ -429,6 +429,10 @@ func MarkSourceDrift(vault, sourceID string) (int, error) {
 
 // WriteRosterPointer maintains the single INMAPS agents routing note. The roster
 // itself remains in its source repository; no definitions are copied into memory.
+// The note lives at "02 - MOCs/Agents.md", not "03 - Agents/index.md" -- P10
+// (run/iteration-queue.md) retired every per-area index.md into a title-named
+// hub in 02 - MOCs, leaving exactly one index.md in the vault (agent/index.md,
+// the sole legal okf_version carrier).
 func WriteRosterPointer(vault, roster string) error {
 	st, e := os.Stat(roster)
 	if e != nil {
@@ -452,5 +456,5 @@ func WriteRosterPointer(vault, roster string) error {
 	if e = validateINMAPS(vault, p); e != nil {
 		return e
 	}
-	return writeSet(vault, map[string][]byte{filepath.Join(vault, "03 - Agents/index.md"): []byte(text)})
+	return writeSet(vault, map[string][]byte{filepath.Join(vault, "02 - MOCs/Agents.md"): []byte(text)})
 }
