@@ -212,6 +212,15 @@ func TestMOCProposalsAndRefreshSeeNestedNoteSubdirs(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("8 nested notes past the threshold produced %d proposals, want 1: %v", len(got), got)
 	}
+	// The generated link must name the note's REAL nested path, not just
+	// its bare filename -- a link built from filepath.Base(p) alone
+	// (agent-estate#942's own subdir layout notwithstanding) points
+	// Obsidian at a file that does not exist, since every real note here
+	// lives one directory deeper than "01 - Notes" itself.
+	draft, _ := os.ReadFile(got[0])
+	if !strings.Contains(string(draft), "01f%20-%20Facts/20260907") {
+		t.Fatalf("generated link does not name the note's nested subdir: %s", draft)
+	}
 	if e = ReviewMOC(v, filepath.Base(got[0]), "process:test", true, true); e != nil {
 		t.Fatal(e)
 	}
@@ -221,8 +230,8 @@ func TestMOCProposalsAndRefreshSeeNestedNoteSubdirs(t *testing.T) {
 	}
 	hub := filepath.Join(v, "02 - MOCs/kind-decision.md")
 	raw, _ := os.ReadFile(hub)
-	if !strings.Contains(string(raw), "202609070009.md") {
-		t.Fatalf("refresh did not pick up a new nested note: %s", raw)
+	if !strings.Contains(string(raw), "01f%20-%20Facts/202609070009.md") {
+		t.Fatalf("refresh did not link the new nested note by its real path: %s", raw)
 	}
 }
 

@@ -136,7 +136,7 @@ func MOCProposals(vault string, apply bool) ([]string, error) {
 		}
 		path := filepath.Join(vault, "00 - Inbox", "moc-"+strings.ReplaceAll(tag, "/", "-")+".md")
 		at := time.Now().UTC().Format(time.RFC3339)
-		body := fmt.Sprintf("---\ntype: MOC\nid: %s\ntitle: %s\ndescription: %s\ntags: [%s]\ncreated: %s\nupdated: %s\nstatus: draft\nsource: %s\n---\n\n# %s\n\n## Overview\n\nReview these connections before accepting.\n\n%s\n", scalar(strings.TrimSuffix(filepath.Base(path), ".md")), scalar(tag), scalar(p.Description), scalar(tag), at, at, scalar("Derived from cited stable notes"), tag, mocLinks(paths))
+		body := fmt.Sprintf("---\ntype: MOC\nid: %s\ntitle: %s\ndescription: %s\ntags: [%s]\ncreated: %s\nupdated: %s\nstatus: draft\nsource: %s\n---\n\n# %s\n\n## Overview\n\nReview these connections before accepting.\n\n%s\n", scalar(strings.TrimSuffix(filepath.Base(path), ".md")), scalar(tag), scalar(p.Description), scalar(tag), at, at, scalar("Derived from cited stable notes"), tag, mocLinks(paths, vault))
 		if _, e := os.Stat(path); os.IsNotExist(e) {
 			changes[path] = []byte(body)
 		}
@@ -154,12 +154,30 @@ func MOCProposals(vault string, apply bool) ([]string, error) {
 	}
 	return proposed, nil
 }
-func mocLinks(paths []string) string {
+// mocLinks builds the generated-links section, one wikilink per note, from
+// the SAME MOC-relative root every hub actually sits under: "00 - Inbox"
+// and "02 - MOCs" are both direct children of vault, exactly one level up
+// from "01 - Notes" -- so "../01 - Notes/" is correct for either location,
+// but only if what follows it is the note's REAL path under "01 - Notes",
+// not just its filename. Before this fix it was filepath.Base(p) alone,
+// which produced "../01%20-%20Notes/<id>.md" for every note regardless of
+// which earned letter subdir (agent-estate#942: "01p - Parameters", "01f
+// - Facts") it actually lives in -- a link Obsidian cannot resolve, since
+// every real note in this vault lives one directory deeper than that.
+// Found generating the first real MOC drafts against the live, nested
+// vault for Push 4.5 C4: `moc-estate.md`'s own links all 404'd.
+func mocLinks(paths []string, vault string) string {
 	sort.Strings(paths)
 	lines := []string{mocStart}
+	notesRoot := filepath.Join(vault, "01 - Notes")
 	for _, p := range paths {
 		b, _ := os.ReadFile(p)
-		lines = append(lines, "- ["+field(string(b), "title")+"](../01%20-%20Notes/"+filepath.Base(p)+")")
+		rel, err := filepath.Rel(notesRoot, p)
+		if err != nil {
+			rel = filepath.Base(p)
+		}
+		href := strings.ReplaceAll(filepath.ToSlash(rel), " ", "%20")
+		lines = append(lines, "- ["+field(string(b), "title")+"](../01%20-%20Notes/"+href+")")
 	}
 	return strings.Join(append(lines, mocEnd), "\n")
 }
@@ -258,7 +276,7 @@ func RefreshMOCs(vault string, apply bool) (int, error) {
 		if start < 0 || end < start {
 			return 0, fmt.Errorf("hub lacks generated section: %s", hub)
 		}
-		next := raw[:start] + mocLinks(paths) + raw[end+len(mocEnd):]
+		next := raw[:start] + mocLinks(paths, vault) + raw[end+len(mocEnd):]
 		if next != raw {
 			next = replaceField(next, "updated", time.Now().UTC().Format(time.RFC3339))
 			changes[hub] = []byte(next)
