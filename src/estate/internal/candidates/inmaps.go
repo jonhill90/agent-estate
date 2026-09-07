@@ -16,27 +16,6 @@ func inmaps(vault string) bool {
 	return e == nil && st.IsDir()
 }
 
-// splitFactsSection locates Start Here.md's "## Facts" heading and
-// returns (everything up to and including the heading line, the bullet
-// body between it and the next "## " heading, everything from that next
-// heading onward). Reassembling as head+edited-body+"\n"+tail reproduces
-// the original file byte-for-byte when the body is unchanged -- required
-// since publishINMAPS only owns the Facts section, never the rest of
-// Start Here.md's prose, tables, or other bullet lists (A2-COMPLETION,
-// run/iteration-queue.md).
-func splitFactsSection(text string) (head, body, tail string, err error) {
-	m := regexp.MustCompile(`(?m)^## Facts\n`).FindStringIndex(text)
-	if m == nil {
-		return "", "", "", fmt.Errorf("Start Here.md has no ## Facts section")
-	}
-	head = text[:m[1]]
-	rest := text[m[1]:]
-	next := regexp.MustCompile(`(?m)^## `).FindStringIndex(rest)
-	if next == nil {
-		return head, rest, "", nil
-	}
-	return head, rest[:next[0]], rest[next[0]:], nil
-}
 func scalar(s string) string { b, _ := json.Marshal(s); return string(b) }
 func field(raw, key string) string {
 	for _, l := range strings.Split(raw, "\n") {
@@ -360,32 +339,30 @@ func publishINMAPS(db, vault, id, action string, r MemoryReview, apply bool) (Me
 		draftText = replaceField(draftText, "published_note", scalar(nextPath))
 	}
 	changes[draft] = []byte(draftText)
-	// indexPath moved from agent/index.md to Start Here.md's own
-	// `## Facts` section under A2-COMPLETION (run/iteration-queue.md,
-	// run/inmaps-spec.md §7b's last item -- agent/ retired entirely).
-	// Start Here.md carries prose, tables, and other bullet lists
-	// ("Canonical repository routes") beyond the Facts section, so this
-	// edits only the lines between the "## Facts" heading and the next
-	// "## " heading, splicing the result back into the full file
-	// byte-identical everywhere else. Link paths no longer need a "../"
-	// prefix -- Start Here.md sits at the vault root, where agent/index.md
-	// needed one to reach 01 - Notes/ from one level down.
-	indexPath := filepath.Join(vault, "Start Here.md")
-	startHere, e := os.ReadFile(indexPath)
-	if e != nil {
-		return r, e
-	}
-	factsHead, factsBody, factsTail, e := splitFactsSection(string(startHere))
+	// indexPath moved from agent/index.md to a new vault-root index.md
+	// under A2-COMPLETION (run/iteration-queue.md, run/inmaps-spec.md
+	// §7b's last item -- agent/ retired entirely). A first fix pass
+	// briefly moved this onto Start Here.md; a Director review corrected
+	// that against OKF §12/§8's own spec text, which names the
+	// bundle-root index.md FILENAME specifically as the only legal
+	// okf_version carrier -- index.md is restored at the vault root,
+	// Start Here.md reverted to its own separate human-entry-point job
+	// and carries no bullet list of its own. index.md's whole body below
+	// its frontmatter+heading is the bullet list (no other content
+	// competes for the space, unlike Start Here.md's prose/tables), so
+	// this is a plain whole-file line scan again, matching the pre-A2
+	// agent/index.md-era shape -- just at a different path. Link paths
+	// still need no "../" prefix: index.md sits at the vault root, where
+	// agent/index.md needed one to reach 01 - Notes/ from one level down.
+	indexPath := filepath.Join(vault, "index.md")
+	index, e := os.ReadFile(indexPath)
 	if e != nil {
 		return r, e
 	}
 	var lines []string
 	var oldAliases []string
 	json.Unmarshal([]byte(field(oldRaw, "aliases")), &oldAliases)
-	for _, l := range strings.Split(strings.TrimRight(factsBody, "\n"), "\n") {
-		if l == "" {
-			continue
-		}
+	for _, l := range strings.Split(strings.TrimRight(string(index), "\n"), "\n") {
 		aliasLink := false
 		for _, a := range oldAliases {
 			if strings.Contains(l, "[["+a+"]]") {
@@ -406,17 +383,17 @@ func publishINMAPS(db, vault, id, action string, r MemoryReview, apply bool) (Me
 	if action == "accept" {
 		lines = append(lines, "- ["+r.Proposal.Title+"]("+strings.ReplaceAll(nextPath, " ", "%20")+") — "+r.Proposal.Description)
 	}
-	factsText := strings.Join(lines, "\n") + "\n"
+	text := strings.Join(lines, "\n") + "\n"
 	count := 0
 	for _, l := range lines {
 		if strings.HasPrefix(l, "- ") {
 			count++
 		}
 	}
-	if count > 160 || len(lines) > 200 || len(factsText) > 25*1024 {
+	if count > 160 || len(lines) > 200 || len(text) > 25*1024 {
 		return r, fmt.Errorf("index cap exceeded")
 	}
-	changes[indexPath] = []byte(factsHead + factsText + "\n" + factsTail)
+	changes[indexPath] = []byte(text)
 	if !apply {
 		r.WouldState = state
 		return r, nil
@@ -475,9 +452,10 @@ func MarkSourceDrift(vault, sourceID string) (int, error) {
 // itself remains in its source repository; no definitions are copied into memory.
 // The note lives at "02 - MOCs/Agents.md", not "03 - Agents/index.md" -- P10
 // (run/iteration-queue.md) retired every per-area index.md into a title-named
-// hub in 02 - MOCs. Start Here.md is the vault's sole index now
-// (A2-COMPLETION, run/iteration-queue.md, retired agent/index.md
-// entirely) -- the sole legal okf_version carrier.
+// hub in 02 - MOCs. The vault-root index.md is the sole legal okf_version
+// carrier now (A2-COMPLETION, run/iteration-queue.md, retired
+// agent/index.md entirely; OKF §12/§8 name that bundle-root filename
+// specifically).
 func WriteRosterPointer(vault, roster string) error {
 	st, e := os.Stat(roster)
 	if e != nil {

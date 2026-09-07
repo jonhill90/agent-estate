@@ -8,10 +8,14 @@ spec.loader.exec_module(v)
 FACT_FRONTMATTER = '---\ntype: user\ncreated: 2026-07-12\nsource: fixture\ntitle: Test\ndescription: fixture fact\n---\n# Test\n'
 
 
-class ValidateStartHere(unittest.TestCase):
-    """A2-COMPLETION (run/iteration-queue.md): the validator's subject
-    moved from agent/index.md to Start Here.md's own `## Facts` section --
-    these tests exercise that, not the retired agent/ shape."""
+class ValidateIndex(unittest.TestCase):
+    """A2-COMPLETION (run/iteration-queue.md), fix pass (Director, OKF
+    §12/§8 adjudication): the validator's subject is the vault-root
+    index.md -- a first pass briefly moved it onto Start Here.md's own
+    `## Facts` section, corrected because OKF names the bundle-root
+    index.md FILENAME specifically as the sole legal okf_version carrier.
+    Start Here.md is a separate human-entry-point page with no bullet
+    list of its own, outside this validator's scope entirely."""
 
     def run_against(self, root, facts_body, note_subdirs_rows=""):
         (root / "01 - Notes").mkdir(parents=True, exist_ok=True)
@@ -20,9 +24,9 @@ class ValidateStartHere(unittest.TestCase):
             (root / "99 - Meta" / "note-subdirs.md").write_text(
                 "| Prefix | Subdirectory | Purpose | Earned |\n|---|---|---|---|\n" + note_subdirs_rows
             )
-        (root / "Start Here.md").write_text(
-            "---\nokf_version: \"0.1\"\ntitle: Start Here\n---\n\n"
-            "# Start Here\n\nintro text\n\n## Facts\n\n" + facts_body + "\n## The areas\n\nnot a fact bullet\n"
+        (root / "index.md").write_text(
+            "---\nokf_version: \"0.1\"\n---\n\n"
+            "# Facts\n\nintro text\n\n" + facts_body
         )
         v.vault_dir = lambda: str(root)
         with contextlib.redirect_stdout(io.StringIO()) as out:
@@ -51,7 +55,7 @@ class ValidateStartHere(unittest.TestCase):
     def test_one_level_down_link_also_valid(self):
         # ../01 - Notes/... still resolves -- the same regex validates
         # links written from a 02 - MOCs/*.md hub or another fact file,
-        # not just from Start Here.md's own root-relative form.
+        # not just from index.md's own root-relative form.
         with tempfile.TemporaryDirectory() as d:
             root = pathlib.Path(d)
             self.write_fact(root, "202607120001.md")
@@ -116,7 +120,7 @@ class ValidateStartHere(unittest.TestCase):
 
     def test_hub_reference_prevents_orphan(self):
         # A note reachable only through a 02 - MOCs/*.md hub, not through
-        # Start Here.md's own Facts section, is not orphaned (P10).
+        # index.md directly, is not orphaned (P10).
         with tempfile.TemporaryDirectory() as d:
             root = pathlib.Path(d)
             self.write_fact(root, "01p - Parameters/202607120001.md")

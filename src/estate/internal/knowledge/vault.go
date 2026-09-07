@@ -66,8 +66,8 @@ const (
 // cannot be listed at all (unset, missing, unreadable in some OTHER way)
 // is one failed source, not a silently empty Items slice; a single fact
 // file that fails to parse is skipped and does not fail the whole
-// source, since Start Here.md's own `## Facts` section already tolerates
-// unparsed bullet lines (src/tui's ParseIndex).
+// source, since the vault-root index.md already tolerates unparsed
+// bullet lines (src/tui's ParseIndex).
 func vaultSource(vaultDir string) (SourceResult, []Item) {
 	res := SourceResult{Name: VaultSourceName}
 	if vaultDir == "" {

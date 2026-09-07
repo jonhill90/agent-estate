@@ -179,7 +179,7 @@ for this as of `b00db9b`.
 
 **False as of `56513a2`, corrected 2026-08-23 (pass 2).** `internal/knowledge`
 exists and is wired as `PaneKnowledge` (agent-tui#87, commit `922400b`) —
-reads `$AGENT_MEMORY_VAULT`'s `agent/index.md` + `agent/facts/<slug>.md`,
+reads `$AGENT_MEMORY_VAULT`'s `index.md` + `01 - Notes/<12-digit-id>.md`,
 progressive disclosure. Read-first, no write path, matching the "layered
 over" framing above. Status is now shipped, not not-started.
 

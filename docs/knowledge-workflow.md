@@ -159,15 +159,18 @@ $ go run ./src/estate candidates memory -db <scratch-db> -vault <scratch-vault> 
 {"proposal":{...},"state":"promoted","revision":"e65f6ead...","published_revision":"e65f6ead...","vault":"<scratch-vault>","citation":"...","changed":true,"file_hash":"8a9e7d0..."}
 ```
 
-writes `agent/facts/<slug>.md` in the vault, carrying `candidate_id`,
-`memory_status: promoted`, `memory_revision`, `supersedes`, and `reviewer`
-in its frontmatter, and adds one bullet to `agent/index.md` if the fact
-earns index space (see the vault's own `agent/INDEX-CONTRACT.md` for the
+writes `01 - Notes/<12-digit-id>.md` in the vault (A2-COMPLETION,
+`run/iteration-queue.md`, `run/inmaps-spec.md` §7b — `agent/facts/` no
+longer exists), carrying `candidate_id`, `memory_status: promoted`,
+`memory_revision`, `supersedes`, and `reviewer` in its frontmatter, and
+adds one bullet to the vault-root `index.md` if the fact earns index
+space (see the vault's own `99 - Meta/index-contract.md` for the
 160-entry cap and when a bullet is pruned instead). **This is the only
 "publish" step** — nothing else copies a fact body anywhere else. Other
-surfaces (a root vault page, a repo doc) *link* to `facts/<slug>.md`; they
-never restate its body. `-action accept` refuses if the source evidence
-(prompt/provenance/content hash) has changed since the proposal was
+surfaces (a root vault page, a repo doc) *link* to the note's own ID
+path; they never restate its body. `-action accept` refuses if the source
+evidence (prompt/provenance/content hash) has changed since the proposal
+was
 recorded — review a new proposal in that case, per the tool's own error.
 
 ## 6. Retrieve

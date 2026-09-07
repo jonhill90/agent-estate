@@ -18,7 +18,7 @@ func TestINMAPSLifecycle(t *testing.T) {
 	os.MkdirAll(filepath.Join(vault, "01 - Notes"), 0700)
 	os.MkdirAll(filepath.Join(vault, "99 - Meta"), 0700)
 	os.WriteFile(filepath.Join(vault, "99 - Meta/tags.md"), []byte("`kind/decision`"), 0600)
-	os.WriteFile(filepath.Join(vault, "Start Here.md"), []byte("---\nokf_version: \"0.1\"\n---\n\n# Start Here\n\n## Facts\n\nintro\n\n## The areas\n\nnot a fact\n"), 0600)
+	os.WriteFile(filepath.Join(vault, "index.md"), []byte("---\nokf_version: \"0.1\"\n---\n\n# Facts\n\nintro\n"), 0600)
 	p := catalogueProposal("fixture-recovery", "memory", "01 - Notes")
 	p.Tags = []string{"kind/decision"}
 	p.Type = "Fact"
@@ -76,20 +76,22 @@ func TestINMAPSLifecycle(t *testing.T) {
 	if _, e := os.Stat(filepath.Join(vault, "agent/log.md")); !os.IsNotExist(e) {
 		t.Fatal("agent/log.md was written -- the dead pre-dissolution path must never be resurrected")
 	}
-	// A2-COMPLETION (run/iteration-queue.md): the capped index moved from
-	// agent/index.md to Start Here.md's own `## Facts` section. An accept
-	// must add a bullet there and leave the rest of the file -- prose,
-	// other headings -- untouched; it owns one section, not the whole
-	// file.
-	startHere, e := os.ReadFile(filepath.Join(vault, "Start Here.md"))
+	// A2-COMPLETION (run/iteration-queue.md), fix pass (Director, OKF
+	// §12/§8 adjudication): the capped index lives at the vault-root
+	// index.md, not agent/index.md and not Start Here.md (a first pass
+	// briefly tried the latter; OKF names the bundle-root index.md
+	// FILENAME specifically as the sole legal okf_version carrier). An
+	// accept must add a bullet there and leave the file's own intro prose
+	// untouched.
+	index, e := os.ReadFile(filepath.Join(vault, "index.md"))
 	if e != nil {
-		t.Fatalf("Start Here.md not written by an INMAPS accept: %v", e)
+		t.Fatalf("index.md not written by an INMAPS accept: %v", e)
 	}
-	if !strings.Contains(string(startHere), "## The areas") {
-		t.Fatal("Start Here.md's own content outside ## Facts was lost")
+	if !strings.Contains(string(index), "intro") {
+		t.Fatal("index.md's own intro prose was lost")
 	}
-	if !strings.Contains(string(startHere), r.Proposal.Title) {
-		t.Fatal("accepted fact never landed in Start Here.md's ## Facts section")
+	if !strings.Contains(string(index), r.Proposal.Title) {
+		t.Fatal("accepted fact never landed in index.md")
 	}
 	again, err := Publish(db, vault, id, "accept", true)
 	if err != nil || again.Changed {
@@ -211,7 +213,7 @@ func TestSourceDriftInvalidatesWithoutRewritingMeaning(t *testing.T) {
 // (run/iteration-queue.md): the agents routing note lands at
 // "02 - MOCs/Agents.md", not the retired "03 - Agents/index.md" -- the
 // per-area index.md files were all replaced by title-named hubs there.
-// Start Here.md is the vault's sole index now (A2-COMPLETION,
+// The vault-root index.md is the sole index now (A2-COMPLETION,
 // run/iteration-queue.md, retired agent/index.md entirely). Previously
 // uncovered by any test.
 func TestWriteRosterPointerTargetsMOCsHub(t *testing.T) {
