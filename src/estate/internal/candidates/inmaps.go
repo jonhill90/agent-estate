@@ -289,6 +289,11 @@ func publishINMAPS(db, vault, id, action string, r MemoryReview, apply bool) (Me
 			for n := 1; n <= 9999; n++ {
 				p := filepath.Join("01 - Notes", fmt.Sprintf("%s%04d.md", day, n))
 				if _, e := os.Lstat(filepath.Join(vault, p)); os.IsNotExist(e) {
+					// Parameter projections share the global Obsidian ID namespace.
+					nested := filepath.Join(vault, "01 - Notes", "01p - Parameters", filepath.Base(p))
+					if _, err := os.Lstat(nested); !os.IsNotExist(err) {
+						continue
+					}
 					nextPath = p
 					break
 				}

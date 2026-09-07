@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 const fixtureVaultFact = `---
@@ -148,4 +149,42 @@ func TestVaultSourceTier3DeepensPastTier2(t *testing.T) {
 	if !strings.Contains(it.Tier3, "xenoglyph") {
 		t.Errorf("Tier3 = %q, want it to still carry the body's own distinctive word", it.Tier3)
 	}
+}
+
+func TestVaultSourceNestedNotesWithoutLegacyDirectory(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "01 - Notes", "01p - Parameters", "202609070001.md")
+	if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(fixtureVaultFact), 0600); err != nil {
+		t.Fatal(err)
+	}
+	res, items := vaultSource(dir)
+	if !res.OK || len(items) != 1 || items[0].Permalink != p {
+		t.Fatalf("nested note not retrieved: %+v %+v", res, items)
+	}
+}
+
+func TestNestedNoteQueryExcludesRetiredAndDraft(t *testing.T) {
+	v := t.TempDir()
+	dir := filepath.Join(v, "01 - Notes", "01p - Parameters")
+	os.MkdirAll(dir, 0700)
+	for i, status := range []string{"stable", "draft", "deprecated"} {
+		text := strings.Replace(fixtureVaultFact, "type: project", "type: Parameter\nstatus: "+status, 1)
+		if err := os.WriteFile(filepath.Join(dir, []string{"202609070001.md", "202609070002.md", "202609070003.md"}[i]), []byte(text), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	source, items := vaultSource(v)
+	addSourceTag(items)
+	path := filepath.Join(t.TempDir(), "index.json")
+	if err := Write(path, Result{GeneratedAt: time.Now(), Sources: []SourceResult{source}, Items: items}); err != nil {
+		t.Fatal(err)
+	}
+	q := Query(path, "xenoglyph", 10, true)
+	if len(q.Matches) != 1 {
+		t.Fatalf("want current stable only: %+v", q)
+	}
+	t.Logf("retrieved one current nested note; draft/deprecated excluded; canonical citation %s", items[0].Permalink)
 }

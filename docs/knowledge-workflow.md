@@ -211,12 +211,10 @@ go run ./src/estate knowledge
 go run ./src/estate knowledge query "<question>"
 ```
 
-**Refreshing `agent/parameters/*.md` is a separate, currently-broken
-path.** Each file under the vault's `agent/parameters/` carries a banner
-saying "regenerate with `estate vault-view`" — that command does not exist
-anywhere in this repo (verified 2026-09-06: absent from `go run
-./src/estate`'s own subcommand list and from a repo-wide grep) or in
-`agent-dotfiles`. There is no current command that regenerates those
-files; do not invent one and do not hand-edit them in the meantime — see
-the vault's own `agent/ROUTING.md` for the same note kept next to the
-table row it corrects.
+**Corpus item projections:** `estate vault-view` writes individual notes under
+`01 - Notes/01p - Parameters/`, selected from all five hard-weight item kinds.
+The corpus remains authoritative. `corpus_item` preserves identity across updates;
+questions and thoughts remain draft, and withdrawn items become deprecated.
+Repeated unchanged input writes zero files. The optional positive integer argument
+limits a migration to a deterministic prefix; use only with verified batch backups.
+The command does not retire legacy views or modify the shared knowledge index.
