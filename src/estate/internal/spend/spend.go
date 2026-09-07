@@ -5,7 +5,7 @@
 // WHY THIS IS SPLIT FROM main.go's PRINTING. Aggregate is the part that must
 // never lie: it groups strictly by harness and never sums a dollar figure
 // across harnesses, because claude reports one and codex never does (see
-// docs/spend-observation.md). Keeping that rule in one function, tested on
+// docs/canonical/spend-observation.md). Keeping that rule in one function, tested on
 // its own, means the CLI formatter in main.go cannot accidentally reintroduce
 // the mixed total this package exists to refuse.
 package spend
@@ -279,7 +279,7 @@ func Aggregate(records []ledger.Record) Report {
 // observed turns") -- printing totalCostUSD alone reads as the window's
 // whole cost when a harness reporting no dollar figure (codex, as of this
 // writing) may have completed turns inside the same window that this total
-// silently excludes. See docs/spend-observation.md for which harnesses
+// silently excludes. See docs/canonical/spend-observation.md for which harnesses
 // report a dollar figure at all.
 //
 // current is expected to be Ledger.Current() (latest record per task id): a

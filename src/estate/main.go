@@ -208,14 +208,14 @@ func prHeadBranch(pr int) (string, error) {
 // numbers stale -- agent-estate#1172 grew the natural-language stratum
 // 12 -> 21 cases after they were written, and two of the four no longer
 // matched `goldenquery`'s own output at all. agent-estate#1173 had already
-// settled the identical question for docs/knowledge-system.md's own
+// settled the identical question for docs/canonical/knowledge-system.md's own
 // scoping section: it removed that doc's stratum table rather than
 // re-measuring and re-stamping it, arguing that re-stamping fixes today's
 // staleness and does nothing about tomorrow's -- nothing tells a doc (or
 // this paragraph) when the fixture it quotes has moved.
 //
 // That argument transfers here, and applies MORE strongly, not equally:
-// docs/knowledge-system.md at least carried a "Measured on <sha>" stamp, so
+// docs/canonical/knowledge-system.md at least carried a "Measured on <sha>" stamp, so
 // a reader could date it; this paragraph carried no stamping convention at
 // all, so the same staleness was both unbounded and silent, and it reaches
 // every dispatched turn rather than every reader who happens to follow a
@@ -245,7 +245,7 @@ func prHeadBranch(pr int) (string, error) {
 // The paragraph below states what that measurement supports, not the
 // stronger, unmeasured claim it replaced. A reader who wants today's number
 // runs `go run ./src/estate/cmd/goldenquery` or reads
-// `docs/knowledge-system.md`'s own scoping section; neither number is
+// `docs/canonical/knowledge-system.md`'s own scoping section; neither number is
 // restated here to go stale a second time. (Independently re-verified
 // against `goldenquery`'s current output while writing this comment:
 // `--private` scoped still beats `--private` unscoped at both top-3 and
@@ -302,7 +302,7 @@ func knowledgeGrounding() string {
 		"you already know which source holds the answer: `--private` mode has " +
 		"several competing sources, and scoping to the right one measurably " +
 		"improves the hit rate there (agent-estate#1162; run " +
-		"`go run ./src/estate/cmd/goldenquery`, or see `docs/knowledge-system.md`'s " +
+		"`go run ./src/estate/cmd/goldenquery`, or see `docs/canonical/knowledge-system.md`'s " +
 		"own scoping section, for the current number -- neither is restated here " +
 		"on purpose, agent-estate#1166: the checked-in fixture this would-be " +
 		"number is measured against grows over time, and a figure quoted in this " +
@@ -323,7 +323,7 @@ func knowledgeGrounding() string {
 		"exactly like a right answer, with nothing in the score to tell them apart " +
 		"(agent-estate#1099, agent-estate#1166) -- so only scope a `--private` " +
 		"query against a source you already know is correct (agent-estate#1081; " +
-		"see `docs/knowledge-system.md` for the full scoping rules).\n"
+		"see `docs/canonical/knowledge-system.md` for the full scoping rules).\n"
 }
 
 // repoTopLevel is the checkout this command is being run from -- the same
@@ -2238,7 +2238,7 @@ func main() {
 			// The phase item must be one the plan names. A stray write --
 			// a probe, a typo, a label invented on the spot -- was
 			// otherwise indistinguishable from a tick.
-			known, err := tick.KnownPhases("docs/phase-plan.md")
+			known, err := tick.KnownPhases("docs/canonical/phase-plan.md")
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "estate:", err)
 				os.Exit(2)
@@ -2357,7 +2357,7 @@ func main() {
 			if e.GapSeconds == nil {
 				fmt.Println("gap since previous tick: none -- this is the first tick this log has recorded")
 			} else {
-				fmt.Printf("gap since previous tick: %ds (cron cadence, not work duration -- see docs/director-loop.md)\n", *e.GapSeconds)
+				fmt.Printf("gap since previous tick: %ds (cron cadence, not work duration -- see docs/canonical/director-loop.md)\n", *e.GapSeconds)
 			}
 			// Classified by tick.ReadSpend rather than branched on the
 			// pointers directly, so this printer cannot dereference a field
@@ -2386,7 +2386,7 @@ func main() {
 				fmt.Fprintln(os.Stderr, "estate: tick escalate needs a phase item and who was told")
 				os.Exit(2)
 			}
-			known, err := tick.KnownPhases("docs/phase-plan.md")
+			known, err := tick.KnownPhases("docs/canonical/phase-plan.md")
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "estate:", err)
 				os.Exit(2)
@@ -2468,7 +2468,7 @@ func main() {
 			// routes -- a hand-edit, a merge, or a probe run without
 			// ESTATE_TICK_LOG, which has already landed one line in the
 			// production log.
-			if known, err := tick.KnownPhases("docs/phase-plan.md"); err != nil {
+			if known, err := tick.KnownPhases("docs/canonical/phase-plan.md"); err != nil {
 				fmt.Fprintln(os.Stderr, "estate:", err)
 				os.Exit(2)
 			} else if err := tick.AuditWindow(path, known); err != nil {
@@ -2495,7 +2495,7 @@ func main() {
 			}
 			// Surface the most recently recorded tick's own gap and
 			// dispatch-spend figures here -- this is a place a human already
-			// looks, every tick, per docs/director-loop.md step 1 -- rather
+			// looks, every tick, per docs/canonical/director-loop.md step 1 -- rather
 			// than a new view (agent-estate#982). Printed regardless of the
 			// verdict below, so it shows on a stalled tick too.
 			if last, ok, lerr := tick.LastEntry(path); lerr != nil {

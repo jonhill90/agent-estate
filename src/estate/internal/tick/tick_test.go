@@ -308,7 +308,7 @@ func TestRecordRefusesAPlaceholderArtifact(t *testing.T) {
 // RESOLVE. So the artifact must name something that actually exists.
 func TestArtifactMustResolveToSomethingReal(t *testing.T) {
 	exists := map[string]bool{
-		"docs/phase-plan.md": true,
+		"docs/canonical/phase-plan.md": true,
 		"AGENTS.md":          true,
 		"go.mod":             true,
 		"04793cd":            true,
@@ -333,11 +333,11 @@ func TestArtifactMustResolveToSomethingReal(t *testing.T) {
 	}
 
 	accepted := []string{
-		"docs/phase-plan.md",
+		"docs/canonical/phase-plan.md",
 		"AGENTS.md",                             // root-level file, wrongly refused before
 		"go.mod",                                // ditto
 		"merged #907 to main (04793cd)",         // sha embedded in prose is fine: it resolves
-		"fixed the thing in docs/phase-plan.md", // prose is fine when something in it resolves
+		"fixed the thing in docs/canonical/phase-plan.md", // prose is fine when something in it resolves
 		"https://github.com/jonhill90/x/pull/1", // a URL is checkable by a human
 	}
 	for _, s := range accepted {
@@ -352,8 +352,8 @@ func TestPaddedPlaceholdersAreStillAbsence(t *testing.T) {
 	// A sentence merely STARTING with one of these is not a placeholder when
 	// it names something real -- "pending PR #907 merge, see docs/x.md" was
 	// refused before it was ever looked at.
-	if err := Validate("pending PR #907 merge, see docs/phase-plan.md", time.Time{},
-		func(tok string, _ time.Time) bool { return tok == "docs/phase-plan.md" }); err != nil {
+	if err := Validate("pending PR #907 merge, see docs/canonical/phase-plan.md", time.Time{},
+		func(tok string, _ time.Time) bool { return tok == "docs/canonical/phase-plan.md" }); err != nil {
 		t.Errorf("a real artifact that starts with a padding word must be accepted: %v", err)
 	}
 	for _, s := range []string{"n/a", "TBD", "none", "nothing"} {

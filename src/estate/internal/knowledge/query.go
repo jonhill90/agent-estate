@@ -1234,7 +1234,7 @@ func Query(indexPath, question string, limit int, includePrivate bool) QueryResu
 
 	// No per-source-file cap is applied here on purpose -- agent-estate#1105
 	// measured one and rejected it. Its own case (`source:repo-docs how
-	// does dispatch work`) had docs/knowledge-system.md holding 6 of 10
+	// does dispatch work`) had docs/canonical/knowledge-system.md holding 6 of 10
 	// slots and the correct docs/product/SPEC.md dispatch section sitting
 	// at rank 4, on a build where #1113/#1117's leaf-heading fix and
 	// #1134/#1137's match floor were both already in. Sweeping a cap of

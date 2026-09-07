@@ -119,7 +119,7 @@ type Record struct {
 	// agent claimed about itself. A pointer, not a bare float64: nil means
 	// "this harness reported no dollar figure" (codex, as of this writing),
 	// which must never be confused with a genuine $0.00 turn. See
-	// docs/spend-observation.md for what each harness can and cannot report
+	// docs/canonical/spend-observation.md for what each harness can and cannot report
 	// and why this package refuses to fill a missing dollar figure by
 	// multiplying a token count against a price table of its own.
 	SpendCostUSD *float64 `json:"spend_cost_usd,omitempty"`

@@ -1,7 +1,7 @@
 // Package tick keeps the Director's own tick record and answers whether the
 // loop has stalled.
 //
-// WHY THIS IS CODE AND NOT A HABIT. The Director's brief (docs/director-brief.md
+// WHY THIS IS CODE AND NOT A HABIT. The Director's brief (docs/canonical/director-brief.md
 // section 3) defines a stop condition: three consecutive ticks sharing the same
 // phase item and the same src head with no artifact means the loop is running
 // and producing nothing, and must escalate rather than continue. Every tick is
@@ -71,7 +71,7 @@ type Entry struct {
 	// nothing more. It is cron cadence, not work duration: a tick that did
 	// nothing and a tick that did everything both show roughly the same
 	// gap, because the Director's loop runs on a fixed interval regardless
-	// of how much a tick actually did (see docs/director-loop.md). Do not
+	// of how much a tick actually did (see docs/canonical/director-loop.md). Do not
 	// read this as effort, and do not rename it to "duration" -- that name
 	// was considered and rejected for exactly this reason (agent-estate#982).
 	// Nil on the first tick this log has ever recorded, when there is no
@@ -107,7 +107,7 @@ type Entry struct {
 	// ObservedSpendUSD is observed spend ONLY: the sum of
 	// ledger.Record.SpendCostUSD for tasks counted in ObservedTurns, for
 	// harnesses that report a dollar figure at all (see
-	// docs/spend-observation.md -- claude does, codex as of this writing
+	// docs/canonical/spend-observation.md -- claude does, codex as of this writing
 	// never does). It is NEVER the cost of this tick and must never be
 	// read, printed, or compared as one: the Director itself runs as a cron
 	// inside Claude Code, the estate does not dispatch it, and no harness
@@ -515,7 +515,7 @@ func Validate(artifact string, since time.Time, produced func(tok string, since 
 	if len(cands) == 0 {
 		// Only now is a placeholder check meaningful. Applying it to the
 		// PREFIX of any sentence refused real artifacts like "pending PR
-		// #907 merge, see docs/phase-plan.md" before they were ever looked
+		// #907 merge, see docs/canonical/phase-plan.md" before they were ever looked
 		// at -- found in the same review.
 		if isPaddedPlaceholder(a) {
 			return fmt.Errorf("tick: %q is a way of writing \"no artifact\" -- omit it instead", artifact)
@@ -786,7 +786,7 @@ func checkImpl(path string, resolve Resolve) (Verdict, error) {
 //
 // WHY A STALL CAN BE ACKNOWLEDGED BUT NEVER CLEARED BY IT. agent-estate#923:
 // the stop condition has no way to represent "stalled, escalated, awaiting a
-// response" -- a real state the brief itself names (docs/director-brief.md
+// response" -- a real state the brief itself names (docs/canonical/director-brief.md
 // section 3: "the clock does not run while you are blocked on operator
 // review") -- so a genuinely escalated loop reads identically to one that
 // never noticed its own stall, and the loop's own next tick is STALLED
