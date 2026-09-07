@@ -2,7 +2,9 @@ package knowledge
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -65,7 +67,7 @@ func vaultSource(vaultDir string) (SourceResult, []Item) {
 	}
 	factsDir := filepath.Join(vaultDir, "agent", "facts")
 	entries, err := os.ReadDir(factsDir)
-	if err != nil {
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		res.Reason = fmt.Sprintf("cannot list %s: %v", factsDir, err)
 		return res, nil
 	}
@@ -76,11 +78,19 @@ func vaultSource(vaultDir string) (SourceResult, []Item) {
 			paths = append(paths, filepath.Join(factsDir, e.Name()))
 		}
 	}
-	notes, _ := filepath.Glob(filepath.Join(vaultDir, "01 - Notes", "*.md"))
-	for _, p := range notes {
-		if regexp.MustCompile(`^\d{12}\.md$`).MatchString(filepath.Base(p)) {
+	notesDir := filepath.Join(vaultDir, "01 - Notes")
+	notesErr := filepath.WalkDir(notesDir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() && d.Type()&os.ModeSymlink == 0 && regexp.MustCompile(`^\d{12}\.md$`).MatchString(d.Name()) {
 			paths = append(paths, p)
 		}
+		return nil
+	})
+	if notesErr != nil && (!errors.Is(notesErr, os.ErrNotExist) || err != nil) {
+		res.Reason = fmt.Sprintf("cannot list vault notes: %v", notesErr)
+		return res, nil
 	}
 	var items []Item
 	for _, path := range paths {

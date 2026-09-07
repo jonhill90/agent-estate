@@ -47,9 +47,15 @@ func TestINMAPSLifecycle(t *testing.T) {
 	if e != nil || againReject.Changed {
 		t.Fatal("rejection retry not idempotent", e)
 	}
+	reserved := time.Now().UTC().Format("20060102") + "0001.md"
+	os.MkdirAll(filepath.Join(vault, "01 - Notes/01p - Parameters"), 0700)
+	os.WriteFile(filepath.Join(vault, "01 - Notes/01p - Parameters", reserved), []byte("---\ntype: Question\nstatus: draft\n---\n"), 0600)
 	first, err := Publish(db, vault, id, "accept", true)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if filepath.Base(first.NotePath) == reserved {
+		t.Fatal("duplicate ID across Notes directories")
 	}
 	if first.NotePath == "" {
 		t.Fatal("missing canonical path")

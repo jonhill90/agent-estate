@@ -41,6 +41,7 @@ import (
 	"github.com/jonhill90/agent-estate/estate/internal/sweep"
 	"github.com/jonhill90/agent-estate/estate/internal/tick"
 	"github.com/jonhill90/agent-estate/estate/internal/toolusage"
+	"github.com/jonhill90/agent-estate/estate/internal/vaultview"
 	"github.com/jonhill90/agent-estate/estate/internal/verifybranch"
 )
 
@@ -1742,6 +1743,35 @@ func main() {
 			os.Exit(1)
 		}
 
+	case "vault-view":
+		db, err := corpus.Path()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "estate:", err)
+			os.Exit(2)
+		}
+		rows, err := vaultview.Read(db)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "estate:", err)
+			os.Exit(2)
+		}
+		if len(os.Args) > 2 {
+			rows, err = vaultview.Limit(rows, os.Args[2])
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "estate:", err)
+				os.Exit(2)
+			}
+		}
+		writer := vaultview.Write
+		if len(os.Args) > 2 {
+			writer = vaultview.WriteBatch
+		}
+		result, err := writer(os.Getenv("AGENT_MEMORY_VAULT"), rows)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "estate:", err)
+			os.Exit(2)
+		}
+		data, _ := json.MarshalIndent(result, "", "  ")
+		fmt.Println(string(data))
 	case "candidates":
 		if len(os.Args) > 2 && os.Args[2] == "memory" {
 			runCandidatesMemory(os.Args[3:])
