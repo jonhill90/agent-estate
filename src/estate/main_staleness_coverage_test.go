@@ -30,16 +30,18 @@ type staleCoverageJSON struct {
 	} `json:"coverage"`
 }
 
-// writeVaultFixture creates <dir>/agent/facts/<name> with the given mtime
+// writeVaultFixture creates <dir>/01 - Notes/<name> with the given mtime
 // and returns the vault root (<dir>) -- a scratch fixture under the
 // caller's own t.TempDir(), never the operator's real
 // $AGENT_MEMORY_VAULT. Per this issue's own warning, nothing here ever
 // stats or touches a real source: the file is one this test creates from
-// nothing.
+// nothing. Targets "01 - Notes", not the retired "agent/facts", since
+// A2-COMPLETION (run/iteration-queue.md, run/inmaps-spec.md §7b) repointed
+// the freshness stat to match vaultSource's own read target.
 func writeVaultFixture(t *testing.T, mtime time.Time) string {
 	t.Helper()
 	root := t.TempDir()
-	factsDir := filepath.Join(root, "agent", "facts")
+	factsDir := filepath.Join(root, "01 - Notes")
 	if err := os.MkdirAll(factsDir, 0o755); err != nil {
 		t.Fatalf("mkdir vault fixture: %v", err)
 	}

@@ -277,6 +277,45 @@ func TestStandingLawMigratedMemberHashDriftStillRefuses(t *testing.T) {
 	}
 }
 
+// TestStandingLawResolvesMemberUnderEarnedSubdir is P9's own regression
+// (run/iteration-queue.md): resolveStandingLawMemberFile used to search
+// 01 - Notes/ with a flat, non-recursive ReadDir. That found nothing once
+// P9 moved every W1 fact one level deeper, into the earned
+// 01 - Notes/01f - Facts/ subdirectory (registry: 99 - Meta/note-subdirs.md)
+// -- a standing-law member declared by its pre-migration slug would have
+// silently stopped resolving the moment that move landed, with no error
+// surfaced anywhere near the actual cause. This proves alias resolution
+// reaches into an earned subdirectory, not only the flat top level.
+func TestStandingLawResolvesMemberUnderEarnedSubdir(t *testing.T) {
+	vault := t.TempDir()
+	dir := filepath.Join(vault, "01 - Notes", "01f - Facts")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	content := "---\nid: \"202609060005\"\naliases: [subdir-fact]\ntype: fixture\ntitle: subdir-fact\n---\nbody text living one level deeper than a flat ReadDir would see.\n"
+	path := filepath.Join(dir, "202609060005.md")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256([]byte(content))
+	hash := hex.EncodeToString(sum[:])
+
+	withStandingLawSet(t, []StandingLawMember{
+		{Slug: "subdir-fact", HashPrefix: hash[:12], Reason: "fixture reason"},
+	})
+
+	entries, err := StandingLaw(vault)
+	if err != nil {
+		t.Fatalf("StandingLaw() failed to resolve a member under an earned subdirectory: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Slug != "subdir-fact" {
+		t.Fatalf("StandingLaw() resolved %+v, want exactly the one declared member", entries)
+	}
+	if !strings.Contains(entries[0].Body, "one level deeper") {
+		t.Fatalf("StandingLaw() resolved the wrong content for the subdir member: %+v", entries[0])
+	}
+}
+
 // TestGroundingLabelsStandingLawSeparatelyFromCorpusLaw proves requirement
 // 3: the rendered preamble marks standing law as Agent-Memory-sourced,
 // distinct from the "OPERATOR PARAMETERS" corpus section, so an agent can

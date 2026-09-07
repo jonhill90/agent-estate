@@ -1355,7 +1355,14 @@ func indexSourceMtimes(cfg knowledge.Config) []indexSourceMtime {
 	}
 
 	return []indexSourceMtime{
-		statNewest("agent-memory-vault", filepath.Join(cfg.VaultDir, "agent", "facts")),
+		// agent/facts -> 01 - Notes under A2-COMPLETION (run/iteration-queue.md,
+		// run/inmaps-spec.md §7b's last item -- agent/ retired entirely,
+		// including the empty facts/ this used to stat). 01 - Notes is
+		// exactly what vaultSource (internal/knowledge/vault.go) actually
+		// reads today; stating agent/facts here would report every real
+		// vault edit as a permanently gone source, since that directory
+		// no longer exists to be stat'd at all.
+		statNewest("agent-memory-vault", filepath.Join(cfg.VaultDir, "01 - Notes")),
 		statFile("corpus-db", cfg.CorpusDBPath),
 		statNewest("loops-research", cfg.LoopsResearch),
 		{

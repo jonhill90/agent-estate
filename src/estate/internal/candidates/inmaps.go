@@ -15,6 +15,7 @@ func inmaps(vault string) bool {
 	st, e := os.Stat(filepath.Join(vault, "01 - Notes"))
 	return e == nil && st.IsDir()
 }
+
 func scalar(s string) string { b, _ := json.Marshal(s); return string(b) }
 func field(raw, key string) string {
 	for _, l := range strings.Split(raw, "\n") {
@@ -81,7 +82,12 @@ func validateINMAPS(vault string, p Proposal) error {
 // logPath moved from agent/log.md to 99 - Meta/log.md under the agent/
 // dissolution (run/inmaps-spec.md §7b, P5 batch 1) -- repointed in the same
 // change that moved the file, per that section's own binding rule (never
-// move content ahead of its readers).
+// move content ahead of its readers). The crash-recovery backup dir below
+// (".inmaps-backup-*") moved from agent/ to 99 - Meta/ for the same
+// reason, in the same change that removed agent/ entirely
+// (A2-COMPLETION, run/iteration-queue.md, §7b's last item) -- MkdirTemp
+// requires its parent to already exist, so a backup dir still targeting
+// the now-deleted agent/ would fail on this function's very next call.
 func writeSet(vault string, changes map[string][]byte) error {
 	logPath := filepath.Join(vault, "99 - Meta/log.md")
 	if _, ok := changes[logPath]; !ok {
@@ -101,7 +107,7 @@ func writeSet(vault string, changes map[string][]byte) error {
 		at := time.Now().UTC().Format(time.RFC3339)
 		changes[logPath] = []byte("## " + at[:10] + "\n\n**Update** process:estate-candidates — " + strings.Join(names, ", ") + " (" + at + ")\n\n" + string(previous))
 	}
-	backup, e := os.MkdirTemp(filepath.Join(vault, "agent"), ".inmaps-backup-")
+	backup, e := os.MkdirTemp(filepath.Join(vault, "99 - Meta"), ".inmaps-backup-")
 	if e != nil {
 		return e
 	}
@@ -192,7 +198,7 @@ func StageMemory(vault, id string, r MemoryReview, apply bool) error {
 	if !apply {
 		return nil
 	}
-	unlock, e := lockFile(filepath.Join(vault, "agent/.candidate-memory.lock"))
+	unlock, e := lockFile(filepath.Join(vault, "99 - Meta/.candidate-memory.lock"))
 	if e != nil {
 		return e
 	}
@@ -213,7 +219,7 @@ func publishINMAPS(db, vault, id, action string, r MemoryReview, apply bool) (Me
 	unlock := func() {}
 	var e error
 	if apply {
-		unlock, e = lockFile(filepath.Join(vault, "agent/.candidate-memory.lock"))
+		unlock, e = lockFile(filepath.Join(vault, "99 - Meta/.candidate-memory.lock"))
 		if e != nil {
 			return r, e
 		}
@@ -333,7 +339,22 @@ func publishINMAPS(db, vault, id, action string, r MemoryReview, apply bool) (Me
 		draftText = replaceField(draftText, "published_note", scalar(nextPath))
 	}
 	changes[draft] = []byte(draftText)
-	indexPath := filepath.Join(vault, "agent/index.md")
+	// indexPath moved from agent/index.md to a new vault-root index.md
+	// under A2-COMPLETION (run/iteration-queue.md, run/inmaps-spec.md
+	// §7b's last item -- agent/ retired entirely). A first fix pass
+	// briefly moved this onto Start Here.md; a Director review corrected
+	// that against OKF §12/§8's own spec text, which names the
+	// bundle-root index.md FILENAME specifically as the only legal
+	// okf_version carrier -- index.md is restored at the vault root,
+	// Start Here.md reverted to its own separate human-entry-point job
+	// and carries no bullet list of its own. index.md's whole body below
+	// its frontmatter+heading is the bullet list (no other content
+	// competes for the space, unlike Start Here.md's prose/tables), so
+	// this is a plain whole-file line scan again, matching the pre-A2
+	// agent/index.md-era shape -- just at a different path. Link paths
+	// still need no "../" prefix: index.md sits at the vault root, where
+	// agent/index.md needed one to reach 01 - Notes/ from one level down.
+	indexPath := filepath.Join(vault, "index.md")
 	index, e := os.ReadFile(indexPath)
 	if e != nil {
 		return r, e
@@ -360,7 +381,7 @@ func publishINMAPS(db, vault, id, action string, r MemoryReview, apply bool) (Me
 		lines = append(lines, l)
 	}
 	if action == "accept" {
-		lines = append(lines, "- ["+r.Proposal.Title+"](../"+strings.ReplaceAll(nextPath, " ", "%20")+") — "+r.Proposal.Description)
+		lines = append(lines, "- ["+r.Proposal.Title+"]("+strings.ReplaceAll(nextPath, " ", "%20")+") — "+r.Proposal.Description)
 	}
 	text := strings.Join(lines, "\n") + "\n"
 	count := 0
@@ -398,7 +419,7 @@ func publishINMAPS(db, vault, id, action string, r MemoryReview, apply bool) (Me
 // MarkSourceDrift invalidates dependent stable notes without rewriting meaning.
 // Re-acknowledging the source alone never re-accepts a dependent note.
 func MarkSourceDrift(vault, sourceID string) (int, error) {
-	unlock, e := lockFile(filepath.Join(vault, "agent/.candidate-memory.lock"))
+	unlock, e := lockFile(filepath.Join(vault, "99 - Meta/.candidate-memory.lock"))
 	if e != nil {
 		return 0, e
 	}
@@ -431,8 +452,10 @@ func MarkSourceDrift(vault, sourceID string) (int, error) {
 // itself remains in its source repository; no definitions are copied into memory.
 // The note lives at "02 - MOCs/Agents.md", not "03 - Agents/index.md" -- P10
 // (run/iteration-queue.md) retired every per-area index.md into a title-named
-// hub in 02 - MOCs, leaving exactly one index.md in the vault (agent/index.md,
-// the sole legal okf_version carrier).
+// hub in 02 - MOCs. The vault-root index.md is the sole legal okf_version
+// carrier now (A2-COMPLETION, run/iteration-queue.md, retired
+// agent/index.md entirely; OKF §12/§8 name that bundle-root filename
+// specifically).
 func WriteRosterPointer(vault, roster string) error {
 	st, e := os.Stat(roster)
 	if e != nil {
@@ -441,7 +464,7 @@ func WriteRosterPointer(vault, roster string) error {
 	if !st.Mode().IsRegular() {
 		return fmt.Errorf("roster must be a regular file")
 	}
-	unlock, e := lockFile(filepath.Join(vault, "agent/.candidate-memory.lock"))
+	unlock, e := lockFile(filepath.Join(vault, "99 - Meta/.candidate-memory.lock"))
 	if e != nil {
 		return e
 	}

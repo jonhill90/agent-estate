@@ -15,11 +15,10 @@ func TestINMAPSLifecycle(t *testing.T) {
 	Derive(db, true)
 	id := query(t, db, "select id from knowledge_candidates where prompt_id='p1'")
 	vault := t.TempDir()
-	os.MkdirAll(filepath.Join(vault, "agent/facts"), 0700)
-	os.WriteFile(filepath.Join(vault, "agent/index.md"), []byte("# Facts\n"), 0600)
 	os.MkdirAll(filepath.Join(vault, "01 - Notes"), 0700)
 	os.MkdirAll(filepath.Join(vault, "99 - Meta"), 0700)
 	os.WriteFile(filepath.Join(vault, "99 - Meta/tags.md"), []byte("`kind/decision`"), 0600)
+	os.WriteFile(filepath.Join(vault, "index.md"), []byte("---\nokf_version: \"0.1\"\n---\n\n# Facts\n\nintro\n"), 0600)
 	p := catalogueProposal("fixture-recovery", "memory", "01 - Notes")
 	p.Tags = []string{"kind/decision"}
 	p.Type = "Fact"
@@ -77,6 +76,23 @@ func TestINMAPSLifecycle(t *testing.T) {
 	if _, e := os.Stat(filepath.Join(vault, "agent/log.md")); !os.IsNotExist(e) {
 		t.Fatal("agent/log.md was written -- the dead pre-dissolution path must never be resurrected")
 	}
+	// A2-COMPLETION (run/iteration-queue.md), fix pass (Director, OKF
+	// §12/§8 adjudication): the capped index lives at the vault-root
+	// index.md, not agent/index.md and not Start Here.md (a first pass
+	// briefly tried the latter; OKF names the bundle-root index.md
+	// FILENAME specifically as the sole legal okf_version carrier). An
+	// accept must add a bullet there and leave the file's own intro prose
+	// untouched.
+	index, e := os.ReadFile(filepath.Join(vault, "index.md"))
+	if e != nil {
+		t.Fatalf("index.md not written by an INMAPS accept: %v", e)
+	}
+	if !strings.Contains(string(index), "intro") {
+		t.Fatal("index.md's own intro prose was lost")
+	}
+	if !strings.Contains(string(index), r.Proposal.Title) {
+		t.Fatal("accepted fact never landed in index.md")
+	}
 	again, err := Publish(db, vault, id, "accept", true)
 	if err != nil || again.Changed {
 		t.Fatalf("retry: %+v %v", again, err)
@@ -117,7 +133,7 @@ func TestINMAPSLifecycle(t *testing.T) {
 
 func TestINMAPSGuardsAndMOC(t *testing.T) {
 	v := t.TempDir()
-	for _, d := range []string{"agent", "01 - Notes", "99 - Meta"} {
+	for _, d := range []string{"01 - Notes", "99 - Meta"} {
 		os.MkdirAll(filepath.Join(v, d), 0700)
 	}
 	os.WriteFile(filepath.Join(v, "99 - Meta/tags.md"), []byte("`kind/decision`"), 0600)
@@ -169,7 +185,7 @@ func TestINMAPSGuardsAndMOC(t *testing.T) {
 
 func TestSourceDriftInvalidatesWithoutRewritingMeaning(t *testing.T) {
 	v := t.TempDir()
-	os.MkdirAll(filepath.Join(v, "agent/facts"), 0700)
+	os.MkdirAll(filepath.Join(v, "99 - Meta"), 0700)
 	os.MkdirAll(filepath.Join(v, "01 - Notes"), 0700)
 	p := filepath.Join(v, "01 - Notes/202609060001.md")
 	raw := "---\ntype: Fact\nstatus: stable\ntitle: Recovery\nsource: catalogue_source=src-example; content_hash=abc\n---\nUse violet recovery.\n"
@@ -196,12 +212,12 @@ func TestSourceDriftInvalidatesWithoutRewritingMeaning(t *testing.T) {
 // TestWriteRosterPointerTargetsMOCsHub locks in P10's redirect
 // (run/iteration-queue.md): the agents routing note lands at
 // "02 - MOCs/Agents.md", not the retired "03 - Agents/index.md" -- the
-// per-area index.md files were all replaced by title-named hubs there,
-// leaving exactly one index.md in the vault (agent/index.md). Previously
+// per-area index.md files were all replaced by title-named hubs there.
+// The vault-root index.md is the sole index now (A2-COMPLETION,
+// run/iteration-queue.md, retired agent/index.md entirely). Previously
 // uncovered by any test.
 func TestWriteRosterPointerTargetsMOCsHub(t *testing.T) {
 	v := t.TempDir()
-	os.MkdirAll(filepath.Join(v, "agent"), 0700)
 	os.MkdirAll(filepath.Join(v, "99 - Meta"), 0700)
 	os.WriteFile(filepath.Join(v, "99 - Meta/tags.md"), []byte("`source`"), 0600)
 	roster := filepath.Join(t.TempDir(), "agent-roster.md")

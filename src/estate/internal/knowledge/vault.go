@@ -53,11 +53,20 @@ const (
 	VaultItemSourceTag = "vault-fact"
 )
 
-// vaultSource reads every agent/facts/*.md file's own frontmatter under
-// vaultDir. A vault that cannot be listed at all (unset, missing,
-// unreadable) is one failed source, not a silently empty Items slice; a
-// single fact file that fails to parse is skipped and does not fail the
-// whole source, since agent/index.md itself already tolerates unparsed
+// vaultSource reads every fact file's own frontmatter under vaultDir --
+// primarily 01 - Notes/**/<12-digit-id>.md (subdir-agnostic: catches
+// 01f - Facts, 01p - Parameters, or any future earned subdirectory
+// equally, per PR #1272), plus the legacy agent/facts/*.md shape for a
+// vault that has not migrated. A2-COMPLETION (run/iteration-queue.md,
+// run/inmaps-spec.md §7b's last item) removed agent/ from the real vault
+// entirely; the legacy arm below stays existence-probed rather than
+// removed outright, gracefully tolerating its own absence
+// (errors.Is(err, os.ErrNotExist)) rather than failing the whole source
+// over a directory that is now expected not to exist. A vault that
+// cannot be listed at all (unset, missing, unreadable in some OTHER way)
+// is one failed source, not a silently empty Items slice; a single fact
+// file that fails to parse is skipped and does not fail the whole
+// source, since the vault-root index.md already tolerates unparsed
 // bullet lines (src/tui's ParseIndex).
 func vaultSource(vaultDir string) (SourceResult, []Item) {
 	res := SourceResult{Name: VaultSourceName}

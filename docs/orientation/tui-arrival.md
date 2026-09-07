@@ -82,7 +82,7 @@ internal/dashboard/  estate-at-a-glance view -- re-projects figures already esta
 internal/external/   Docs -> Platform Docs -- how a nav.KindExternal destination behaves (names the URL, opens a browser)
 internal/flow/       live flow view — the same board.Snapshot re-projected as a moving pipeline
 internal/gallery/    glyph gallery — every lane state × every candidate glyph set
-internal/knowledge/  Jon's personal memory vault viewer -- reads $AGENT_MEMORY_VAULT's agent/index.md + agent/facts/<slug>.md, progressive disclosure
+internal/knowledge/  Jon's personal memory vault viewer -- reads $AGENT_MEMORY_VAULT's index.md + 01 - Notes/<12-digit-id>.md, progressive disclosure
 internal/lane/       lane/session decode, glyph sets (data, not code), state table
 internal/library/    shared prompt/decision corpus viewer -- agent-dotfiles-supervisor's ledger.sqlite3 live_parameters/open_questions/unacknowledged views
 internal/mcp/        minimal MCP JSON-RPC client over a child process's stdio
