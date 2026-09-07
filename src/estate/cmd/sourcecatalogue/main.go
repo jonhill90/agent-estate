@@ -151,7 +151,7 @@ func runRegister(args []string) {
 	fs := flag.NewFlagSet("sourcecatalogue register", flag.ExitOnError)
 	registerDir := registerDirFlag(fs)
 	viewsDir := fs.String("views-dir", "", "explicit destination root for backed-up generated source views and area index")
-	extractionKind := fs.String("extraction-kind", "", "extraction mechanism: pdf, conversation, or repo-docs (others register with extraction marked unavailable)")
+	extractionKind := fs.String("extraction-kind", "", "extraction mechanism: pdf, conversation, repo-docs, or repo-pointer (others register with extraction marked unavailable)")
 	kind := fs.String("kind", "", "contract.md content-type tag: one of kind/repo, kind/doc, kind/transcript, kind/decision, kind/skill, kind/tool")
 	locator := fs.String("locator", "", "the file or root path this source lives at")
 	provenance := fs.String("provenance", "", "who or what produced this RECORD (not the original) -- e.g. an agent id or 'operator, via sourcecatalogue'")
@@ -165,6 +165,10 @@ func runRegister(args []string) {
 	reviewState := fs.String("review-state", "", "contract.md lifecycle axis: lifecycle/candidate, lifecycle/current, lifecycle/superseded, lifecycle/rejected (defaults to lifecycle/candidate)")
 	whyIndexed := fs.String("why-indexed", "", "why this source is worth cataloguing")
 	links := fs.String("links", "", "comma-separated links to reviewed derivatives of this source")
+	remoteURL := fs.String("remote-url", "", "repo-pointer only (P8): the canonical GitHub URL, kept separate from -local-path and never derived from it")
+	localPath := fs.String("local-path", "", "repo-pointer only (P8): a local checkout path; absent/nonexistent is recorded as such, never an error, never guessed from -remote-url")
+	repoDescription := fs.String("repo-description", "", "repo-pointer only (P8): what this repo is, one line, drawn from its own README")
+	routingSurface := fs.String("routing-surface", "", "repo-pointer only (P8): where this repo's own routing surface lives, e.g. AGENTS.md or docs/index.md")
 	asJSON := fs.Bool("json", false, "print the registered entry as JSON")
 	fs.Parse(args)
 
@@ -197,6 +201,10 @@ func runRegister(args []string) {
 		ReviewState:     *reviewState,
 		WhyIndexed:      *whyIndexed,
 		DerivativeLinks: derivativeLinks,
+		RemoteURL:       *remoteURL,
+		LocalPath:       *localPath,
+		RepoDescription: *repoDescription,
+		RoutingSurface:  *routingSurface,
 	}, time.Now())
 	saveOrExit(*registerDir, reg)
 	writeViewsOrExit(reg.List(), *viewsDir)

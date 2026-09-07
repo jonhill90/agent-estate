@@ -118,6 +118,39 @@ const (
 	ExtractionPDF          ExtractionKind = "pdf"
 	ExtractionConversation ExtractionKind = "conversation"
 	ExtractionRepoDocs     ExtractionKind = "repo-docs"
+	// ExtractionRepoPointer is a repo-as-a-whole pointer record
+	// (agent-estate-lanes/run/iteration-queue.md P8): a repository's
+	// remote GitHub URL and local checkout, kept as two separate,
+	// never-derived-from-each-other fields (see RemoteURL/LocalPath on
+	// RegisterEntry). Unlike the other three kinds, this one extracts no
+	// file content at all -- its only "extraction" is reading the local
+	// checkout's current commit, when one is present (observeRepoPointer,
+	// extract.go).
+	ExtractionRepoPointer ExtractionKind = "repo-pointer"
+)
+
+// LocalCheckoutState is whether a repo-pointer record's LocalPath was
+// actually found on this machine at registration/refresh time -- a
+// RECORDED STATE (P8's own binding rule), never an error and never
+// guessed from RemoteURL. The same typed-absence discipline this
+// codebase already applies elsewhere (catalogue.go's HealthState,
+// src/tui's cost.Figure.Known): a repo-pointer with no local checkout is
+// a fact about this machine right now, not a defect in the record.
+type LocalCheckoutState string
+
+const (
+	// LocalCheckoutPresent means LocalPath resolved to a real directory
+	// on this machine at last observation.
+	LocalCheckoutPresent LocalCheckoutState = "present"
+	// LocalCheckoutAbsent means no local checkout was found -- LocalPath
+	// may be empty (never registered) or may name a path that does not
+	// exist right now (removed, not yet cloned on this machine, or this
+	// observation ran on a different machine than the one that
+	// registered it). RegisterEntry.LocalPath is NOT cleared when this
+	// happens -- the last-known path stays on record, only this status
+	// flips, so a reader can still see where it USED to be / is expected
+	// to be.
+	LocalCheckoutAbsent LocalCheckoutState = "absent"
 )
 
 // RegisterEntry is one durable registration: everything this package
@@ -178,6 +211,34 @@ type RegisterEntry struct {
 	WhyIndexed string `json:"why_indexed"`
 	// DerivativeLinks realizes contract `derivative-links`.
 	DerivativeLinks []string `json:"derivative_links,omitempty"`
+
+	// RemoteURL is a repo-pointer record's canonical GitHub URL
+	// (agent-estate-lanes/run/iteration-queue.md P8). Empty for every
+	// other ExtractionKind. Never derived from LocalPath -- P8's own
+	// binding rule -- always exactly what the caller supplied.
+	RemoteURL string `json:"remote_url,omitempty"`
+	// LocalPath is a repo-pointer record's local checkout path on
+	// whichever machine most recently registered or refreshed it. Empty
+	// for every other ExtractionKind. Never derived from RemoteURL.
+	// Meaningful as "the current checkout location" only when
+	// LocalCheckoutStatus is LocalCheckoutPresent; when Absent, this is
+	// the LAST KNOWN path (see LocalCheckoutAbsent's own comment), not
+	// cleared to empty, so a reader still knows where to look.
+	LocalPath string `json:"local_path,omitempty"`
+	// LocalCheckoutStatus is P8's typed-absence field -- see
+	// LocalCheckoutState's own doc comment. Empty ("") for every
+	// ExtractionKind other than repo-pointer, meaning "not applicable to
+	// this kind" rather than either Present or Absent.
+	LocalCheckoutStatus LocalCheckoutState `json:"local_checkout_status,omitempty"`
+	// RepoDescription is a repo-pointer record's one-line answer to
+	// "what is this repo" -- P8's own requirement, drawn from the
+	// repo's own README, never invented. Empty for every other kind.
+	RepoDescription string `json:"repo_description,omitempty"`
+	// RoutingSurface is a repo-pointer record's answer to "where does
+	// this repo's own routing/orientation live" -- a path relative to
+	// the repo root (e.g. "AGENTS.md", "docs/index.md"), per P8's own
+	// requirement. Empty for every other kind.
+	RoutingSurface string `json:"routing_surface,omitempty"`
 
 	// ObservedRevision realizes contract `revision`/`hash` -- a SHA-256
 	// for a single file, a manifest hash for a directory tree, or a unit
@@ -315,6 +376,16 @@ type RegisterInput struct {
 	ReviewState     string
 	WhyIndexed      string
 	DerivativeLinks []string
+	// RemoteURL, LocalPath, RepoDescription, RoutingSurface are P8's
+	// repo-pointer fields -- meaningful only when ExtractionKind is
+	// ExtractionRepoPointer, ignored otherwise. Register never derives
+	// one of RemoteURL/LocalPath from the other; the caller supplies both
+	// (or leaves LocalPath empty, which is simply an absent checkout, not
+	// an error).
+	RemoteURL       string
+	LocalPath       string
+	RepoDescription string
+	RoutingSurface  string
 }
 
 // applyDefaults fills the two contract fields (Access, ReviewState) that
@@ -345,7 +416,7 @@ func (reg *Register) Register(registerDir string, rawIn RegisterInput, now time.
 	assignViewIDs(reg.Entries)
 	in := rawIn.applyDefaults()
 	id := identityFor(in.Locator)
-	revision, extractionStatus, cachePath := observe(in.ExtractionKind, in.Locator, cacheDir(registerDir, id))
+	revision, extractionStatus, cachePath, checkoutState := observe(in.ExtractionKind, in.Locator, in.LocalPath, cacheDir(registerDir, id))
 
 	for i := range reg.Entries {
 		if reg.Entries[i].ID != id {
@@ -365,6 +436,11 @@ func (reg *Register) Register(registerDir string, rawIn RegisterInput, now time.
 		e.ReviewState = in.ReviewState
 		e.WhyIndexed = in.WhyIndexed
 		e.DerivativeLinks = in.DerivativeLinks
+		e.RemoteURL = in.RemoteURL
+		e.LocalPath = in.LocalPath
+		e.RepoDescription = in.RepoDescription
+		e.RoutingSurface = in.RoutingSurface
+		e.LocalCheckoutStatus = checkoutState
 		e.ExtractionStatus = extractionStatus
 		e.ExtractionCachePath = cachePath
 		e.LastRefreshedAt = now
@@ -393,6 +469,11 @@ func (reg *Register) Register(registerDir string, rawIn RegisterInput, now time.
 		ReviewState:         in.ReviewState,
 		WhyIndexed:          in.WhyIndexed,
 		DerivativeLinks:     in.DerivativeLinks,
+		RemoteURL:           in.RemoteURL,
+		LocalPath:           in.LocalPath,
+		RepoDescription:     in.RepoDescription,
+		RoutingSurface:      in.RoutingSurface,
+		LocalCheckoutStatus: checkoutState,
 		ObservedRevision:    revision,
 		Status:              StatusActive,
 		ExtractionStatus:    extractionStatus,
@@ -427,18 +508,23 @@ func driftStatus(current EntryStatus, previous, next string) EntryStatus {
 
 // Refresh re-observes id's current revision and extraction outcome, and
 // reports the resulting entry. It never touches Authority, Scope,
-// Access, Owner, WhyIndexed, or DerivativeLinks -- those are the
-// operator's own declared facts about the source, not something a
-// revision check may overwrite.
+// Access, Owner, WhyIndexed, DerivativeLinks, RemoteURL, LocalPath,
+// RepoDescription, or RoutingSurface -- those are the operator's own
+// declared facts about the source, not something a revision check may
+// overwrite. For a repo-pointer entry specifically: Refresh re-checks
+// whether the ALREADY-recorded LocalPath still exists on this machine
+// (updating LocalCheckoutStatus accordingly) -- it never searches for a
+// new path and never infers one from RemoteURL, per P8's binding rule.
 func (reg *Register) Refresh(registerDir, id string, now time.Time) (RegisterEntry, bool) {
 	for i := range reg.Entries {
 		if reg.Entries[i].ID != id {
 			continue
 		}
 		e := &reg.Entries[i]
-		revision, extractionStatus, cachePath := observe(e.ExtractionKind, e.Locator, cacheDir(registerDir, e.ID))
+		revision, extractionStatus, cachePath, checkoutState := observe(e.ExtractionKind, e.Locator, e.LocalPath, cacheDir(registerDir, e.ID))
 		e.Status = driftStatus(e.Status, e.ObservedRevision, revision)
 		e.ObservedRevision = revision
+		e.LocalCheckoutStatus = checkoutState
 		e.ExtractionStatus = extractionStatus
 		e.ExtractionCachePath = cachePath
 		e.LastRefreshedAt = now
