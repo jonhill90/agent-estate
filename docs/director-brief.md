@@ -136,10 +136,11 @@ The clock does **not** run while you are blocked on operator review.
 
 ## 4. The corpus
 
-`~/corpus/ledger.sqlite3`. Read it before the repo, every session.
+`~/corpus/corpus.sqlite3` (renamed from `ledger.sqlite3`, agent-estate#P6;
+the old name is a compat symlink). Read it before the repo, every session.
 
 ```
-sqlite3 "file:$HOME/corpus/ledger.sqlite3?mode=ro&immutable=1" "<query>"
+sqlite3 "file:$HOME/corpus/corpus.sqlite3?mode=ro&immutable=1" "<query>"
 ```
 
 The URI form with `immutable=1` is required — bare `-readonly` and plain

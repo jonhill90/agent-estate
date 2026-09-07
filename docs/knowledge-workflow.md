@@ -52,9 +52,9 @@ each candidate/fact lives at each stage, see the vault's own
 `agent/LIFECYCLE.md`.
 
 Every command below was run against a private, read-only copy of the
-corpus (`sqlite3 -readonly ~/corpus/ledger.sqlite3 ".backup <scratch>"`)
+corpus (`sqlite3 -readonly ~/corpus/corpus.sqlite3 ".backup <scratch>"`)
 and a scratch vault (`-vault <scratch>`) on 2026-09-06 — never against the
-live corpus or the live vault. `<db>` below is `~/corpus/ledger.sqlite3` in
+live corpus or the live vault. `<db>` below is `~/corpus/corpus.sqlite3` in
 real use (the flag defaults to `internal/corpus.Path()`, so `-db` can
 usually be omitted); `-vault` defaults to `$AGENT_MEMORY_VAULT`.
 

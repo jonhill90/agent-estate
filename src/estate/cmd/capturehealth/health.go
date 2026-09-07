@@ -2,7 +2,7 @@
 // agent-estate#1139: it walks ~/.codex/sessions rollout JSONL and reports what
 // is there -- record type counts, extractable operator-turn counts, and
 // unparseable files -- WITHOUT writing anything anywhere. It ingests nothing
-// into the corpus and never opens ~/corpus/ledger.sqlite3.
+// into the corpus and never opens ~/corpus/corpus.sqlite3.
 //
 // agent-estate#1139's verified sweep names three corrections this file exists
 // to encode, not merely to satisfy once:

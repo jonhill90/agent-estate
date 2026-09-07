@@ -3,7 +3,7 @@
 // the same parser cmd/capturehealth uses -- see that package's doc comment
 // for why sharing one parser matters here) and produces a manifest of
 // exactly which operator turns an ingestion step would write, WITHOUT
-// writing anything: no corpus mutation, no ~/corpus/ledger.sqlite3 open at
+// writing anything: no corpus mutation, no ~/corpus/corpus.sqlite3 open at
 // all (not even read-only -- this slice has no reason to touch it), and no
 // write of any kind under ~/.codex. Every source path is opened with
 // os.Open only.
@@ -13,7 +13,7 @@
 // This extractor FEEDS a future write step; it does not supersede the
 // existing corpus ingestion path. The two are answers to different
 // questions: the existing path (dead since 2026-09-02 19:09:37, 0 prompts in
-// 3 days measured against ~/corpus/ledger.sqlite3 -- see prompt-corpus's own
+// 3 days measured against ~/corpus/corpus.sqlite3 -- see prompt-corpus's own
 // docs for that path's mechanism) is/was the record of the OPERATOR'S OWN
 // corpus of decisions and standing parameters, sourced from wherever that
 // pipeline read transcripts. This extractor reads a different, narrower

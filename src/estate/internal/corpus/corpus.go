@@ -50,7 +50,16 @@ func dbPath() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, "corpus", "ledger.sqlite3"), nil
+	// Renamed from ledger.sqlite3 (agent-estate#P6, 2026-09-06): "ledger"
+	// also names ~/.local/state/estate/ledger.jsonl (the estate's OWN work
+	// record) and the dead ~/.local/state/agent-dotfiles-supervisor/
+	// ledger.sqlite3 (agent-estate#942's own trap) -- three unrelated
+	// things answering to one name. ~/corpus/ledger.sqlite3 is kept as a
+	// compat symlink to this file so nothing that still names it the old
+	// way breaks; every consumer in this repo was repointed to the real
+	// name in the same change. See 99 - Meta's disambiguation note for
+	// which "ledger" is which.
+	return filepath.Join(home, "corpus", "corpus.sqlite3"), nil
 }
 
 // Path returns the corpus database path this process will actually read --

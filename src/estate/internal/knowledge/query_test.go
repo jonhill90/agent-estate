@@ -1246,7 +1246,7 @@ func TestQueryUnknownTagFilterDistinguishesFailedSourceFromTypo(t *testing.T) {
 		GeneratedAt: time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC),
 		Sources: []SourceResult{
 			{Name: "vault-facts", OK: false, Reason: "cannot list /nonexistent/agent/facts: no such file or directory"},
-			{Name: "corpus-items", OK: false, Reason: "corpus unreadable at /nonexistent/corpus/ledger.sqlite3: no such file or directory"},
+			{Name: "corpus-items", OK: false, Reason: "corpus unreadable at /nonexistent/corpus/corpus.sqlite3: no such file or directory"},
 			{Name: "repo-docs", OK: true, Count: 1},
 		},
 		Items: []Item{

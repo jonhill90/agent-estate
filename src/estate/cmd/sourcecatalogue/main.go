@@ -8,7 +8,7 @@
 // 2026-09-06 knowledge-architecture run's lane B) are the only thing
 // that ever writes, and only ever to the private register under
 // ~/.local/state/agent-estate/catalogue -- never to a source root, never
-// to ~/corpus/ledger.sqlite3, never to the shared `estate knowledge`
+// to ~/corpus/corpus.sqlite3, never to the shared `estate knowledge`
 // index.
 //
 // With no subcommand at all, this binary's behavior is exactly what it

@@ -8,18 +8,21 @@ import (
 
 // defaultCorpusPath is where the operator's own corpus lives --
 // src/estate/internal/corpus.Path()'s own default, verified against that
-// package 2026-09-04 (agent-estate#1088). Unlike defaultLedgerLivePath
-// (board.go), this is not the supervisor's install layout: the corpus is
-// deliberately NOT under ~/.local/state ("knowledge, not scratch space the
-// harness reuses" -- internal/corpus's own package doc comment). An unset
-// $HOME makes this undiscoverable, same treatment as defaultLedgerLivePath:
-// callers read "" as "nothing found," not an error.
+// package 2026-09-04 (agent-estate#1088), and repointed alongside it when
+// that package's own file renamed from ledger.sqlite3 to corpus.sqlite3
+// (agent-estate#P6; the old name is kept as a compat symlink -- this
+// function names the real file directly, matching Path()). Unlike
+// defaultLedgerLivePath (board.go), this is not the supervisor's install
+// layout: the corpus is deliberately NOT under ~/.local/state ("knowledge,
+// not scratch space the harness reuses" -- internal/corpus's own package
+// doc comment). An unset $HOME makes this undiscoverable, same treatment as
+// defaultLedgerLivePath: callers read "" as "nothing found," not an error.
 func defaultCorpusPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
 		return ""
 	}
-	return filepath.Join(home, "corpus", "ledger.sqlite3")
+	return filepath.Join(home, "corpus", "corpus.sqlite3")
 }
 
 // corpusReadOnlyURI wraps path in the file:...?mode=ro URI form sqlite3's

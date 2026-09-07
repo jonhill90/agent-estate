@@ -10,7 +10,7 @@ import (
 // WHY THIS TEST EXISTS. AGENTS.md's "Before you ask Jon anything" rule once
 // named ~/.local/state/agent-dotfiles-supervisor/ledger.sqlite3 -- a database
 // with 0 live_parameters -- while every dispatch's own grounding actually
-// read ~/corpus/ledger.sqlite3 via Path() (agent-estate#942). An agent
+// read ~/corpus/corpus.sqlite3 via Path() (agent-estate#942). An agent
 // following the doc exactly found nothing and could reasonably have
 // concluded the record was empty -- the same "instrument that cannot see a
 // thing looks exactly like the thing being absent" failure this repo names

@@ -600,13 +600,19 @@ func TestEndToEndDryRunApplyRerunIsIdempotent(t *testing.T) {
 }
 
 // TestRefuseLivePath is the in-process backstop: -apply must refuse against
-// the well-known live corpus locations regardless of the hook.
+// the well-known live corpus locations regardless of the hook. This checks
+// against the REAL, unmocked $HOME with no ESTATE_CORPUS override, so it can
+// only ever assert on corpus.Path()'s own current default string -- unlike
+// TestRefuseLivePathTildeVsHome below, it has no real file on disk to
+// resolve identity against on a CI runner (no ~/corpus at all there), so a
+// second case for the ledger.sqlite3 compat symlink (agent-estate#P6)
+// belongs in that isolated-fixture test instead, not here.
 func TestRefuseLivePath(t *testing.T) {
 	cases := []struct {
 		path string
 		live bool
 	}{
-		{filepath.Join(os.Getenv("HOME"), "corpus", "ledger.sqlite3"), true},
+		{filepath.Join(os.Getenv("HOME"), "corpus", "corpus.sqlite3"), true},
 		{"/Users/jon/.local/state/agent-dotfiles-supervisor/ledger.sqlite3", true},
 		{"/tmp/corpus-copy.sqlite3", false},
 	}
@@ -623,14 +629,14 @@ func TestRefuseLivePath(t *testing.T) {
 // of it, and a relative path resolving to it all reached refuseLivePath's
 // literal-string comparison unrefused. ESTATE_CORPUS points corpus.Path() at
 // a throwaway fixture file for this test, never the real corpus, so none of
-// these bypasses is attempted against $HOME/corpus/ledger.sqlite3.
+// these bypasses is attempted against $HOME/corpus/corpus.sqlite3.
 func TestRefuseLivePathBypasses(t *testing.T) {
 	dir := t.TempDir()
 	liveDir := filepath.Join(dir, "corpus")
 	if err := os.MkdirAll(liveDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	livePath := filepath.Join(liveDir, "ledger.sqlite3")
+	livePath := filepath.Join(liveDir, "corpus.sqlite3")
 	if err := os.WriteFile(livePath, []byte("live"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -641,11 +647,11 @@ func TestRefuseLivePathBypasses(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	caseVariant := filepath.Join(dir, "CORPUS", "Ledger.sqlite3")
+	caseVariant := filepath.Join(dir, "CORPUS", "Corpus.sqlite3")
 	trailingSlash := livePath + string(filepath.Separator)
 
 	t.Chdir(dir)
-	relative := filepath.Join("corpus", "ledger.sqlite3")
+	relative := filepath.Join("corpus", "corpus.sqlite3")
 
 	cases := []struct {
 		name string
@@ -666,9 +672,9 @@ func TestRefuseLivePathBypasses(t *testing.T) {
 	}
 }
 
-// TestRefuseLivePathTildeVsHome locks the "~/corpus/ledger.sqlite3" spelling
+// TestRefuseLivePathTildeVsHome locks the "~/corpus/corpus.sqlite3" spelling
 // specifically -- flag.String never tilde-expands, so a caller passing "~"
-// literally must still resolve to the same file $HOME/corpus/ledger.sqlite3
+// literally must still resolve to the same file $HOME/corpus/corpus.sqlite3
 // names, another bypass PR #1232's review asked be checked for.
 func TestRefuseLivePathTildeVsHome(t *testing.T) {
 	dir := t.TempDir()
@@ -679,14 +685,26 @@ func TestRefuseLivePathTildeVsHome(t *testing.T) {
 	if err := os.MkdirAll(corpusDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	livePath := filepath.Join(corpusDir, "ledger.sqlite3")
+	livePath := filepath.Join(corpusDir, "corpus.sqlite3")
 	if err := os.WriteFile(livePath, []byte("live"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	_, live := refuseLivePath("~/corpus/ledger.sqlite3")
+	_, live := refuseLivePath("~/corpus/corpus.sqlite3")
 	if !live {
-		t.Errorf(`refuseLivePath("~/corpus/ledger.sqlite3") = live false, want true (should resolve against $HOME like the real corpus.Path())`)
+		t.Errorf(`refuseLivePath("~/corpus/corpus.sqlite3") = live false, want true (should resolve against $HOME like the real corpus.Path())`)
+	}
+
+	// The compat symlink (agent-estate#P6) must resolve to the same live
+	// file via its own real name, not just the real name resolving to
+	// itself.
+	symlinkPath := filepath.Join(corpusDir, "ledger.sqlite3")
+	if err := os.Symlink(livePath, symlinkPath); err != nil {
+		t.Fatal(err)
+	}
+	_, live = refuseLivePath("~/corpus/ledger.sqlite3")
+	if !live {
+		t.Errorf(`refuseLivePath("~/corpus/ledger.sqlite3") = live false, want true (compat symlink must resolve to the same live file as corpus.sqlite3)`)
 	}
 }
 

@@ -31,8 +31,9 @@ func DefaultConfig() (Config, error) {
 	} else {
 		// NOT ~/.local/state/agent-dotfiles-supervisor/ledger.sqlite3 --
 		// that path has zero live_parameters (agent-estate#942). The real
-		// corpus is ~/corpus/ledger.sqlite3.
-		cfg.CorpusDBPath = filepath.Join(home, "corpus", "ledger.sqlite3")
+		// corpus is ~/corpus/corpus.sqlite3 (renamed from ledger.sqlite3,
+		// agent-estate#P6; the old name is kept as a compat symlink).
+		cfg.CorpusDBPath = filepath.Join(home, "corpus", "corpus.sqlite3")
 	}
 	if p := os.Getenv("ESTATE_REPO_ROOT"); p != "" {
 		cfg.RepoRoot = p
