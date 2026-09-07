@@ -21,6 +21,7 @@
 package isolate
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -526,6 +527,138 @@ func (w *Worktree) Dirty() (bool, error) {
 	return false, nil
 }
 
+// DirtyState is a worktree's uncommitted-content classification --
+// agent-estate#1247: three distinct states, never collapsed to two.
+// "No dirty files" and "dirty but every path is already durable elsewhere"
+// are both safe to remove; "dirty with content that exists nowhere else" is
+// not. Collapsing the first two into a bare bool is exactly what made
+// sweep-worktrees deadlock: eight corpses whose only dirty files were
+// byte-for-byte identical to origin/main were refused every run, so the
+// same eight consumed the whole per-run bound forever and the worktree
+// count never fell.
+type DirtyState int
+
+const (
+	// DirtyStateClean means git status --porcelain --ignored reported
+	// nothing this package treats as real (see knownDetritus).
+	DirtyStateClean DirtyState = iota
+	// DirtyStateSuperseded means the worktree has dirty paths, but every
+	// one of them is byte-for-byte identical to origin/main's own committed
+	// copy of that same path -- nothing here is content that exists only
+	// in this worktree. Safe to remove: origin already has it durably.
+	DirtyStateSuperseded
+	// DirtyStateUnique means at least one dirty path differs from
+	// origin/main (or does not exist there at all) -- this worktree is the
+	// only place that content survives. Never remove.
+	DirtyStateUnique
+)
+
+func (s DirtyState) String() string {
+	switch s {
+	case DirtyStateClean:
+		return "no dirty files"
+	case DirtyStateSuperseded:
+		return "dirty but all superseded"
+	case DirtyStateUnique:
+		return "dirty with unique content"
+	default:
+		return "unknown dirty state"
+	}
+}
+
+// dirtyPaths returns every worktree-relative path Dirty (above) would count
+// toward "real" dirtiness -- tracked modified/staged/untracked entries, plus
+// any ignored path not on the knownDetritus allowlist. Factored out of Dirty
+// so DirtyStatus (below) sees exactly the same eligibility Dirty already
+// established, never a second, independently-drifting definition of "real."
+func (w *Worktree) dirtyPaths() ([]string, error) {
+	out, err := git(w.Path, "status", "--porcelain", "--ignored")
+	if err != nil {
+		return nil, err
+	}
+	var paths []string
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if path, ok := strings.CutPrefix(line, "!! "); ok {
+			if !isKnownDetritus(path) {
+				paths = append(paths, path)
+			}
+			continue
+		}
+		// An ordinary porcelain line is "XY path" (or "XY orig -> path" for
+		// a rename, in which case the path after "-> " is the one that
+		// still exists on disk and is what needs comparing).
+		if len(line) <= 3 {
+			continue
+		}
+		rest := strings.TrimSpace(line[3:])
+		if _, after, ok := strings.Cut(rest, " -> "); ok {
+			rest = after
+		}
+		paths = append(paths, rest)
+	}
+	return paths, nil
+}
+
+// DirtyStatus classifies the worktree's dirty content against origin/main,
+// per path, and names the first path it finds that is NOT superseded --
+// agent-estate#1247's own acceptance criterion that a refusal name the
+// differing file rather than leave a reader to go read the code to find out
+// why.
+//
+// origin/main is fetched fresh (bounded by remoteFetchTimeout, the same
+// bound remoteHasCommit already uses) before any comparison: a stale local
+// ref could call something "superseded" that origin no longer has, or
+// refuse something origin has since gained -- either is exactly the kind of
+// silent wrong answer this package exists to avoid. The fetch runs only
+// when there is at least one dirty path to check; a clean worktree costs
+// nothing beyond the status call.
+func (w *Worktree) DirtyStatus() (state DirtyState, differing string, err error) {
+	paths, err := w.dirtyPaths()
+	if err != nil {
+		return DirtyStateClean, "", err
+	}
+	if len(paths) == 0 {
+		return DirtyStateClean, "", nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), remoteFetchTimeout)
+	defer cancel()
+	if _, err := gitTimeout(ctx, w.Path, "fetch", "-q", "origin", "main"); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return DirtyStateUnique, "", fmt.Errorf("could not confirm origin/main within %s to compare dirty paths against it -- the fetch did not complete in time, which is not the same as the content being unique: %w", remoteFetchTimeout, err)
+		}
+		return DirtyStateUnique, "", fmt.Errorf("cannot fetch origin/main to compare dirty paths against it: %w", err)
+	}
+
+	for _, path := range paths {
+		committed, cerr := git(w.Path, "show", "FETCH_HEAD:"+path)
+		if cerr != nil {
+			// Either the path does not exist on origin/main at all (a
+			// genuinely new file, never committed anywhere), or git could
+			// not read it for some other reason. Both are "cannot prove
+			// this is superseded," which is the same as unique: refuse,
+			// and name the exact path so a reader never has to go read
+			// this code to find out why.
+			return DirtyStateUnique, path, nil
+		}
+		current, rerr := os.ReadFile(filepath.Join(w.Path, path))
+		if rerr != nil {
+			// A path git status just reported no longer reads back --
+			// racing with something else, or a path git reports specially
+			// (a submodule, a symlink status quirk). Cannot prove
+			// superseded; name it and refuse.
+			return DirtyStateUnique, path, nil
+		}
+		if !bytes.Equal(committed, current) {
+			return DirtyStateUnique, path, nil
+		}
+	}
+	return DirtyStateSuperseded, "", nil
+}
+
 // Head returns the worktree's current HEAD commit -- the estate's own,
 // direct git observation of what the dispatched turn's worktree actually
 // points at, read after the turn's subprocess has exited. This is NOT
@@ -683,14 +816,28 @@ func (w *Worktree) Remove() error {
 			return fmt.Errorf("isolate: %s has commits on %s that nothing else references; refusing to remove it -- collect them first", w.Path, w.Branch)
 		}
 	}
-	dirty, err := w.Dirty()
+	state, differing, err := w.DirtyStatus()
 	if err != nil {
 		return fmt.Errorf("isolate: cannot tell whether %s holds uncommitted work, so refusing to remove it: %w", w.Path, err)
 	}
-	if dirty {
-		return fmt.Errorf("isolate: %s holds uncommitted work; refusing to remove it -- collect or commit it first", w.Path)
+	// DirtyStateClean and DirtyStateSuperseded are both safe: origin/main
+	// already durably holds everything this worktree has, so removing it
+	// destroys nothing (agent-estate#1247). Only DirtyStateUnique refuses.
+	if state == DirtyStateUnique {
+		return fmt.Errorf("isolate: %s holds uncommitted work not present, byte-for-byte, in origin/main (%s); refusing to remove it -- collect or commit it first", w.Path, differing)
 	}
-	if _, err := git(w.root, "worktree", "remove", w.Path); err != nil {
+	removeArgs := []string{"worktree", "remove", w.Path}
+	if state == DirtyStateSuperseded {
+		// git itself refuses "contains modified or untracked files" on
+		// anything DirtyStatus reported dirty, regardless of why -- it has
+		// no notion of "already durable elsewhere." --force here is not
+		// overriding OUR judgement, it is carrying out the judgement
+		// DirtyStatus already made and proved byte-for-byte above; git's own
+		// refusal would otherwise reintroduce the exact deadlock this fix
+		// removes (agent-estate#1247).
+		removeArgs = append(removeArgs, "--force")
+	}
+	if _, err := git(w.root, removeArgs...); err != nil {
 		return err
 	}
 	// A CreateOnBranch worktree never had a local branch of its own -- it

@@ -273,6 +273,57 @@ func TestReportModeRemovesNothing(t *testing.T) {
 	}
 }
 
+// agent-estate#1247: the deadlock. Before this fix, attempted was
+// incremented for every eligible record OFFERED to Remove, refused or not --
+// so records that sort first and are refused every run consumed the whole
+// bound on refusals alone, and nothing after them was ever tried. A refusal
+// costs a local git status plus one bounded fetch/compare, not the network
+// round trip the bound exists to cap; it must not count against it.
+func TestARefusalDoesNotConsumeTheBound(t *testing.T) {
+	c, removed := cfg(alive)
+	c.Max = 2
+	// The first three are refused every run (e.g. genuinely unique
+	// uncommitted work) -- before the fix, three refusals alone would
+	// exhaust a bound of 2 and "later" would never even be offered.
+	c.Remove = func(r ledger.Record) error {
+		if strings.HasPrefix(r.ID, "refused") {
+			return errors.New("isolate: holds uncommitted work not on origin/main (unique.txt); refusing to remove it")
+		}
+		*removed = append(*removed, r.ID)
+		return nil
+	}
+	records := []ledger.Record{
+		rec("refused-1", ledger.Complete),
+		rec("refused-2", ledger.Complete),
+		rec("refused-3", ledger.Complete),
+		rec("later-1", ledger.Complete),
+		rec("later-2", ledger.Complete),
+	}
+	results := Run(records, c)
+
+	for _, id := range []string{"refused-1", "refused-2", "refused-3"} {
+		r := find(t, results, id)
+		if !r.Eligible {
+			t.Fatalf("%s was not even offered", id)
+		}
+		if r.Removed {
+			t.Fatalf("%s was reported removed despite Remove refusing it", id)
+		}
+	}
+	// Both later records must have been OFFERED and REMOVED -- the bound of
+	// 2 applies to the 2 real removals this run made, not to the 3 refusals
+	// that came before them.
+	for _, id := range []string{"later-1", "later-2"} {
+		r := find(t, results, id)
+		if !r.Removed {
+			t.Fatalf("%s was starved by refusals consuming the bound: %s", id, r.Reason)
+		}
+	}
+	if len(*removed) != 2 {
+		t.Fatalf("expected exactly 2 real removals (the bound), got %v", *removed)
+	}
+}
+
 // Every record produces exactly one result, swept or not. A sweep that
 // silently omits what it decided against is an instrument that cannot see
 // the thing it is supposed to report.
