@@ -781,15 +781,39 @@ func (w *Worktree) remoteHasCommit(commit, branch string) (bool, error) {
 // All these refusals are the same rule: a dispatch's uncollected output
 // looks exactly like an empty worktree from outside, and deleting it is
 // unrecoverable while reporting it is not.
-func (w *Worktree) Remove() error {
+// CheckRemovable performs every read-only judgement Remove applies before
+// mutating anything -- the committed-and-collected check (Committed,
+// remoteHasCommit, the Landed seam) followed by the uncommitted-content
+// check (DirtyStatus) -- and returns exactly the refusal Remove would
+// produce, or nil with the DirtyState Remove would act on when removal is
+// judged safe.
+//
+// THIS IS THE ONE PLACE THIS JUDGEMENT LIVES (agent-estate#1247's own
+// follow-up, agent-estate#1278). Remove calls it below, then mutates only
+// if it returns nil. A caller that wants to know what Remove WOULD do
+// without doing it -- internal/sweep's report mode, wired through
+// main.go -- calls this directly instead of re-deriving the rule: two
+// callers of one judgement cannot drift out of agreement with each other;
+// two parallel implementations of the same rule eventually will, which is
+// exactly the defect this function exists to close (report mode used to
+// consult DirtyStatus alone and never this committed-and-collected check,
+// so a clean-but-unpushed worktree was reported "would remove" and then
+// refused by apply -- the same disagreement class, reached through the
+// other refusal path).
+//
+// Every call this makes is read-only: git rev-parse, git fetch (into
+// FETCH_HEAD, never a local ref this worktree tracks), git merge-base
+// --is-ancestor, git show, os.ReadFile, and the Landed seam's own `gh api`
+// call. Nothing here writes to the worktree, the branch, or origin.
+func (w *Worktree) CheckRemovable() (DirtyState, error) {
 	committed, cerr := w.Committed()
 	if cerr != nil {
-		return fmt.Errorf("isolate: cannot tell whether %s holds committed work, so refusing to remove it: %w", w.Path, cerr)
+		return DirtyStateUnique, fmt.Errorf("isolate: cannot tell whether %s holds committed work, so refusing to remove it: %w", w.Path, cerr)
 	}
 	if committed {
 		head, herr := w.Head()
 		if herr != nil {
-			return fmt.Errorf("isolate: cannot read %s's HEAD to check whether its commits are referenced elsewhere, so refusing to remove it: %w", w.Path, herr)
+			return DirtyStateUnique, fmt.Errorf("isolate: cannot read %s's HEAD to check whether its commits are referenced elsewhere, so refusing to remove it: %w", w.Path, herr)
 		}
 		collected, rerr := w.remoteHasCommit(head, w.Branch)
 		if !collected {
@@ -810,21 +834,29 @@ func (w *Worktree) Remove() error {
 			}
 		}
 		if rerr != nil {
-			return fmt.Errorf("isolate: cannot confirm %s's commits on %s are referenced elsewhere; refusing to remove it -- collect them first: %w", w.Path, w.Branch, rerr)
+			return DirtyStateUnique, fmt.Errorf("isolate: cannot confirm %s's commits on %s are referenced elsewhere; refusing to remove it -- collect them first: %w", w.Path, w.Branch, rerr)
 		}
 		if !collected {
-			return fmt.Errorf("isolate: %s has commits on %s that nothing else references; refusing to remove it -- collect them first", w.Path, w.Branch)
+			return DirtyStateUnique, fmt.Errorf("isolate: %s has commits on %s that nothing else references; refusing to remove it -- collect them first", w.Path, w.Branch)
 		}
 	}
 	state, differing, err := w.DirtyStatus()
 	if err != nil {
-		return fmt.Errorf("isolate: cannot tell whether %s holds uncommitted work, so refusing to remove it: %w", w.Path, err)
+		return DirtyStateUnique, fmt.Errorf("isolate: cannot tell whether %s holds uncommitted work, so refusing to remove it: %w", w.Path, err)
 	}
 	// DirtyStateClean and DirtyStateSuperseded are both safe: origin/main
 	// already durably holds everything this worktree has, so removing it
 	// destroys nothing (agent-estate#1247). Only DirtyStateUnique refuses.
 	if state == DirtyStateUnique {
-		return fmt.Errorf("isolate: %s holds uncommitted work not present, byte-for-byte, in origin/main (%s); refusing to remove it -- collect or commit it first", w.Path, differing)
+		return state, fmt.Errorf("isolate: %s holds uncommitted work not present, byte-for-byte, in origin/main (%s); refusing to remove it -- collect or commit it first", w.Path, differing)
+	}
+	return state, nil
+}
+
+func (w *Worktree) Remove() error {
+	state, err := w.CheckRemovable()
+	if err != nil {
+		return err
 	}
 	removeArgs := []string{"worktree", "remove", w.Path}
 	if state == DirtyStateSuperseded {
@@ -832,9 +864,9 @@ func (w *Worktree) Remove() error {
 		// anything DirtyStatus reported dirty, regardless of why -- it has
 		// no notion of "already durable elsewhere." --force here is not
 		// overriding OUR judgement, it is carrying out the judgement
-		// DirtyStatus already made and proved byte-for-byte above; git's own
-		// refusal would otherwise reintroduce the exact deadlock this fix
-		// removes (agent-estate#1247).
+		// CheckRemovable already made and proved byte-for-byte above; git's
+		// own refusal would otherwise reintroduce the exact deadlock this
+		// fix removes (agent-estate#1247).
 		removeArgs = append(removeArgs, "--force")
 	}
 	if _, err := git(w.root, removeArgs...); err != nil {
