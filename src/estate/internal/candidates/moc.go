@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -14,7 +15,21 @@ import (
 const mocStart = "<!-- generated-links:start -->"
 const mocEnd = "<!-- generated-links:end -->"
 
-// walkNotes lists every *.md file under "01 - Notes", at any depth --
+// noteFilename is the exact 12-digit canonical note ID shape -- matched
+// verbatim from internal/knowledge/vault.go (agent-estate#1272's proven
+// shape), not approximated. A bare ".md" suffix check (this file's own
+// first pass at the recursive fix below) admits ANY markdown file under
+// "01 - Notes", including a per-subdir index.md or README that is not a
+// note at all; vault.go already excludes those correctly. Nothing of that
+// shape exists under "01 - Notes" today (checked directly), so the
+// looser check was latent, not live -- but it traded the old blind spot
+// (missing every real note) for a false-positive one (treating a future
+// non-note file as one), which is the exact failure class this match is
+// meant to close by mirroring #1272's own filter rather than
+// reconstructing an equivalent one.
+var noteFilename = regexp.MustCompile(`^\d{12}\.md$`)
+
+// walkNotes lists every canonical note under "01 - Notes", at any depth --
 // notes live directly there (the layout MOCProposals/RefreshMOCs were
 // originally tested against) AND nested under earned letter subdirs like
 // "01p - Parameters"/"01f - Facts" (agent-estate#942's note-subdirs
@@ -25,9 +40,11 @@ const mocEnd = "<!-- generated-links:end -->"
 // refresh, no matter how dense a tag became. This was found running C4
 // (Push 4.5) against the vault C2 just tagged: `moc-propose` returned
 // `null` with tag counts well past the >=8 threshold. Recursive by
-// WalkDir, same traversal internal/knowledge/vault.go already uses for
-// the identical directory, so this file no longer disagrees with the
-// package that reads the same tree correctly.
+// WalkDir and filtered by noteFilename, both taken directly from
+// internal/knowledge/vault.go's own traversal of the identical directory
+// -- symlinks excluded too, same as that package -- so this file no
+// longer disagrees with, or merely approximates, the package that reads
+// the same tree correctly.
 func walkNotes(vault string) ([]string, error) {
 	var notes []string
 	root := filepath.Join(vault, "01 - Notes")
@@ -35,7 +52,7 @@ func walkNotes(vault string) ([]string, error) {
 		if err != nil {
 			return err
 		}
-		if !d.IsDir() && strings.HasSuffix(d.Name(), ".md") {
+		if !d.IsDir() && d.Type()&os.ModeSymlink == 0 && noteFilename.MatchString(d.Name()) {
 			notes = append(notes, p)
 		}
 		return nil

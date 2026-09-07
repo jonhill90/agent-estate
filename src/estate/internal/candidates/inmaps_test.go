@@ -235,6 +235,58 @@ func TestMOCProposalsAndRefreshSeeNestedNoteSubdirs(t *testing.T) {
 	}
 }
 
+// TestWalkNotesExcludesNonNoteMarkdownFiles is the negative case
+// TestMOCProposalsAndRefreshSeeNestedNoteSubdirs never covered: that test
+// only proves a real, canonically-named nested note is INCLUDED; nothing
+// proved a non-note .md file is EXCLUDED. walkNotes's first recursive
+// pass (a bare ".md" suffix check) admitted ANY markdown file under
+// "01 - Notes" -- a per-subdir index.md or README, say -- while
+// internal/knowledge/vault.go's own traversal of the identical directory
+// has always filtered to the exact 12-digit canonical shape
+// (agent-estate#1272, `^\d{12}\.md$`). Nothing of that non-conforming
+// shape exists under "01 - Notes" today, so the looser check was latent,
+// not live -- but it traded the old blind spot (missing every note) for a
+// false-positive one (treating a future non-note file as one). This test
+// puts a "README.md" and an "index.md" beside 8 real, canonically-named
+// notes in the SAME nested subdir and asserts neither non-note file is
+// ever counted toward the threshold, walked, or linked.
+func TestWalkNotesExcludesNonNoteMarkdownFiles(t *testing.T) {
+	v := t.TempDir()
+	for _, d := range []string{"01 - Notes/01f - Facts", "99 - Meta"} {
+		os.MkdirAll(filepath.Join(v, d), 0700)
+	}
+	os.WriteFile(filepath.Join(v, "99 - Meta/tags.md"), []byte("`kind/decision`"), 0600)
+	os.WriteFile(filepath.Join(v, "01 - Notes/01f - Facts/README.md"), []byte("---\nstatus: stable\ntitle: Not A Note\ntags: [\"kind/decision\"]\n---\n"), 0600)
+	os.WriteFile(filepath.Join(v, "01 - Notes/01f - Facts/index.md"), []byte("---\nstatus: stable\ntitle: Also Not A Note\ntags: [\"kind/decision\"]\n---\n"), 0600)
+	for n := 1; n <= 8; n++ {
+		name := fmt.Sprintf("20260907%04d.md", n)
+		os.WriteFile(filepath.Join(v, "01 - Notes/01f - Facts", name), []byte("---\nstatus: stable\ntitle: Real Note\ntags: [\"kind/decision\"]\n---\n"), 0600)
+	}
+	notes, e := walkNotes(v)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if len(notes) != 8 {
+		t.Fatalf("walkNotes returned %d entries, want exactly the 8 canonically-named notes (README.md/index.md must be excluded): %v", len(notes), notes)
+	}
+	for _, p := range notes {
+		if filepath.Base(p) == "README.md" || filepath.Base(p) == "index.md" {
+			t.Fatalf("walkNotes included a non-note file: %s", p)
+		}
+	}
+	got, e := MOCProposals(v, true)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if len(got) != 1 {
+		t.Fatalf("8 real notes past the threshold produced %d proposals, want 1: %v", len(got), got)
+	}
+	draft, _ := os.ReadFile(got[0])
+	if strings.Contains(string(draft), "README.md") || strings.Contains(string(draft), "index.md") {
+		t.Fatalf("generated links included a non-note file: %s", draft)
+	}
+}
+
 // TestMOCProposalsSkipsUngovernedTagsRatherThanAborting is the regression
 // for a second real defect found in the same C4 run: every real vault note
 // carries structural/time tags (note, MM-YYYY, standing-rule) that are
