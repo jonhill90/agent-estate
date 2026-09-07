@@ -433,19 +433,28 @@ func sweepConfig(repoRoot string, landed isolate.Landed, apply bool) sweep.Confi
 			return err == nil
 		},
 		Max: maxSweepPerRun,
-		// Wired in both modes: apply mode never calls it (Remove already
-		// performs the identical check itself before mutating anything),
-		// but report mode needs it to say "would remove"/"would keep" in
-		// agreement with what apply mode would actually do
-		// (agent-estate#1247's follow-up -- report mode used to judge on
-		// ledger state alone). Read-only: Reattach and DirtyStatus never
-		// write anything.
-		DirtyCheck: func(rec ledger.Record) (isolate.DirtyState, string, error) {
+		// Wired in both modes: apply mode never calls it through this seam
+		// (Remove already performs CheckRemovable itself, on the same
+		// corpse, before mutating anything), but report mode needs it to
+		// say "would remove"/"would keep" in agreement with what apply
+		// mode would actually do (agent-estate#1247's follow-up, two
+		// rounds of it -- report mode used to judge on ledger state
+		// alone; a first fix pass consulted DirtyStatus only, missing the
+		// committed-but-not-collected refusal Remove also applies).
+		// corpse.Landed is set from the SAME landed value apply mode
+		// passes to Remove below, not left nil, so report mode's
+		// judgement runs on the identical inputs Remove's would -- one
+		// judgement, two callers, not two judgements that can drift.
+		// Read-only: Reattach, CheckRemovable, and everything it calls
+		// (Committed, remoteHasCommit, Landed, DirtyStatus) never write
+		// anything.
+		RemovalCheck: func(rec ledger.Record) (isolate.DirtyState, error) {
 			corpse, rerr := isolate.Reattach(repoRoot, rec.Worktree, rec.Branch, rec.Base)
 			if rerr != nil {
-				return isolate.DirtyStateUnique, "", rerr
+				return isolate.DirtyStateUnique, rerr
 			}
-			return corpse.DirtyStatus()
+			corpse.Landed = landed
+			return corpse.CheckRemovable()
 		},
 	}
 	if !apply {
@@ -471,16 +480,24 @@ func sweepWorktrees(l *ledger.Ledger, repoRoot string, apply bool) {
 		return
 	}
 	// The forge is asked only if the branch evidence has already failed --
-	// see internal/isolate.Remove. A slug we cannot read leaves the seam
-	// nil, which is exactly the pre-agent-estate#1000 behaviour: fewer
-	// removals, never an unsafe one.
+	// see internal/isolate.Committed/remoteHasCommit. A slug we cannot
+	// read leaves the seam nil, which is exactly the pre-agent-estate#1000
+	// behaviour: fewer removals, never an unsafe one.
+	//
+	// Computed regardless of apply, not gated behind it: report mode's
+	// RemovalCheck (sweepConfig, above) now calls the same
+	// CheckRemovable Remove calls, and needs the same Landed seam wired
+	// in to reach an identical judgement on a squash-merged branch --
+	// otherwise report mode would under-report what Landed alone can
+	// confirm, disagreeing with apply through the one input it withheld.
+	// This is one extra read (a gh api call) on every report-mode sweep;
+	// accepted deliberately so the two modes stay judged from the same
+	// inputs, not merely the same code path.
 	var landed isolate.Landed
-	if apply {
-		if slug, serr := repoSlug(); serr == nil {
-			landed = isolate.GHLanded(slug)
-		} else {
-			fmt.Fprintln(os.Stderr, "estate: could not read this repository's name, so a squash-merged branch cannot be recognised this run:", serr)
-		}
+	if slug, serr := repoSlug(); serr == nil {
+		landed = isolate.GHLanded(slug)
+	} else {
+		fmt.Fprintln(os.Stderr, "estate: could not read this repository's name, so a squash-merged branch cannot be recognised this run:", serr)
 	}
 	cfg := sweepConfig(repoRoot, landed, apply)
 	// A boot time that cannot be read narrows what can be judged a corpse;

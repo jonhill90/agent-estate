@@ -88,31 +88,37 @@ type Config struct {
 	Exists func(path string) bool
 	// Remove tears an eligible record's worktree down. nil is report-only.
 	Remove Remover
-	// DirtyCheck reports one worktree's uncommitted-content classification
-	// against origin/main -- the exact read-only judgement
-	// isolate.Worktree.DirtyStatus performs, and the same one
-	// isolate.Worktree.Remove consults before mutating anything. The real
-	// implementation (main.go) is isolate.Reattach followed by
-	// .DirtyStatus(); tests supply a fake, same as Remove.
+	// RemovalCheck reports whether one worktree would be safe to remove --
+	// the exact read-only judgement isolate.Worktree.CheckRemovable
+	// performs (committed-and-collected, THEN uncommitted-content), and
+	// the same one isolate.Worktree.Remove itself calls before mutating
+	// anything. The real implementation (main.go) is isolate.Reattach
+	// followed by .CheckRemovable(); tests supply a fake, same as Remove.
 	//
 	// WHY REPORT MODE NEEDS ITS OWN SEAM FOR THIS (agent-estate#1247's
-	// follow-up): before this field existed, report mode (Remove == nil)
-	// judged eligibility purely from ledger state and announced "would
-	// remove" the moment a record's turn reached a terminal state -- it
-	// never asked whether the worktree actually held content only it has.
-	// Apply mode's Remove call DOES ask, via this identical check, and
-	// correctly refuses seven-for-seven on this host the day this field
-	// was added. The two modes disagreeing is the same class of defect
-	// #1247 itself was: a report that does not reflect what the action
-	// will do. Wiring this seam is what makes report mode consult the
-	// same judgement apply mode already trusted, without report mode
-	// gaining any power to mutate anything -- DirtyCheck only ever reads.
+	// follow-up, two rounds of it): before this field existed at all,
+	// report mode (Remove == nil) judged eligibility purely from ledger
+	// state and announced "would remove" the moment a record's turn
+	// reached a terminal state -- it never asked whether the worktree
+	// actually held content only it has. A first fix pass wired this
+	// field to DirtyStatus alone, closing the uncommitted-content path --
+	// but Remove ALSO refuses via Committed + remoteHasCommit + the
+	// Landed seam (a worktree with committed-but-unpushed work), and that
+	// path stayed unconsulted: a clean-but-unpushed worktree was still
+	// reported "would remove" and then refused by apply, the identical
+	// disagreement reached through the other refusal. CheckRemovable is
+	// the ONE place both checks now live; report mode calling it through
+	// this seam and apply mode's Remove calling it directly means two
+	// callers of one judgement, which cannot drift out of agreement with
+	// each other -- two parallel implementations of the same rule
+	// eventually will. RemovalCheck only ever reads; it never gives
+	// report mode any power to mutate anything.
 	//
 	// nil disables the check: every eligible record reports "would
 	// remove" exactly as it did before this field existed. This is the
 	// zero value, so any caller (a test exercising something else, an
 	// older wiring) that does not set it is unaffected.
-	DirtyCheck func(rec ledger.Record) (state isolate.DirtyState, differing string, err error)
+	RemovalCheck func(rec ledger.Record) (state isolate.DirtyState, err error)
 	// Max bounds how many worktrees one run will actually try to remove.
 	// Removal of committed work costs a live fetch and a forge round trip
 	// each, and this runs on the path to a dispatch; an unbounded sweep
@@ -227,43 +233,48 @@ func judge(rec ledger.Record, cfg Config) Result {
 
 // reportJudged finishes report mode's judgement for one eligible record:
 // r already carries judge's ledger-state reason and Eligible=true. This
-// consults cfg.DirtyCheck -- the SAME read-only judgement
-// isolate.Worktree.Remove would apply before mutating anything -- so
-// report mode's "would remove" / "would keep" agrees with what apply mode
-// would actually do, line for line (agent-estate#1247's follow-up: report
-// mode used to judge on ledger state alone and never asked this).
+// consults cfg.RemovalCheck -- the SAME read-only judgement
+// isolate.Worktree.CheckRemovable performs, and the one Remove itself calls
+// before mutating anything -- so report mode's "would remove" / "would
+// keep" agrees with what apply mode would actually do, line for line
+// (agent-estate#1247's follow-up, two rounds of it: report mode used to
+// judge on ledger state alone; a first fix pass consulted DirtyStatus but
+// not Committed/remoteHasCommit/Landed, so a clean-but-unpushed worktree
+// still disagreed with apply through that other refusal path).
 //
 // Eligible stays true either way, matching apply mode's own convention
 // (Result.Eligible says nothing about whether removal was judged safe --
 // see that field's doc comment); only Reason, and never Removed, changes
-// here. This never mutates anything -- DirtyCheck only ever reads.
+// here. This never mutates anything -- RemovalCheck only ever reads.
 func reportJudged(r Result, rec ledger.Record, cfg Config) Result {
-	if cfg.DirtyCheck == nil {
+	if cfg.RemovalCheck == nil {
 		// Old behavior, unweakened: a caller that has not wired the check
 		// (an older wiring, or a test exercising something else) reports
 		// exactly as report mode always did before this field existed.
 		r.Reason = "would remove: " + r.Reason + " -- report only, nothing was removed"
 		return r
 	}
-	state, differing, err := cfg.DirtyCheck(rec)
+	state, err := cfg.RemovalCheck(rec)
 	if err != nil {
-		// Remove itself fails closed on this same error (see
-		// isolate.Worktree.Remove: "cannot tell whether ... holds
-		// uncommitted work, so refusing to remove it"). Report mode must
-		// agree, not optimistically call it removable.
-		r.Reason = fmt.Sprintf("would keep: %s -- cannot tell whether it holds uncommitted work, so refusing to remove it: %s", r.Reason, err)
+		// CheckRemovable's error text already names the specific refusal
+		// -- it has several distinct shapes now (uncommitted-unique
+		// content, committed-but-not-on-origin-and-not-landed, cannot
+		// even tell) -- so it is reported verbatim rather than
+		// reconstructed here, where reconstructing it would drift out of
+		// sync with whichever shape actually fired. Remove itself fails
+		// closed on this exact error; report mode must agree, not
+		// optimistically call it removable.
+		r.Reason = fmt.Sprintf("would keep: %s -- %s", r.Reason, err)
 		return r
 	}
-	if state == isolate.DirtyStateUnique {
-		r.Reason = fmt.Sprintf("would keep: %s -- holds uncommitted work not present, byte-for-byte, in origin/main (%s); refusing to remove it -- collect or commit it first", r.Reason, differing)
-		return r
-	}
-	// DirtyStateClean and DirtyStateSuperseded: Remove would proceed (the
-	// latter with --force, since git itself refuses "modified or
-	// untracked files" without regard for DirtyStatus's own byte-for-byte
-	// proof -- see Remove's comment). Named explicitly, not collapsed, so
-	// the three typed states stay distinguishable in "would remove"
-	// output too, not only in refusals.
+	// DirtyStateClean and DirtyStateSuperseded: CheckRemovable found
+	// nothing that refuses removal (committed-and-collected, or clean --
+	// see its doc comment), so Remove would proceed (the latter with
+	// --force, since git itself refuses "modified or untracked files"
+	// without regard for DirtyStatus's own byte-for-byte proof -- see
+	// Remove's comment). Named explicitly, not collapsed, so the typed
+	// states stay distinguishable in "would remove" output too, not only
+	// in refusals.
 	r.Reason = fmt.Sprintf("would remove: %s (%s) -- report only, nothing was removed", r.Reason, state)
 	return r
 }

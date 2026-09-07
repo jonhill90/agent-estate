@@ -181,6 +181,125 @@ func TestSweepRemovesWhatLandedAndKeepsWhatDidNot(t *testing.T) {
 	}
 }
 
+// TestSweepReportModeAgreesWithApplyOnTheSameThreeWorktrees is the fix
+// pass's acceptance criterion 5 as a real, non-scratch test: the same three
+// worktree shapes as TestSweepRemovesWhatLandedAndKeepsWhatDidNot -- landed
+// (collected via the forge), stranded (committed but nothing has collected
+// it), dirty (uncommitted output) -- run through sweepConfig(..., apply:
+// false) against REAL git and a REAL ledger. Report mode must say
+// would-remove for exactly landed-turn and would-keep for the other two,
+// AND must not touch any of the three directories -- proving report mode's
+// RemovalCheck (real Reattach + real CheckRemovable) reaches the identical
+// verdict TestSweepRemovesWhatLandedAndKeepsWhatDidNot proves apply mode's
+// Remove reaches, without ever mutating anything.
+func TestSweepReportModeAgreesWithApplyOnTheSameThreeWorktrees(t *testing.T) {
+	root := seedRepo(t)
+
+	landedWT, err := isolate.Create(root, "landed-turn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(landedWT.Path, "shipped.txt"), []byte("merged"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(t, landedWT.Path, "add", "-A")
+	git(t, landedWT.Path, "commit", "-qm", "work that landed")
+	git(t, landedWT.Path, "push", "-q", "origin", "HEAD:"+landedWT.Branch)
+	git(t, landedWT.Path, "push", "-q", "origin", "--delete", landedWT.Branch)
+	landedHead, err := landedWT.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	strandedWT, err := isolate.Create(root, "stranded-turn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(strandedWT.Path, "pushed.txt"), []byte("collected"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(t, strandedWT.Path, "add", "-A")
+	git(t, strandedWT.Path, "commit", "-qm", "work that was pushed")
+	stranded := filepath.Join(strandedWT.Path, "never-collected.txt")
+	if err := os.WriteFile(stranded, []byte("the only copy"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(t, strandedWT.Path, "add", "-A")
+	git(t, strandedWT.Path, "commit", "-qm", "work nobody collected")
+
+	dirtyWT, err := isolate.Create(root, "dirty-turn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	uncommitted := filepath.Join(dirtyWT.Path, "half-written.txt")
+	if err := os.WriteFile(uncommitted, []byte("mid-turn output"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	l, err := ledger.Open(filepath.Join(t.TempDir(), "ledger.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, w := range []*isolate.Worktree{landedWT, strandedWT, dirtyWT} {
+		id := filepath.Base(w.Path)
+		if err := l.Append(ledger.Record{
+			ID: id, Issue: "1000", Lane: id, State: ledger.Complete,
+			Worktree: w.Path, Branch: w.Branch, Base: w.Base,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	records, err := l.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	asked := map[string]bool{}
+	forge := func(commit string) (bool, error) {
+		asked[commit] = true
+		return commit == landedHead, nil
+	}
+
+	// apply: false -- report mode. cfg.Remove stays nil; RemovalCheck is
+	// the only seam sweep.Run consults.
+	cfg := sweepConfig(root, forge, false)
+	cfg.Probe = func(int) (reclaim.ProcessInfo, error) {
+		return reclaim.ProcessInfo{}, errors.New("no process in this test")
+	}
+	results := sweep.Run(records, cfg)
+
+	byID := map[string]sweep.Result{}
+	for _, r := range results {
+		byID[r.Record.ID] = r
+	}
+
+	if r := byID["landed-turn"]; !strings.HasPrefix(r.Reason, "would remove:") {
+		t.Fatalf("landed-turn: expected would-remove, got %q", r.Reason)
+	}
+	if !asked[landedHead] {
+		t.Fatal("the forge was never consulted, so report mode is not exercising the same Landed input apply mode uses")
+	}
+	if r := byID["stranded-turn"]; !strings.HasPrefix(r.Reason, "would keep:") {
+		t.Fatalf("stranded-turn: expected would-keep, got %q", r.Reason)
+	}
+	if r := byID["dirty-turn"]; !strings.HasPrefix(r.Reason, "would keep:") {
+		t.Fatalf("dirty-turn: expected would-keep, got %q", r.Reason)
+	}
+
+	// Report only: nothing was removed, and every directory is still
+	// there -- report mode's RemovalCheck must never mutate anything.
+	for _, r := range results {
+		if r.Removed {
+			t.Fatalf("%s was reported removed in report mode", r.Record.ID)
+		}
+	}
+	for _, p := range []string{landedWT.Path, strandedWT.Path, dirtyWT.Path} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("report mode touched %s: %v", p, err)
+		}
+	}
+}
+
 // The same three worktrees, all recorded `unknown` instead of `complete`.
 // Nothing may be touched -- including the one whose work demonstrably
 // landed, which is the case that would otherwise look most safe to remove.
