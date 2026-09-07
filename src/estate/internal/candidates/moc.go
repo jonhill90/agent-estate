@@ -69,16 +69,31 @@ func walkNotes(vault string) ([]string, error) {
 
 // MOCProposals emits drafts only; a hub must already link the whole cluster to
 // suppress a proposal. Refresh changes only a delimited generated link section.
-func MOCProposals(vault string, apply bool) ([]string, error) {
+//
+// skipped names every tag that cleared the >=8 threshold but was NOT
+// proposed because it is not in 99 - Meta/tags.md's governed vocabulary
+// (agent-estate#1282 review, item 2) -- one entry per tag, "<tag>
+// (<N> notes)". Before this field existed, that skip happened at a bare
+// `continue` with the tag, the reason, and the count all dropped: an
+// operator running moc-propose got N proposals with zero signal that
+// dozens of equally-dense tag groups had been silently discarded, which
+// reads identically to "nothing else was dense enough" -- the same
+// silent-absence failure this repo's own conventions exist to prevent
+// (corpus.Grounding's "N additional row(s) excluded as...", sweep's
+// Result always populating Reason even on refusal, invariant 6's "unknown
+// means not offered, never broken"). This does not solve which tags
+// SHOULD be governed -- that judgement call is explicitly out of scope
+// here -- it only makes today's skip visible instead of silent.
+func MOCProposals(vault string, apply bool) (proposed []string, skipped []string, err error) {
 	groups := map[string][]string{}
 	notes, e := walkNotes(vault)
 	if e != nil {
-		return nil, e
+		return nil, nil, e
 	}
 	for _, p := range notes {
 		b, e := os.ReadFile(p)
 		if e != nil {
-			return nil, e
+			return nil, nil, e
 		}
 		if field(string(b), "status") != "stable" {
 			continue
@@ -96,7 +111,6 @@ func MOCProposals(vault string, apply bool) ([]string, error) {
 		}
 	}
 	hubs, _ := filepath.Glob(filepath.Join(vault, "02 - MOCs", "*.md"))
-	var proposed []string
 	changes := map[string][]byte{}
 	tags := []string{}
 	for tag := range groups {
@@ -112,7 +126,7 @@ func MOCProposals(vault string, apply bool) ([]string, error) {
 		for _, hub := range hubs {
 			b, e := os.ReadFile(hub)
 			if e != nil {
-				return nil, e
+				return nil, nil, e
 			}
 			all := field(string(b), "status") == "stable"
 			for _, p := range paths {
@@ -148,7 +162,8 @@ func MOCProposals(vault string, apply bool) ([]string, error) {
 			// every other validateINMAPS failure this call can actually
 			// produce (bad type, missing title/description/learning) is
 			// impossible here since MOCProposals constructs every field
-			// of p itself except Tags.
+			// of p itself except Tags. Recorded in skipped, not dropped.
+			skipped = append(skipped, fmt.Sprintf("%s (%d notes)", tag, len(paths)))
 			continue
 		}
 		path := filepath.Join(vault, "00 - Inbox", "moc-"+strings.ReplaceAll(tag, "/", "-")+".md")
@@ -162,14 +177,14 @@ func MOCProposals(vault string, apply bool) ([]string, error) {
 	if apply && len(changes) > 0 {
 		unlock, e := lockFile(filepath.Join(vault, "99 - Meta/.candidate-memory.lock"))
 		if e != nil {
-			return nil, e
+			return nil, nil, e
 		}
 		defer unlock()
 		if e = writeSet(vault, changes); e != nil {
-			return nil, e
+			return nil, nil, e
 		}
 	}
-	return proposed, nil
+	return proposed, skipped, nil
 }
 // mocLinks builds the generated-links section, one wikilink per note, from
 // the SAME MOC-relative root every hub actually sits under: "00 - Inbox"

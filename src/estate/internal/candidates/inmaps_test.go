@@ -152,20 +152,20 @@ func TestINMAPSGuardsAndMOC(t *testing.T) {
 		name := fmt.Sprintf("20260906%04d.md", n)
 		os.WriteFile(filepath.Join(v, "01 - Notes", name), []byte("---\nstatus: stable\ntitle: Example\ntags: [\"kind/decision\"]\n---\n"), 0600)
 		if n == 7 {
-			got, e := MOCProposals(v, true)
+			got, _, e := MOCProposals(v, true)
 			if e != nil || len(got) != 0 {
 				t.Fatalf("seven: %v %v", got, e)
 			}
 		}
 	}
-	got, e := MOCProposals(v, true)
+	got, _, e := MOCProposals(v, true)
 	if e != nil || len(got) != 1 {
 		t.Fatalf("eight: %v %v", got, e)
 	}
 	if e = ReviewMOC(v, filepath.Base(got[0]), "process:test", true, true); e != nil {
 		t.Fatal(e)
 	}
-	got, e = MOCProposals(v, true)
+	got, _, e = MOCProposals(v, true)
 	if e != nil || len(got) != 0 {
 		t.Fatalf("hub suppression: %v %v", got, e)
 	}
@@ -205,7 +205,7 @@ func TestMOCProposalsAndRefreshSeeNestedNoteSubdirs(t *testing.T) {
 		name := fmt.Sprintf("20260907%04d.md", n)
 		os.WriteFile(filepath.Join(v, "01 - Notes/01f - Facts", name), []byte("---\nstatus: stable\ntitle: Nested Example\ntags: [\"kind/decision\"]\n---\n"), 0600)
 	}
-	got, e := MOCProposals(v, true)
+	got, _, e := MOCProposals(v, true)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -274,7 +274,7 @@ func TestWalkNotesExcludesNonNoteMarkdownFiles(t *testing.T) {
 			t.Fatalf("walkNotes included a non-note file: %s", p)
 		}
 	}
-	got, e := MOCProposals(v, true)
+	got, _, e := MOCProposals(v, true)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -299,6 +299,13 @@ func TestWalkNotesExcludesNonNoteMarkdownFiles(t *testing.T) {
 // reached. Measured directly against the live vault: `moc-propose` failed
 // with "tag outside vocabulary: 07-2026" and produced zero proposals for
 // tags like azure/deploy/estate that were all well past 8.
+//
+// Also covers agent-estate#1282's second review finding: the skip must be
+// VISIBLE, not silent. Before that fix, the ungoverned tag, its reason,
+// and its note count were all dropped at the `continue` -- an operator
+// reading N proposals had zero signal that dozens of equally-dense tag
+// groups were discarded, indistinguishable from "nothing else was dense
+// enough." skipped must name the tag and its note count.
 func TestMOCProposalsSkipsUngovernedTagsRatherThanAborting(t *testing.T) {
 	v := t.TempDir()
 	os.MkdirAll(filepath.Join(v, "01 - Notes"), 0700)
@@ -312,12 +319,21 @@ func TestMOCProposalsSkipsUngovernedTagsRatherThanAborting(t *testing.T) {
 		// never be reached at all.
 		os.WriteFile(filepath.Join(v, "01 - Notes", name), []byte("---\nstatus: stable\ntitle: Example\ntags: [\"ungoverned\",\"azure\"]\n---\n"), 0600)
 	}
-	got, e := MOCProposals(v, true)
+	got, skipped, e := MOCProposals(v, true)
 	if e != nil {
 		t.Fatalf("an ungoverned tag past the threshold aborted the whole batch: %v", e)
 	}
 	if len(got) != 1 || !strings.Contains(got[0], "moc-azure") {
 		t.Fatalf("expected exactly one proposal for the governed tag 'azure', got %v", got)
+	}
+	if len(skipped) != 1 {
+		t.Fatalf("the ungoverned skip was not reported at all: skipped=%v", skipped)
+	}
+	if !strings.Contains(skipped[0], "ungoverned") {
+		t.Fatalf("skipped does not name the tag that was skipped: %v", skipped)
+	}
+	if !strings.Contains(skipped[0], "9") {
+		t.Fatalf("skipped does not carry the note count (9) for the skipped tag: %v", skipped)
 	}
 }
 
