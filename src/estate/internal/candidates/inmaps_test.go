@@ -192,3 +192,37 @@ func TestSourceDriftInvalidatesWithoutRewritingMeaning(t *testing.T) {
 		t.Fatal("needs-review note remains active")
 	}
 }
+
+// TestWriteRosterPointerTargetsMOCsHub locks in P10's redirect
+// (run/iteration-queue.md): the agents routing note lands at
+// "02 - MOCs/Agents.md", not the retired "03 - Agents/index.md" -- the
+// per-area index.md files were all replaced by title-named hubs there,
+// leaving exactly one index.md in the vault (agent/index.md). Previously
+// uncovered by any test.
+func TestWriteRosterPointerTargetsMOCsHub(t *testing.T) {
+	v := t.TempDir()
+	os.MkdirAll(filepath.Join(v, "agent"), 0700)
+	os.MkdirAll(filepath.Join(v, "99 - Meta"), 0700)
+	os.WriteFile(filepath.Join(v, "99 - Meta/tags.md"), []byte("`source`"), 0600)
+	roster := filepath.Join(t.TempDir(), "agent-roster.md")
+	os.WriteFile(roster, []byte("# Agent roster\n"), 0600)
+
+	if e := WriteRosterPointer(v, roster); e != nil {
+		t.Fatal(e)
+	}
+
+	hub := filepath.Join(v, "02 - MOCs/Agents.md")
+	if _, e := os.Stat(hub); e != nil {
+		t.Fatalf("expected roster pointer at %s: %v", hub, e)
+	}
+	if _, e := os.Stat(filepath.Join(v, "03 - Agents/index.md")); e == nil {
+		t.Fatal("WriteRosterPointer also wrote the retired 03 - Agents/index.md path")
+	}
+	raw, e := os.ReadFile(hub)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if !strings.Contains(string(raw), "id: agents-roster-routing") {
+		t.Fatal("roster pointer lost its id frontmatter")
+	}
+}
