@@ -134,18 +134,22 @@ func write(vault string, rows []Row, retireMissing bool) (Result, error) {
 		seen[row.Item] = true
 		r.Counts[row.Kind]++
 		stamp := time.Unix(row.At, 0).UTC()
-		day := stamp.Format("20060102")
+		// A note id is a real timestamp: YYYYMMDDHHMMSS, per inmaps-spec §8's
+		// own "pure timestamp ID" line and the Luhmann stable-address
+		// rationale it cites. The earlier YYYYMMDD + 4-digit-sequence form
+		// (the same section's later, contradicting line) produced ids whose
+		// last four digits ran past 59 and were not times at all. Several
+		// items derive from one prompt and therefore share a second, so a
+		// collision walks the second forward -- deterministic, still a valid
+		// timestamp, and stable because ids are never renamed once assigned.
 		id := r.Mapping[row.Item]
 		if id == "" {
-			for n := 1; n <= 9999; n++ {
-				candidate := day + fmt.Sprintf("%04d", n)
+			for t := stamp; ; t = t.Add(time.Second) {
+				candidate := t.Format("20060102150405")
 				if !used[candidate] {
 					id = candidate
 					break
 				}
-			}
-			if id == "" {
-				return r, fmt.Errorf("day ID space exhausted: %s", day)
 			}
 			used[id] = true
 			r.Mapping[row.Item] = id
@@ -185,16 +189,11 @@ func write(vault string, rows []Row, retireMissing bool) (Result, error) {
 			writes[id+".md"] = s
 		}
 	}
-	ids := make([]string, 0, len(r.Mapping))
-	for _, id := range r.Mapping {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	index := "---\ntype: reference\ntitle: Corpus item projections\ndescription: Routing to derived corpus items\ncreated: 2026-09-07T00:00:00Z\nsource: process:vault-view\n" + marker + "\n---\n\n# Corpus item projections\n\nDerived from the corpus; draft questions are not accepted decisions.\n\n"
-	for _, id := range ids {
-		index += "- [[" + id + "]]\n"
-	}
-	writes["index.md"] = index
+	// No index.md here. Routing for these notes is the generated topic hubs in
+	// "02 - MOCs" -- a second index inside the notes directory duplicates that
+	// hub, and Jon's recorded parameter is that per-area index files become
+	// title-named MOC hubs rather than files all called index.md. Writing both
+	// produced two competing routing surfaces over the same notes.
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return r, err
 	}

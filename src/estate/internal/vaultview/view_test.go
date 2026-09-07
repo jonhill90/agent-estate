@@ -14,7 +14,7 @@ func TestProjectionStableIdentityAndRetirement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.Mapping["a"] != "202609070001" || first.Mapping["b"] != "202609070002" {
+	if first.Mapping["a"] != "20260907000000" || first.Mapping["b"] != "20260907000001" {
 		t.Fatal(first)
 	}
 	second, err := Write(v, rows)
@@ -96,5 +96,26 @@ func TestProjectionPreservesAssociations(t *testing.T) {
 	r, e = Write(v, rows)
 	if e != nil || r.Changed != 0 {
 		t.Fatalf("rerun: %+v %v", r, e)
+	}
+}
+
+// TestWriteDoesNotCreateAnIndexInTheNotesDirectory pins Jon's recorded
+// parameter that per-area index files become title-named MOC hubs: routing for
+// these projections lives in "02 - MOCs", so a second index.md inside the notes
+// directory is a duplicate routing surface over the same notes. The producer
+// wrote one on every run until 2026-09-07.
+func TestWriteDoesNotCreateAnIndexInTheNotesDirectory(t *testing.T) {
+	vault := t.TempDir()
+	if _, err := Write(vault, []Row{{
+		Item: "it-aaaaaaaaaaaaaaaa", Prompt: "mp-bbbbbbbbbbbbbbbb", At: 1788818756,
+		Kind: "parameter", Weight: "hard", Status: "acted",
+		Title: "a title", Body: "a body",
+	}}); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(vault, NotesDir, "index.md")); err == nil {
+		t.Fatal("Write created an index.md in the notes directory; routing belongs in 02 - MOCs")
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("stat: %v", err)
 	}
 }

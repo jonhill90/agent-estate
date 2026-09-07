@@ -28,7 +28,7 @@ func TagNotes(vault string, batch map[string][]string, apply bool) (int, error) 
 	}
 	changes := map[string][]byte{}
 	for rel, additions := range batch {
-		if filepath.IsAbs(rel) || filepath.Clean(rel) != rel || !strings.HasPrefix(rel, "01 - Notes/") || !regexp.MustCompile(`^\d{12}\.md$`).MatchString(filepath.Base(rel)) {
+		if filepath.IsAbs(rel) || filepath.Clean(rel) != rel || !strings.HasPrefix(rel, "01 - Notes/") || !regexp.MustCompile(`^\d{12}(\d{2})?\.md$`).MatchString(filepath.Base(rel)) {
 			return 0, fmt.Errorf("invalid note path %q", rel)
 		}
 		path := filepath.Join(vault, rel)

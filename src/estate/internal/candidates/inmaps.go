@@ -299,9 +299,13 @@ func publishINMAPS(db, vault, id, action string, r MemoryReview, apply bool) (Me
 		// Reserve identity in the review before any files: a crash retries the same ID.
 		nextPath = r.PendingNotePath
 		if nextPath == "" {
-			day := time.Now().UTC().Format("20060102")
-			for n := 1; n <= 9999; n++ {
-				p := filepath.Join("01 - Notes", fmt.Sprintf("%s%04d.md", day, n))
+			// YYYYMMDDHHMMSS -- a real timestamp, matching internal/vaultview
+			// and inmaps-spec §8's pure-timestamp rule. A taken second walks
+			// forward rather than falling back to a 4-digit sequence, which
+			// produced ids whose trailing digits were not a valid time.
+			now := time.Now().UTC()
+			for n := 0; n <= 9999; n++ {
+				p := filepath.Join("01 - Notes", now.Add(time.Duration(n)*time.Second).Format("20060102150405")+".md")
 				if _, e := os.Lstat(filepath.Join(vault, p)); os.IsNotExist(e) {
 					// Parameter projections share the global Obsidian ID namespace.
 					nested := filepath.Join(vault, "01 - Notes", "01p - Parameters", filepath.Base(p))
