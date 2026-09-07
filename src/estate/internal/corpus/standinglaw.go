@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -57,8 +58,21 @@ type StandingLawMember struct {
 // task touches the member's domain.
 var StandingLawSet = []StandingLawMember{
 	{
-		Slug:       "estate-is-skills-practice-not-a-product-to-sell",
-		HashPrefix: "a255964bbdcf",
+		Slug: "estate-is-skills-practice-not-a-product-to-sell",
+		// HashPrefix re-declared 2026-09-06 (agent-estate P0, live-vault
+		// INMAPS relayout): the W1 migration moved this fact from
+		// agent/facts/estate-is-skills-practice-not-a-product-to-sell.md to
+		// 01 - Notes/202609060005.md, adding `id`/`aliases` frontmatter
+		// lines -- which changed the whole-file hash this prefix pins
+		// (a255964bbdcf -> ecf40670309d). This is a legitimate re-review,
+		// not a silent re-pin: diffed the pre-migration backup
+		// (run/astra-w1/batch-08/agent/facts/estate-is-skills-practice-
+		// not-a-product-to-sell.md, whose own hash is exactly
+		// a255964bbdcf...) against the live migrated file and confirmed
+		// the ONLY change is the two added frontmatter lines -- the body,
+		// title, and memory_revision (77e6e7ca...) are byte-identical.
+		// See the PR that made this change for the full diff.
+		HashPrefix: "ecf40670309d",
 		Reason: "Cross-task by construction: it changes what ANY agent should " +
 			"ever recommend for the estate, on any task, not just tasks that " +
 			"mention selling. Never propose pricing, packaging, go-to-market, or " +
@@ -149,10 +163,9 @@ func StandingLaw(vaultDir string) ([]StandingLawEntry, error) {
 		if strings.TrimSpace(m.Reason) == "" {
 			return nil, fmt.Errorf("standing-law member %q has no stated reason -- membership requires one", m.Slug)
 		}
-		path := filepath.Join(vaultDir, "agent", "facts", m.Slug+".md")
-		raw, err := os.ReadFile(path)
+		_, raw, err := resolveStandingLawMemberFile(vaultDir, m.Slug)
 		if err != nil {
-			return nil, fmt.Errorf("standing-law member %q could not be read at %s: %w", m.Slug, path, err)
+			return nil, fmt.Errorf("standing-law member %q could not be read: %w", m.Slug, err)
 		}
 		sum := sha256.Sum256(raw)
 		got := hex.EncodeToString(sum[:])
@@ -179,6 +192,98 @@ func StandingLaw(vaultDir string) ([]StandingLawEntry, error) {
 		}
 	}
 	return entries, nil
+}
+
+// aliasesLineRE matches a frontmatter `aliases:` line holding a flow-style
+// list -- both quoting conventions seen in the vault today are accepted:
+// `aliases: [slug]` (bare) and `aliases: ["slug"]` (quoted).
+var aliasesLineRE = regexp.MustCompile(`(?m)^aliases:\s*\[(.*)\]\s*$`)
+
+// resolveStandingLawMemberFile locates a declared member's vault file
+// without hardcoding a single path shape, so a member declared before a
+// vault relayout keeps resolving after one. Two shapes are tried, in
+// order:
+//
+//  1. The legacy path, agent/facts/<slug>.md -- unchanged for a vault that
+//     has not been migrated (every existing test fixture uses this shape,
+//     and it stays the fast, unambiguous path when it exists).
+//  2. Alias resolution under 01 - Notes/ (agent-estate's INMAPS relayout,
+//     run/inmaps-spec.md): every note migrated by the W1 fact migration
+//     carries `aliases: [<old-slug>]` in its frontmatter specifically so a
+//     reference to the old slug keeps resolving post-move (see
+//     run/w1-migration-report.md for the full old-slug -> new-ID mapping
+//     this mechanism generalizes, rather than hardcoding any one mapping
+//     entry here). The first note whose aliases include the slug wins;
+//     StandingLawSet is small and reviewed, so a genuine alias collision
+//     would be caught by a human before it could matter.
+//
+// Neither shape is preferred by configuration -- this is existence-probed,
+// not vault-version-flagged, so a partially migrated vault (some facts
+// moved, some not) resolves correctly member-by-member.
+func resolveStandingLawMemberFile(vaultDir, slug string) (path string, raw []byte, err error) {
+	legacy := filepath.Join(vaultDir, "agent", "facts", slug+".md")
+	if b, e := os.ReadFile(legacy); e == nil {
+		return legacy, b, nil
+	}
+
+	notesDir := filepath.Join(vaultDir, "01 - Notes")
+	entries, direrr := os.ReadDir(notesDir)
+	if direrr != nil {
+		return "", nil, fmt.Errorf(
+			"not found at legacy path %s, and %s could not be searched by alias: %w",
+			legacy, notesDir, direrr)
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+			continue
+		}
+		p := filepath.Join(notesDir, e.Name())
+		b, rerr := os.ReadFile(p)
+		if rerr != nil {
+			continue // unreadable candidate -- keep searching, do not fail the whole resolution on it
+		}
+		if noteDeclaresAlias(string(b), slug) {
+			return p, b, nil
+		}
+	}
+	return "", nil, fmt.Errorf(
+		"not found at legacy path %s, and no file under %s declares %q as an alias",
+		legacy, notesDir, slug)
+}
+
+// noteDeclaresAlias reports whether raw's frontmatter carries an
+// `aliases:` flow list containing slug exactly.
+func noteDeclaresAlias(raw, slug string) bool {
+	fm, ok := frontmatterBlock(raw)
+	if !ok {
+		return false
+	}
+	m := aliasesLineRE.FindStringSubmatch(fm)
+	if m == nil {
+		return false
+	}
+	for _, item := range strings.Split(m[1], ",") {
+		item = strings.Trim(strings.TrimSpace(item), `"'`)
+		if item == slug {
+			return true
+		}
+	}
+	return false
+}
+
+// frontmatterBlock returns the text strictly between the opening and
+// closing `---` fences, or ok=false if raw has no well-formed fence pair.
+func frontmatterBlock(raw string) (string, bool) {
+	lines := strings.Split(raw, "\n")
+	if len(lines) == 0 || strings.TrimSpace(lines[0]) != "---" {
+		return "", false
+	}
+	for i := 1; i < len(lines); i++ {
+		if strings.TrimSpace(lines[i]) == "---" {
+			return strings.Join(lines[1:i], "\n"), true
+		}
+	}
+	return "", false
 }
 
 // vaultFactBody strips a vault fact file down to the text after its
