@@ -185,7 +185,7 @@ origin, and is stated here as one.
 
 ## What happens when nothing (or the wrong thing) answers a question?
 
-Four distinct absences, on purpose never collapsed into one "nothing here"
+Five distinct absences, on purpose never collapsed into one "nothing here"
 shape, each with its own exit code from `estate knowledge query`:
 
 | exit | state | means |
@@ -194,6 +194,7 @@ shape, each with its own exit code from `estate knowledge query`:
 | 1 | `no_match` | the index was read fine; nothing in it scored above zero against this question — a real, empty answer, not a failure |
 | 2 | `index_missing` / `index_unreadable` | the compiled index itself could not be read at all — run `estate knowledge` first |
 | 3 | `withheld_private` | something answers this question, but every matching item is private and this call did not ask for private material |
+| 4 | `stale_withheld_refused` | REFUSES to answer: a majority of matches are private **and** the index backing them is stale (agent-estate#1306) |
 
 **In practice, exit 3 fires when the public sources themselves were absent or
 unreadable when the index was built** — a checkout with no `AGENTS.md`
@@ -215,6 +216,24 @@ Collapsing `no_match` and `withheld_private` into the same code was tried and
 rejected: "there is nothing" and "there is something you may not see" are
 different answers a script branching on `$?` needs to tell apart
 (agent-estate#1037).
+
+**`stale_withheld_refused` (agent-estate#1306) is the one exception to
+`matched_withheld_majority` sharing `matched`'s exit code.** Majority-withheld
+alone still answers (above); a stale index alone still answers, with a
+`coverage.state: stale` caveat (below). Both findings landing on the SAME
+result compound instead of cancelling: the surviving, printed answer would be
+simultaneously a minority of the matches and drawn from an index already
+known to be behind its sources — 8 items under four lines of caveat invites
+exactly the skim the caveats exist to prevent. This state refuses outright:
+`matches` is empty even though items did score (unlike every other state in
+this table, where an empty `matches` means none did), `reason` states the
+private-index remedy, never merely declines, and prose mode's early return
+for this state (`printKnowledgeQuery`) prints no match body either — a
+refusal that still handed over the withheld-context items would not actually
+be a refusal in either surface. It fires on exactly the SAME
+`matched_withheld_majority` threshold and the SAME `coverage.state: stale`
+finding already in this table, never a second ratio or a second staleness
+definition of its own.
 
 **A fifth situation hides inside `no_match` itself: an empty index.** An
 index that is present, valid, readable and fresh but carries zero `items` — a
@@ -265,12 +284,26 @@ trustworthy right now.
 |---|---|---|
 | `complete` | every source read cleanly at build time, nothing withheld by policy | trust the answer |
 | `limited` | the query itself withheld eligible material by policy (private items, default mode) | rerun with `--private` if you're entitled to see them |
-| `degraded` | a source the index depends on could not be read when it was built | fix the source, regenerate the index |
-| `stale` | a source has been *observed* to have changed since the index was built | regenerate the index |
+| `degraded` | a source the index depends on could not be read when it was built | fix the source, then rebuild a private index (below) |
+| `stale` | a source has been *observed* to have changed since the index was built | rebuild a private index (below) |
 | `unknown` | a source's freshness could not be determined **at all, by design** — e.g. GitHub stars are read live with no local file to stat against, standingly | no fix; a caveat, not an actionable finding |
-| `source_missing` | a source the index depends on read successfully at build time but, at QUERY time, could not be found or read at all — e.g. `$AGENT_MEMORY_VAULT` pointing nowhere (agent-estate#1139) | treat any answer drawn from that source as suspect; regenerate once the source is reachable again |
+| `source_missing` | a source the index depends on read successfully at build time but, at QUERY time, could not be found or read at all — e.g. `$AGENT_MEMORY_VAULT` pointing nowhere (agent-estate#1139) | treat any answer drawn from that source as suspect; rebuild a private index once the source is reachable again |
 | `mixed` | more than one of the above applied to the same result | read `coverage.reasons` for each contributing cause |
 | `not_applicable` | there was no compiled index to have a coverage opinion about (`state: index_missing` or `index_unreadable`) | fix `reason` on the result, not `coverage` -- nothing to regenerate here yet |
+
+**"rebuild a private index" never means the shared one.** The shared
+compiled index at `~/.local/state/agent-estate/knowledge/index.json` is
+refreshed by the operator, not by an agent (agent-estate#1306) — and
+`estate knowledge`'s own write guard refuses to write it from a cwd that
+is not an explicit override or a recognised dispatch worktree, without
+`--allow-shared-write`. The permitted remedy, which every stale/degraded/
+source-missing message above now names instead of the bare `estate
+knowledge` this doc used to show: set `ESTATE_KNOWLEDGE_INDEX` to a
+scratch path, then run `estate knowledge` (no `--allow-shared-write`
+needed — pointing the override somewhere private is what makes the write
+non-shared in the first place). A dispatched turn gets this automatically,
+at its own path, without setting anything (agent-estate#1048); a reviewer
+or an ad-hoc checkout sets the override by hand.
 
 `degraded` and `limited` are deliberately different words for a reason:
 withholding private material in default mode is the boundary working as

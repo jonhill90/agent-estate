@@ -820,13 +820,13 @@ func printToolUsage(c toolusage.Counts) {
 }
 
 // printKnowledgeQuery renders a knowledge.QueryResult for a terminal --
-// the six distinguishable states agent-estate#1019/#1033/#1052 require
-// (matched, matched_withheld_majority, no_match, index_missing,
-// index_unreadable, withheld_private) each print visibly differently,
-// never collapsing to the same "nothing here" shape. When PrivateIncluded
-// is set, that is stated in the output itself (agent-estate#1028's point
-// 3) -- not only in a doc comment or a flag the reader of the printed
-// text cannot see.
+// the seven distinguishable states agent-estate#1019/#1033/#1052/#1306
+// require (matched, matched_withheld_majority, no_match, index_missing,
+// index_unreadable, withheld_private, stale_withheld_refused) each print
+// visibly differently, never collapsing to the same "nothing here" shape.
+// When PrivateIncluded is set, that is stated in the output itself
+// (agent-estate#1028's point 3) -- not only in a doc comment or a flag the
+// reader of the printed text cannot see.
 func printKnowledgeQuery(qr knowledge.QueryResult) {
 	switch qr.State {
 	case knowledge.StateIndexMissing:
@@ -838,12 +838,12 @@ func printKnowledgeQuery(qr knowledge.QueryResult) {
 	}
 
 	// agent-estate#1036: every state that got this far read a real,
-	// successfully-parsed index (IndexGeneratedAt is set for all three
-	// remaining states -- see Query in query.go), so the index's own age
-	// and whether it has fallen behind its sources is printed once, here,
-	// before any of the three shapes below. #1045's reviewer hit this
-	// blind exactly once for real: a stale index answered silently, and
-	// only manual regeneration caught it.
+	// successfully-parsed index (IndexGeneratedAt is set for all remaining
+	// states -- see Query in query.go), so the index's own age and
+	// whether it has fallen behind its sources is printed once, here,
+	// before any of the shapes below. #1045's reviewer hit this blind
+	// exactly once for real: a stale index answered silently, and only
+	// manual regeneration caught it.
 	printIndexFreshness(qr.IndexGeneratedAt, qr.SourceStatuses)
 	printBuildCommitMismatch(qr.IndexGeneratedBy, currentBuildCommit())
 
@@ -863,6 +863,18 @@ func printKnowledgeQuery(qr knowledge.QueryResult) {
 		return
 	case knowledge.StateWithheldPrivate:
 		fmt.Printf("no PUBLISHABLE item matches %q\n", qr.Question)
+		fmt.Println(qr.Reason)
+		printSourceStatuses(qr.SourceStatuses)
+		return
+	case knowledge.StateStaleWithheldRefused:
+		// agent-estate#1306 item 3: no matches print below this, on
+		// purpose -- the freshness note above already named the stale
+		// source(s), so this banner and qr.Reason (built by
+		// applyStaleWithheldRefusal) only need to add the majority-withheld
+		// half and the remedy. A refusal that still printed 8 items under
+		// this banner would be exactly the skim-inviting shape #1306
+		// exists to stop.
+		fmt.Println("*** REFUSING -- stale index AND majority of matches withheld: this answer cannot be trusted ***")
 		fmt.Println(qr.Reason)
 		printSourceStatuses(qr.SourceStatuses)
 		return
@@ -993,6 +1005,8 @@ func printRepoDocsRootIfAny(sources []string) {
 //	   StateIndexUnreadable  -- the index itself could not be read at all
 //	3  StateWithheldPrivate  -- something answers this, but it is private and
 //	                            this call did not ask for private material
+//	4  StateStaleWithheldRefused -- refuses to answer: majority-withheld AND
+//	                                the index backing it is stale
 //
 // 3 was picked, not 1, because collapsing withheld_private into no_match is
 // the exact error this function exists to prevent -- see agent-estate#1037's
@@ -1015,12 +1029,22 @@ func printRepoDocsRootIfAny(sources []string) {
 //
 // StateMatchedWeak (agent-estate#1315) shares the same exit code for the
 // identical reason -- see its own doc comment in query.go.
+//
+// StateStaleWithheldRefused (agent-estate#1306) is the deliberate
+// EXCEPTION to that "majority-withheld still exits 0" pattern: it does not
+// return an answer at all (see printKnowledgeQuery's early return for it),
+// so exit 0 here would be indistinguishable from real success to a caller
+// reading only $? -- #1306 asks explicitly for a refusal a caller CAN
+// detect. 4 is new and unused by every other path this command can reach,
+// same non-collision reasoning as 3 above.
 func knowledgeQueryExitCode(state knowledge.QueryState) int {
 	switch state {
 	case knowledge.StateIndexMissing, knowledge.StateIndexUnreadable:
 		return 2
 	case knowledge.StateWithheldPrivate:
 		return 3
+	case knowledge.StateStaleWithheldRefused:
+		return 4
 	case knowledge.StateNoMatch:
 		return 1
 	default: // StateMatched, StateMatchedWithheldMajority, StateMatchedWeak
@@ -1301,10 +1325,12 @@ func parseKnowledgeArgs(args []string) (includePrivate, asJSON bool, rest []stri
 // fully JSON-tagged, so this is transport only, never a second
 // computation of what Query decided. Every state (matched, no_match,
 // index_missing, index_unreadable, withheld_private,
-// matched_withheld_majority, matched_weak) is emitted the same way,
-// unlike prose mode's early stderr returns for the two index-read
-// failures -- a JSON caller reads State, not which stream the process
-// wrote to.
+// matched_withheld_majority, matched_weak, stale_withheld_refused) is
+// emitted the same way, unlike prose mode's early stderr returns for the
+// two index-read failures -- a JSON caller reads State, not which stream
+// the process wrote to. stale_withheld_refused (agent-estate#1306) is set
+// by applyStaleWithheldRefusal, called just before this, not by Query
+// itself -- see that function's own doc comment for why.
 func printKnowledgeQueryJSON(qr knowledge.QueryResult) {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
@@ -1703,8 +1729,8 @@ func printIndexFreshness(generatedAt time.Time, statuses []knowledge.SourceResul
 		// CoverageState from github-stars' standing "unknown" -- the two
 		// used to be indistinguishable except by reading Detail's free text.
 		for _, s := range missing {
-			fmt.Printf("*** SOURCE GONE -- %s could not be read at all (%s), though the compiled index depends on it: any answer drawn from it may be built on material that no longer exists; regenerate with `estate knowledge` once the source is reachable again ***\n",
-				s.name, s.reason)
+			fmt.Printf("*** SOURCE GONE -- %s could not be read at all (%s), though the compiled index depends on it: any answer drawn from it may be built on material that no longer exists; once the source is reachable again, %s ***\n",
+				s.name, s.reason, knowledge.PrivateIndexRemedy)
 		}
 	}
 
@@ -1713,8 +1739,15 @@ func printIndexFreshness(generatedAt time.Time, statuses []knowledge.SourceResul
 		for i, s := range stale {
 			names[i] = fmt.Sprintf("%s (changed %s ago)", s.name, formatAge(time.Since(s.mtime)))
 		}
-		fmt.Printf("index is BEHIND its sources: %s -- regenerate with `estate knowledge` before trusting this over a live read\n",
-			strings.Join(names, ", "))
+		// agent-estate#1306: this used to say "regenerate with `estate
+		// knowledge`" -- the literal shared-write path the operator alone
+		// is allowed to take (ResolveWritePath's own guard refuses an
+		// agent's cwd without --allow-shared-write). See
+		// knowledge.PrivateIndexRemedy's own doc comment for the full
+		// defect and why this text is built from the same constants the
+		// write guard's refusal message uses.
+		fmt.Printf("index is BEHIND its sources: %s -- before trusting this over a live read, %s\n",
+			strings.Join(names, ", "), knowledge.PrivateIndexRemedy)
 	}
 	for _, u := range unknown {
 		fmt.Printf("note: staleness against %s (%s) could not be checked -- reported as unknown, not assumed fresh\n", u.name, u.reason)
@@ -1817,9 +1850,70 @@ func foldGeneratedByIntoCoverage(cov knowledge.Coverage, generatedBy knowledge.G
 	if indexCommit == current {
 		return cov
 	}
+	// agent-estate#1306: see knowledge.PrivateIndexRemedy's own doc
+	// comment -- this is the same "regenerate with `estate knowledge`"
+	// defect the staleness line above had, on the commit-mismatch finding
+	// instead of the source-staleness one.
 	return cov.WithFreshnessReason(knowledge.CoverageBinaryMismatch, "",
-		fmt.Sprintf("index built by %s, this checkout is at %s -- usually fine, not a refusal; regenerate with `estate knowledge` if this query needs the newer commit's own changes reflected",
-			shortCommit(indexCommit), shortCommit(current)))
+		fmt.Sprintf("index built by %s, this checkout is at %s -- usually fine, not a refusal; if this query needs the newer commit's own changes reflected, %s",
+			shortCommit(indexCommit), shortCommit(current), knowledge.PrivateIndexRemedy))
+}
+
+// applyStaleWithheldRefusal upgrades qr from StateMatchedWithheldMajority
+// to StateStaleWithheldRefused when Coverage also carries a CoverageStale
+// reason -- agent-estate#1306 item 3. A no-op for every other state,
+// including StateMatchedWithheldMajority results whose Coverage has no
+// staleness finding, and including CoverageStale results that are not
+// ALSO majority-withheld (a fresh index answering a majority-private
+// question, or a stale index answering a mostly-public one, both stay
+// exactly the warn-then-answer behaviour they already had -- only the
+// combination refuses).
+//
+// This is called from the "knowledge query" case AFTER both
+// foldFreshnessIntoCoverage and foldGeneratedByIntoCoverage have run, not
+// from inside knowledge.Query itself: Query deliberately has no
+// filesystem access to compute staleness (see CoverageState's own doc
+// comment in query.go), so by the time this runs, qr.Coverage is the
+// first and only point in the call chain that has both the
+// majority-withheld finding (computed inside Query) and the staleness
+// finding (computed here, from freshnessFindings) in hand together.
+//
+// Reuses, rather than reinventing, both of #1306's named conditions:
+// the majority-withheld check is exactly qr.State ==
+// StateMatchedWithheldMajority, the SAME threshold (withheldPrivate >
+// TotalMatched) Query already computed -- no second ratio is computed
+// here. The staleness check is exactly "Coverage carries a CoverageStale
+// reason", the SAME finding foldFreshnessIntoCoverage already folded in
+// from freshnessFindings -- no second staleness comparison is computed
+// here either.
+func applyStaleWithheldRefusal(qr knowledge.QueryResult) knowledge.QueryResult {
+	if qr.State != knowledge.StateMatchedWithheldMajority {
+		return qr
+	}
+	var staleDetails []string
+	for _, r := range qr.Coverage.Reasons {
+		if r.State == knowledge.CoverageStale {
+			staleDetails = append(staleDetails, r.Detail)
+		}
+	}
+	if len(staleDetails) == 0 {
+		return qr
+	}
+	qr.State = knowledge.StateStaleWithheldRefused
+	qr.Reason = fmt.Sprintf(
+		"refusing: %s -- AND the index is stale (%s). Either alone would warn and answer; together the surviving answer cannot be trusted. %s.",
+		qr.Reason, strings.Join(staleDetails, "; "), knowledge.PrivateIndexRemedy)
+	// A refusal that still handed a JSON caller qr.Matches would only be a
+	// refusal in prose mode -- printKnowledgeQuery's early return for this
+	// state (above) prints none of them, and --json must match: a caller
+	// reading Matches directly, without checking State first, must see
+	// the same nothing a human reading the terminal output does.
+	// TotalMatched/WithheldPrivate are left as they were -- they are the
+	// MEASUREMENT the Reason above already quotes (how many matched, how
+	// many were private), not the withheld answer content itself.
+	qr.Matches = nil
+	qr.NotReturned = qr.TotalMatched
+	return qr
 }
 
 // printBuildCommitMismatch prints the same index-vs-binary finding
@@ -2016,6 +2110,13 @@ func main() {
 			// the same way -- detection, not prevention or refusal (see
 			// foldGeneratedByIntoCoverage's own doc comment).
 			qr.Coverage = foldGeneratedByIntoCoverage(qr.Coverage, qr.IndexGeneratedBy, currentBuildCommit())
+			// agent-estate#1306 item 3: both folds above have now run, so
+			// this is the first point Coverage carries a full picture --
+			// upgrade a majority-withheld result to a refusal if the index
+			// backing it is also stale. See applyStaleWithheldRefusal's own
+			// doc comment for why this check belongs here rather than
+			// inside Query itself.
+			qr = applyStaleWithheldRefusal(qr)
 			if asJSON {
 				printKnowledgeQueryJSON(qr)
 			} else {

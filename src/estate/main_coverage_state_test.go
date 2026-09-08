@@ -157,8 +157,8 @@ func TestKnowledgeQueryCoverageStateBinaryMismatchPure(t *testing.T) {
 		t.Fatalf("Coverage.Reasons = %+v, want exactly one entry", got.Coverage.Reasons)
 	}
 	wantDetail := fmt.Sprintf(
-		"index built by %s, this checkout is at %s -- usually fine, not a refusal; regenerate with `estate knowledge` if this query needs the newer commit's own changes reflected",
-		staleCommit[:12], head[:12])
+		"index built by %s, this checkout is at %s -- usually fine, not a refusal; if this query needs the newer commit's own changes reflected, %s",
+		staleCommit[:12], head[:12], knowledge.PrivateIndexRemedy)
 	if got.Coverage.Reasons[0].State != "binary_mismatch" || got.Coverage.Reasons[0].Detail != wantDetail {
 		t.Fatalf("Coverage.Reasons[0] = %+v, want {state:binary_mismatch detail:%q}", got.Coverage.Reasons[0], wantDetail)
 	}
