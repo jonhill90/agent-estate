@@ -209,12 +209,25 @@ func write(vault string, rows []Row, retireMissing bool) (Result, error) {
 		}
 		status := "stable"
 		standing := row.Kind != "question" && row.Kind != "thought"
+		spentDirective := false
 		if row.Status == "dropped" {
 			status = "deprecated"
 			standing = false
 		} else if row.Status == "needs_review" || !standing {
 			status = "draft"
 			standing = false
+		} else if row.Kind == "directive" && row.Status == "acted" {
+			// A directive is a one-time order, not a durable constraint. Once
+			// the corpus itself records it as acted on, it is spent -- the
+			// task happened, it did not become law. Tagging it standing-rule
+			// anyway is exactly how 1,237 of the vault's 2,862 standing-rule
+			// notes turned out to be finished errands instead of live rules
+			// (measured 2026-09-07), leaving the tag unable to distinguish
+			// anything. Status stays "stable": the record itself is accurate
+			// and won't change, so this is not corrected or under review --
+			// only its authority is scoped down.
+			standing = false
+			spentDirective = true
 		}
 		tags := []string{"note", stamp.Format("01-2006")}
 		if standing {
@@ -249,6 +262,9 @@ func write(vault string, rows []Row, retireMissing bool) (Result, error) {
 			s += "\n## Context\n\nWhat was being discussed when this was said, from the source session:\n\n> " + c + "\n"
 		}
 		s += fmt.Sprintf("\n## Provenance\n\n- corpus item `%s` (%s, %s)\n- source prompt `%s`\n", row.Item, row.Kind, row.Status, row.Prompt)
+		if spentDirective {
+			s += "\n## Scope\n\nThis is a one-time task instruction, not an ongoing rule -- it may already be resolved. Whether it still applies is a question for the corpus item cited above, not this note.\n"
+		}
 		s, err = notemeta.Merge(s, old[id+".md"])
 		if err != nil {
 			return r, err
