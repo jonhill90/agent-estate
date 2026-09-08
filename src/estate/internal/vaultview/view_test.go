@@ -211,6 +211,53 @@ func TestDirectiveDoesNotPresentAsStandingLaw(t *testing.T) {
 	}
 }
 
+// TestEnduringDirectiveThatWasActedOnKeepsStandingRule is agent-estate#1313's
+// own required proof, the direction #1298 lacked: status='acted' means
+// someone acted on this, not that it is spent -- an enduring rule that was
+// followed is marked 'acted' identically to a one-time order that was
+// carried out, and #1298 stripped both alike. Confirmed on the live vault,
+// both kind=directive weight=hard status=acted: it-879d138d5eb7c570 ("The
+// estate tick must never merge a PR on green CI alone...", the rule
+// governing the merge protocol the Director runs on) lost the tag; the
+// fixture below reproduces its exact shape.
+//
+// The signal used is resolved_to -- Read()'s own query already selects it
+// as row.Title ("coalesce(i.resolved_to,'') title"), the corpus's own
+// judgement that this specific statement became a durable, reusable
+// operator parameter, not a one-time task. It was already flowing into
+// this package before this fix; nothing consulted it in the directive+acted
+// branch. Measured 2026-09-08: 85 of the 1,237 notes #1298 stripped already
+// carried a resolved_to-shaped title and were false negatives.
+//
+// This does NOT close the gap completely -- see this file's own comment at
+// the guard this test pins for what remains unresolved (an enduring rule
+// recorded as free text, never assigned a resolved_to key, has no
+// structured signal in the corpus at all).
+func TestEnduringDirectiveThatWasActedOnKeepsStandingRule(t *testing.T) {
+	v := t.TempDir()
+	rows := []Row{{
+		Item: "d3", Prompt: "p1", At: 1788739200, Kind: "directive", Weight: "hard", Status: "acted",
+		Title: "merge_policy=ci_green_and_independent_review_required",
+		Body:  "The estate tick must never merge a PR on green CI alone -- it needs an actual APPROVED review.",
+	}}
+	r, e := Write(v, rows)
+	if e != nil {
+		t.Fatal(e)
+	}
+	p := filepath.Join(v, NotesDir, r.Mapping["d3"]+".md")
+	b, _ := os.ReadFile(p)
+	s := string(b)
+	if !strings.Contains(s, "standing-rule") {
+		t.Fatalf("an enduring rule with a corpus-canonicalized resolved_to lost standing-rule just because its status is 'acted': %s", s)
+	}
+	if strings.Contains(s, "## Scope") {
+		t.Fatalf("an enduring, corpus-canonicalized rule was marked as a spent one-time task: %s", s)
+	}
+	if !strings.Contains(s, "status: stable") {
+		t.Fatalf("an enduring rule must present as stable/authority-bearing: %s", s)
+	}
+}
+
 // TestAmbiguousProjectionRemainsUnresolved is lifted from #1288, was
 // t.Skip-ped pending agent-estate#1297, and is now implemented.
 //
