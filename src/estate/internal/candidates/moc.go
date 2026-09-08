@@ -27,7 +27,7 @@ const mocEnd = "<!-- generated-links:end -->"
 // non-note file as one), which is the exact failure class this match is
 // meant to close by mirroring #1272's own filter rather than
 // reconstructing an equivalent one.
-var noteFilename = regexp.MustCompile(`^\d{12}\.md$`)
+var noteFilename = regexp.MustCompile(`^\d{12}(\d{2})?\.md$`)
 
 // walkNotes lists every canonical note under "01 - Notes", at any depth --
 // notes live directly there (the layout MOCProposals/RefreshMOCs were

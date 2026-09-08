@@ -94,7 +94,7 @@ func vaultSource(vaultDir string) (SourceResult, []Item) {
 		if err != nil {
 			return err
 		}
-		if !d.IsDir() && d.Type()&os.ModeSymlink == 0 && regexp.MustCompile(`^\d{12}\.md$`).MatchString(d.Name()) {
+		if !d.IsDir() && d.Type()&os.ModeSymlink == 0 && regexp.MustCompile(`^\d{12}(\d{2})?\.md$`).MatchString(d.Name()) {
 			paths = append(paths, p)
 		}
 		return nil

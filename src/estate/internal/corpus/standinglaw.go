@@ -73,7 +73,12 @@ var StandingLawSet = []StandingLawMember{
 		// the ONLY change is the two added frontmatter lines -- the body,
 		// title, and memory_revision (77e6e7ca...) are byte-identical.
 		// See the PR that made this change for the full diff.
-		HashPrefix: "ecf40670309d",
+		// Re-pinned 2026-09-07: a255964bbdcf -> ecf40670309d (W1 move) ->
+		// 26d4a45ea2a7. Note ids were renamed from YYYYMMDD+sequence to
+		// YYYYMMDDHHMMSS (the spec's own §8 line 44 form, which line 175
+		// contradicted), so this member moved 202609060005.md ->
+		// 20260906071524.md and its bytes changed. agent-estate#1286.
+		HashPrefix: "26d4a45ea2a7",
 		Reason: "Cross-task by construction: it changes what ANY agent should " +
 			"ever recommend for the estate, on any task, not just tasks that " +
 			"mention selling. Never propose pricing, packaging, go-to-market, or " +
