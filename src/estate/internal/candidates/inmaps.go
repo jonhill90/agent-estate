@@ -80,6 +80,19 @@ func validateINMAPS(vault string, p Proposal) error {
 // writeSet backs up every existing target before writing. A returned write error
 // restores the complete set; the saved review permits retry after process loss.
 //
+// A nil value in changes means REMOVE that path rather than write it --
+// agent-estate#1284: before this, every verb in this package could create
+// and deprecate a file but nothing could actually remove one, so every
+// removal of a tool-owned artifact (an accepted-and-superseded MOC draft,
+// a governed tag value) was a hand edit outside the tool, backed up and
+// logged by convention rather than by this function. The backup/rollback
+// machinery already needed no change to cover this direction: it was
+// written for the CREATE-then-rollback case (old[q] == nil means the path
+// did not exist before this batch, so a failed batch removes what it just
+// created), which is the identical shape in reverse for a DELETE-then-
+// rollback (old[q] != nil restores the removed path's own backed-up
+// bytes). Only the forward write loop needed a nil-aware branch.
+//
 // logPath moved from agent/log.md to 99 - Meta/log.md under the agent/
 // dissolution (run/inmaps-spec.md §7b, P5 batch 1) -- repointed in the same
 // change that moved the file, per that section's own binding rule (never
@@ -96,17 +109,41 @@ func writeSet(vault string, changes map[string][]byte) error {
 		if e != nil && !os.IsNotExist(e) {
 			return e
 		}
-		var names []string
-		for p := range changes {
+		// agent-estate#1284: a nil value in changes means REMOVE that path
+		// (see the write loop below) -- split the auto-generated entry into
+		// its own "**Delete**" clause rather than letting a removed path
+		// read as "**Update**", the one bolded verb this function used to
+		// emit unconditionally. `it-83575286b075761` (hard): say what was
+		// kept, trimmed or deleted -- a log line is exactly the kind of
+		// place that rule binds, not only a PR body. "**Delete**" itself is
+		// not a new word this function invents: it already appears in this
+		// same log.md's own history (99 - Meta/log.md, 2026-07-18 entries),
+		// from before this function's current auto-generated form existed --
+		// reviving the existing verb, not adding one.
+		var updated, removed []string
+		for p, b := range changes {
 			rel, e := filepath.Rel(vault, p)
 			if e != nil {
 				return e
 			}
-			names = append(names, rel)
+			if b == nil {
+				removed = append(removed, rel)
+			} else {
+				updated = append(updated, rel)
+			}
 		}
-		sort.Strings(names)
+		sort.Strings(updated)
+		sort.Strings(removed)
 		at := time.Now().UTC().Format(time.RFC3339)
-		changes[logPath] = []byte("## " + at[:10] + "\n\n**Update** process:estate-candidates — " + strings.Join(names, ", ") + " (" + at + ")\n\n" + string(previous))
+		var entry strings.Builder
+		entry.WriteString("## " + at[:10] + "\n\n")
+		if len(updated) > 0 {
+			entry.WriteString("**Update** process:estate-candidates — " + strings.Join(updated, ", ") + " (" + at + ")\n\n")
+		}
+		if len(removed) > 0 {
+			entry.WriteString("**Delete** process:estate-candidates — " + strings.Join(removed, ", ") + " (" + at + ")\n\n")
+		}
+		changes[logPath] = []byte(entry.String() + string(previous))
 	}
 	backup, e := os.MkdirTemp(filepath.Join(vault, "99 - Meta"), ".inmaps-backup-")
 	if e != nil {
@@ -154,7 +191,19 @@ func writeSet(vault string, changes map[string][]byte) error {
 		if string(b) == string(old[p]) {
 			continue
 		}
-		if e = os.MkdirAll(filepath.Dir(p), 0700); e == nil {
+		if b == nil {
+			// agent-estate#1284: the one shape this loop did not have --
+			// every other branch below only ever wrote bytes. A nil value
+			// removes p outright; the rollback arm just below already knew
+			// how to restore a removed path from its own backed-up old[q]
+			// (it was written for the CREATE-then-rollback case, which is
+			// the same "this path should not exist" shape in reverse), so
+			// nothing there needed to change to cover this direction too.
+			e = os.Remove(p)
+			if e != nil && os.IsNotExist(e) {
+				e = nil
+			}
+		} else if e = os.MkdirAll(filepath.Dir(p), 0700); e == nil {
 			e = atomicMemoryWrite(p, b)
 		}
 		if e != nil {
