@@ -1,7 +1,9 @@
 package main
 
 import (
+	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -96,5 +98,153 @@ func TestClassifiableUniverseExcludesSrcItselfNotItsChildren(t *testing.T) {
 	}
 	if !sawChild {
 		t.Fatal("classifiableUniverse() found no src/* child -- src/ enumeration is broken")
+	}
+}
+
+// newFixtureRepo creates an isolated, throwaway git repo under t.TempDir() so
+// path-rebirth history can be scripted exactly, rather than depending on this
+// repo's own real history staying the same shape forever.
+func newFixtureRepo(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = root
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run("init", "-q", "-b", "main")
+	run("config", "user.email", "fixture@example.com")
+	run("config", "user.name", "Fixture")
+	return root
+}
+
+// fixtureCommit writes path with content (or removes it, when content is
+// "\x00delete\x00") and commits at the given date, so --since windows and
+// commit ordering are fully deterministic rather than racing wall-clock time.
+func fixtureCommit(t *testing.T, root, path, content, date, message string) string {
+	t.Helper()
+	full := filepath.Join(root, path)
+	if content == deleteMarker {
+		if err := os.RemoveAll(filepath.Dir(full)); err != nil {
+			t.Fatalf("remove %s: %v", path, err)
+		}
+		run(t, root, "add", "-A")
+	} else {
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatalf("mkdir for %s: %v", path, err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+		run(t, root, "add", path)
+	}
+	cmd := exec.Command("git", "commit", "-q", "-m", message)
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_DATE="+date, "GIT_COMMITTER_DATE="+date,
+		"GIT_AUTHOR_NAME=Fixture", "GIT_AUTHOR_EMAIL=fixture@example.com",
+		"GIT_COMMITTER_NAME=Fixture", "GIT_COMMITTER_EMAIL=fixture@example.com",
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git commit %q: %v\n%s", message, err, out)
+	}
+	out, err := exec.Command("git", "-C", root, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("git rev-parse HEAD: %v", err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+const deleteMarker = "\x00delete\x00"
+
+func run(t *testing.T, root string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = root
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
+// TestCommitsForPathExcludesPriorIncarnation is agent-estate#1316's review,
+// reproduced as a fixture: scripts/ (the shell/Python supervisor) is created,
+// touched, and deleted, then an unrelated scripts/ (docs tooling) is created
+// and touched. A path name is not a stable directory identity across
+// history -- naive `git log -- scripts` counts all five commits touching
+// that string; the fix must count only the two commits belonging to the
+// directory that actually exists now.
+func TestCommitsForPathExcludesPriorIncarnation(t *testing.T) {
+	root := newFixtureRepo(t)
+	fixtureCommit(t, root, "scripts/supervisor.sh", "old era A", "2020-01-01T00:00:00", "add old scripts/")
+	fixtureCommit(t, root, "scripts/supervisor.sh", "old era B", "2020-01-02T00:00:00", "touch old scripts/")
+	fixtureCommit(t, root, "scripts/supervisor.sh", deleteMarker, "2020-01-03T00:00:00", "delete scripts/ -- the shell supervisor")
+	fixtureCommit(t, root, "scripts/docs-lint.sh", "new era A", "2020-01-10T00:00:00", "add unrelated new scripts/")
+	fixtureCommit(t, root, "scripts/docs-lint.sh", "new era B", "2020-01-11T00:00:00", "touch new scripts/")
+
+	got, err := commitsForPath(root, "2019-01-01", "scripts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("commitsForPath() = %d commits, want 2 (only the current scripts/ incarnation); a naive count would find 5", len(got))
+	}
+}
+
+// TestCommitsForPathUnchangedWithoutRebirth is the regression guard: a path
+// that has only ever existed once must count exactly as it always has --
+// this fix must not shrink or drop commits for the common case, only exclude
+// commits from a genuinely different, deleted directory.
+func TestCommitsForPathUnchangedWithoutRebirth(t *testing.T) {
+	root := newFixtureRepo(t)
+	fixtureCommit(t, root, "docs/a.md", "one", "2020-01-01T00:00:00", "add docs")
+	fixtureCommit(t, root, "docs/a.md", "two", "2020-01-02T00:00:00", "touch docs")
+	fixtureCommit(t, root, "docs/b.md", "three", "2020-01-03T00:00:00", "add more docs")
+
+	got, err := commitsForPath(root, "2019-01-01", "docs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("commitsForPath() = %d commits, want 3 (no rebirth, nothing should be excluded)", len(got))
+	}
+}
+
+// TestCountAtDeduplicatesAcrossPaths guards the property the original
+// single-batched-git-log implementation had for free: a commit touching two
+// paths in the same group must be counted once, not twice, now that each
+// path is walked separately to find its own rebirth boundary.
+func TestCountAtDeduplicatesAcrossPaths(t *testing.T) {
+	root := newFixtureRepo(t)
+	full := filepath.Join(root, "docs")
+	if err := os.MkdirAll(full, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(full, "a.md"), []byte("a"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "notify.go"), []byte("b"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(t, root, "add", "-A")
+	cmd := exec.Command("git", "commit", "-q", "-m", "touch both docs and notify in one commit")
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_DATE=2020-01-01T00:00:00", "GIT_COMMITTER_DATE=2020-01-01T00:00:00",
+		"GIT_AUTHOR_NAME=Fixture", "GIT_AUTHOR_EMAIL=fixture@example.com",
+		"GIT_COMMITTER_NAME=Fixture", "GIT_COMMITTER_EMAIL=fixture@example.com",
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git commit: %v\n%s", err, out)
+	}
+
+	got, err := countAt(root, "2019-01-01", []string{"docs", "notify.go"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 1 {
+		t.Fatalf("countAt() = %d, want 1 (one commit touched both paths)", got)
 	}
 }

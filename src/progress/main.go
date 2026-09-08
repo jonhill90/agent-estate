@@ -35,20 +35,139 @@ var appPaths = []string{"src/tui", "src/estate"}
 // config nothing maintained -- `git log` on a nonexistent pathspec does not
 // error, so this had gone unnoticed since deletion; see
 // TestAppAndSupportPathsResolveOnDisk, added the same day, which would have
-// caught it then.
+// caught it then. scripts/ itself turned out to be the same failure mode one
+// level subtler (PR #1316 review): `git log -- scripts` also does not error
+// on a pathspec that existed, was deleted, and was later reused for
+// something unrelated -- it was the shell/Python supervisor until #906
+// deleted it 2026-08-30, then became this unrelated docs-lint/evidence/
+// knowledge directory from #1272 onward, and counting both eras as one
+// inflated scaffolding by 90 of 96 hits. commitsForPath/pathRebirth bound
+// every path here (not just scripts/) to its current incarnation so a
+// reused name can never again silently conflate two different directories.
 var supportPaths = []string{"reference", ".github", "docs", "scripts", "src/notify", "src/issuemine", "src/progress"}
 
+// count totals commits touching any of paths since the given date, counting
+// each commit once even when it touches several of them. A path name is not
+// a stable directory identity across history (agent-estate#1316 review):
+// git log -- path matches any commit that ever touched that string, oblivious
+// to a delete-and-unrelated-recreate in between, so counting is done
+// per-path via commitsForPath (which bounds each path to its current
+// incarnation) and the resulting commit hashes are unioned in a set --
+// batching all paths into one git-log call, as this used to do, would lose
+// that per-path boundary.
 func count(since string, paths []string) (int, error) {
-	args := append([]string{"log", "--since=" + since, "--oneline", "--"}, paths...)
-	out, err := exec.Command("git", args...).Output()
+	root, err := repoRoot()
 	if err != nil {
-		return 0, fmt.Errorf("git log %v: %w", paths, err)
+		return 0, err
 	}
-	s := strings.TrimSpace(string(out))
+	return countAt(root, since, paths)
+}
+
+// countAt is count with an explicit repo root, so it can run against a
+// fixture repo in tests without touching process cwd.
+func countAt(root, since string, paths []string) (int, error) {
+	seen := map[string]bool{}
+	for _, p := range paths {
+		hashes, err := commitsForPath(root, since, p)
+		if err != nil {
+			return 0, err
+		}
+		for _, h := range hashes {
+			seen[h] = true
+		}
+	}
+	return len(seen), nil
+}
+
+// commitsForPath returns the commit hashes, since the given date, that touch
+// path -- but only from path's current incarnation onward. scripts/ was the
+// shell/Python supervisor until #906 deleted it 2026-08-30, then became an
+// unrelated docs-lint/evidence/knowledge directory from #1272 onward: naive
+// `git log -- scripts` conflated both eras, inflating the reviewed PR's
+// scaffolding count by 90 of 96 hits (67% of the reported total) with
+// commits belonging to a directory that no longer exists. pathRebirth finds
+// the most recent point path came back into existence and this excludes
+// everything before it.
+func commitsForPath(root, since, path string) ([]string, error) {
+	boundary, err := pathRebirth(root, path)
+	if err != nil {
+		return nil, err
+	}
+	args := []string{"log", "--since=" + since, "--format=%H"}
+	if boundary != "" {
+		args = append(args, boundary+"..HEAD")
+	}
+	args = append(args, "--", path)
+	out, err := runGit(root, args...)
+	if err != nil {
+		return nil, fmt.Errorf("git log %v: %w", args, err)
+	}
+	s := strings.TrimSpace(out)
 	if s == "" {
-		return 0, nil
+		return nil, nil
 	}
-	return len(strings.Split(s, "\n")), nil
+	return strings.Split(s, "\n"), nil
+}
+
+// pathRebirth returns the commit boundary such that "boundary..HEAD -- path"
+// includes only path's current incarnation: everything from the most recent
+// time it came back into existence onward (its most recent "birth", if it
+// has only ever existed once). Returns "" when there is no earlier
+// incarnation to exclude -- no history at all, or the birth commit is the
+// repo's very first commit and so has no parent to exclude.
+func pathRebirth(root, path string) (string, error) {
+	out, err := runGit(root, "log", "--reverse", "--format=%H", "--", path)
+	if err != nil {
+		return "", fmt.Errorf("git log --reverse -- %s: %w", path, err)
+	}
+	s := strings.TrimSpace(out)
+	if s == "" {
+		return "", nil
+	}
+	var lastBirth string
+	for _, c := range strings.Split(s, "\n") {
+		existed, err := existsAtParent(root, c, path)
+		if err != nil {
+			return "", err
+		}
+		if !existed {
+			lastBirth = c
+		}
+	}
+	if lastBirth == "" {
+		return "", nil
+	}
+	parent, err := runGit(root, "rev-parse", lastBirth+"^")
+	if err != nil {
+		// lastBirth has no parent -- it's the repo's first commit, so
+		// path's whole history is one incarnation and needs no boundary.
+		return "", nil
+	}
+	return strings.TrimSpace(parent), nil
+}
+
+// existsAtParent reports whether path existed in commit's first parent.
+// A commit with no parent (the repo's very first commit) reports false:
+// nothing can have existed "before" the repository began.
+func existsAtParent(root, commit, path string) (bool, error) {
+	parent, err := runGit(root, "rev-parse", commit+"^")
+	if err != nil {
+		return false, nil
+	}
+	if _, err := runGit(root, "cat-file", "-e", strings.TrimSpace(parent)+":"+path); err != nil {
+		return false, nil
+	}
+	return true, nil
+}
+
+// runGit runs git with an explicit working directory rather than the
+// process's own cwd, so callers work the same from main() (invoked from
+// repo root) and from tests against a fixture repo elsewhere on disk.
+func runGit(dir string, args ...string) (string, error) {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	return string(out), err
 }
 
 // repoRoot resolves the repository root regardless of the caller's own
