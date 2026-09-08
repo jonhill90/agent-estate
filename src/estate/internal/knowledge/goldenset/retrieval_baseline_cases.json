@@ -1,0 +1,184 @@
+[
+  {
+    "id": "rb-01",
+    "question": "Am I allowed to write directly to the macOS Keychain if a credential read fails?",
+    "expected_source": "vault-fact",
+    "expected_identifier": "20260824040008.md",
+    "rationale": "Vault fact 20260824040008, \"Never write to a credential store — a read failure never justifies a write\": \"On 2026-08-24 I ran `security add-generic-password -U -A` on Jon's live Claude credential to fix a read error, killed it mid-write, then deleted and recreated the item, destroying its ACL and locking every agent out for a day.\" Direct, negative answer to this exact question, chosen by reading the file before any query ran."
+  },
+  {
+    "id": "rb-02",
+    "question": "What's the rule about which git ref workers should never commit to?",
+    "expected_source": "repo-docs",
+    "expected_identifier": "AGENTS.md#agent-estate-agent-orientation--the-hard-rules-that-bind-every-task",
+    "rationale": "AGENTS.md's \"The hard rules that bind every task\" section states directly: \"Your branch is `dispatch/<id>`, created by the estate. Never commit to `main`; nothing hand-authored merges.\""
+  },
+  {
+    "id": "rb-03",
+    "question": "Is it okay to use tmux send-keys to type commands into an agent's pane?",
+    "expected_source": "repo-docs",
+    "expected_identifier": "docs/product/PRD.md#agent-estate-prd--what-it-refuses-to-do",
+    "rationale": "PRD.md's \"What it refuses to do\" section lists, first: \"Drive an agent by typing into a terminal pane and reading pixels back.\" A direct refusal of the exact mechanism this question asks about."
+  },
+  {
+    "id": "rb-04",
+    "question": "If something needs to be deleted but there's no backup, is that still safe to do?",
+    "expected_source": "repo-docs",
+    "expected_identifier": "docs/product/PRD.md#agent-estate-prd--what-it-refuses-to-do",
+    "rationale": "Same section as rb-03, different bullet: \"Delete a branch, worktree or file without a recoverable copy.\" Both bullets sit in one repo-docs section (PRD's own H2 granularity), so this and rb-03 deliberately test two different natural phrasings against the same indexed item."
+  },
+  {
+    "id": "rb-05",
+    "question": "How many independent reviews does a pull request need before it can merge?",
+    "expected_source": "repo-docs",
+    "expected_identifier": "docs/orientation/conventions.md#the-daemon-conventions--conventions",
+    "rationale": "docs/orientation/conventions.md's Conventions section states: \"One independent review per PR, by someone who did not write it — including fixup commits.\""
+  },
+  {
+    "id": "rb-06",
+    "question": "What should happen if a safety check can't measure something it depends on?",
+    "expected_source": "repo-docs",
+    "expected_identifier": "docs/product/PRD.md#agent-estate-prd--parameters-these-are-not-negotiable",
+    "rationale": "PRD.md's Parameters section, item 2: \"Every guard fails closed. A limit that cannot be measured refuses. 'Could not measure' is never reported as clean, and blindness is never capacity.\""
+  },
+  {
+    "id": "rb-07",
+    "question": "Is a merged pull request the same thing as a delivered feature?",
+    "expected_source": "repo-docs",
+    "expected_identifier": "docs/product/PRD.md#agent-estate-prd--parameters-these-are-not-negotiable",
+    "rationale": "Same section as rb-06, item 6: \"Report capability, not process. Merged is not delivered. PR counts, issue counts and sweep counts are not progress.\""
+  },
+  {
+    "id": "rb-08",
+    "question": "What's supposed to happen to a dispatched task that times out instead of finishing cleanly?",
+    "expected_source": "repo-docs",
+    "expected_identifier": "docs/product/SPEC.md#agent-estate-spec--dispatch-srcestate-estate-dispatch-issue-brief-file",
+    "rationale": "SPEC.md's Dispatch section: \"context deadline hit → `unknown` (\\\"unknown is not failed\\\"), slot stays held.\""
+  },
+  {
+    "id": "rb-09",
+    "question": "What's the right way to phrase a git commit message subject?",
+    "expected_source": "vault-fact",
+    "expected_identifier": "20260712185500.md",
+    "rationale": "Vault fact 20260712185500, \"Git commit subject style\": \"imperative mood, under 50 characters for commit subjects.\" Direct, terse answer."
+  },
+  {
+    "id": "rb-10",
+    "question": "Is it safe to assume a check passed just because no error was printed?",
+    "expected_source": "vault-fact",
+    "expected_identifier": "20260825040002.md",
+    "rationale": "Vault fact 20260825040002, \"A verification loop can print PASS lines from commands that never ran\": \"an audit of merge-gate compliance printed 'sha-match' four times while every gh call in it had failed with an argument error; the comparison was between two empty strings.\" A direct, cautionary no."
+  },
+  {
+    "id": "rb-11",
+    "question": "If I can't tell whether something failed or simply produced nothing, what should I report?",
+    "expected_source": "corpus-parameter",
+    "expected_identifier": "corpus:item:it-d43a08d739bf32a8",
+    "rationale": "it-d43a08d739bf32a8 (parameter, hard): \"A retrieval that returns nothing because it failed is indistinguishable from a corpus with no matches, and the user concludes their knowledge base is empty — that is why the read side hurts more than the write side.\" This is the same rule agent-estate#1315 (this task) is itself an instance of."
+  },
+  {
+    "id": "rb-12",
+    "question": "What's the policy on flagging AI credit usage or other projects' connectors in a status update?",
+    "expected_source": "vault-fact",
+    "expected_identifier": "20260727040000.md",
+    "rationale": "Vault fact 20260727040000, \"Topics not to raise in status updates\": \"Do not surface these in reports, summaries, or recommendations unless Jon raises them first: AI credit and account usage... Which Claude account or connector is attached, and any integration belonging to another project.\""
+  },
+  {
+    "id": "rb-13",
+    "question": "Is a passing test suite enough evidence that a fix actually works?",
+    "expected_source": "vault-fact",
+    "expected_identifier": "20260812001200.md",
+    "rationale": "Vault fact 20260812001200, \"'Delivered' is a claim about someone else's state\": \"A fixture that cannot express the failure makes every passing test meaningless, and the passing count actively conceals it.\""
+  },
+  {
+    "id": "rb-14",
+    "question": "If something can only be resolved by the operator, should an agent keep working around it for hours?",
+    "expected_source": "vault-fact",
+    "expected_identifier": "20260824040009.md",
+    "rationale": "Vault fact 20260824040009, \"A human-blocking condition must be paged to Jon, not worked around for hours\": \"on 2026-08-24 a locked keychain blocked every lane all day and it was never used, because the loop treated 'no lanes' as a constraint to route around instead of a state to escalate.\""
+  },
+  {
+    "id": "rb-15",
+    "question": "Do backup branches ever get cleaned up along with the stale ones?",
+    "expected_source": "corpus-parameter",
+    "expected_identifier": "corpus:item:it-3ddc0c46407f162f",
+    "rationale": "it-3ddc0c46407f162f (parameter, hard): \"Old branches get cleaned up, but backup branches always stay.\" Direct negative answer."
+  },
+  {
+    "id": "rb-16",
+    "question": "Is an operation that fails but still reports success a rare, one-off kind of bug here?",
+    "expected_source": "corpus-parameter",
+    "expected_identifier": "corpus:item:it-c18c335da5e1e040",
+    "rationale": "it-c18c335da5e1e040 (parameter, hard): \"An operation that fails and reports success is the defect family this estate has now closed six times.\" Directly refutes \"rare, one-off.\""
+  },
+  {
+    "id": "rb-17",
+    "question": "Is the remaining token budget estimated from usage counts, or read from a live source?",
+    "expected_source": "corpus-parameter",
+    "expected_identifier": "corpus:item:it-a11d6f2dc4ba04b7",
+    "rationale": "it-a11d6f2dc4ba04b7 (parameter, hard): \"Quota is read from the real Anthropic usage endpoint via the stored OAuth credential, not guessed from token counts.\""
+  },
+  {
+    "id": "rb-18",
+    "question": "Should work be held back to conserve the weekly token budget?",
+    "expected_source": "corpus-parameter",
+    "expected_identifier": "corpus:item:it-4a85802605f09d0d",
+    "rationale": "it-4a85802605f09d0d (parameter, hard): \"Spend the entire weekly quota -- it is meant to be used, not preserved. Do not hold work back to protect it.\""
+  },
+  {
+    "id": "rb-19",
+    "question": "Should an agent be expected to read through the whole docs tree to find what it needs?",
+    "expected_source": "corpus-parameter",
+    "expected_identifier": "corpus:item:it-33d20f60c1d1b21d",
+    "rationale": "it-33d20f60c1d1b21d (parameter, hard): \"The repo's docs must be structured for progressive disclosure so an agent can find what it needs without reading everything.\""
+  },
+  {
+    "id": "rb-20",
+    "question": "If a session ends, where should the next agent be able to recover the current state from?",
+    "expected_source": "corpus-parameter",
+    "expected_identifier": "corpus:item:it-d5aa307973214b96",
+    "rationale": "it-d5aa307973214b96 (parameter, hard): \"Handoff state must be recoverable entirely from repo docs and tracker issues, with no reliance on session context.\""
+  },
+  {
+    "id": "rb-21",
+    "question": "Should an agent ask Jon to review UI work without checking it first?",
+    "expected_source": "corpus-parameter",
+    "expected_identifier": "corpus:item:it-64cb23c92e91068c",
+    "rationale": "it-64cb23c92e91068c (parameter, hard): \"The agent must screenshot and inspect its own work before asking Jon to review it. Do not hand him garbage to QA.\""
+  },
+  {
+    "id": "rb-22",
+    "question": "Is it acceptable to deploy by SSHing directly into the server from a laptop?",
+    "expected_source": "corpus-parameter",
+    "expected_identifier": "corpus:item:it-844b5c8eef4e9a48",
+    "rationale": "it-844b5c8eef4e9a48 (parameter, hard): \"Deploys run through the CI pipeline, never by SSHing to the VPS from Jon's Mac.\""
+  },
+  {
+    "id": "rb-23",
+    "question": "How do you confirm a server rebuild actually works?",
+    "expected_source": "corpus-parameter",
+    "expected_identifier": "corpus:item:it-d0c96aba3fd9168b",
+    "rationale": "it-d0c96aba3fd9168b (parameter, hard): \"The VPS must be rebuildable from the GitHub pipeline, and that rebuild is the confirmation it works.\""
+  },
+  {
+    "id": "rb-24",
+    "question": "How does a dispatched turn get its own identity?",
+    "expected_source": "repo-docs",
+    "expected_identifier": "AGENTS.md#agent-estate-agent-orientation--invariants-one-line-each-the-full-text-with-evidence-is-docsorientationinvariantsmddocsorientationinvariantsmd",
+    "rationale": "AGENTS.md's Invariants section, item 10: \"A dispatched turn does not derive its own identity — the estate states it.\" This is agent-estate#1315's own worked example (it-421dac27146971f4 in the issue's numbering, the same section under the compiled index's current itemID scheme)."
+  },
+  {
+    "id": "rb-25",
+    "question": "Should branch protection's enforce_admins setting be turned on for a single-maintainer repo?",
+    "expected_source": "corpus-parameter",
+    "expected_identifier": "corpus:item:it-9ca53f968ec6aee2",
+    "rationale": "it-9ca53f968ec6aee2 (parameter, hard): \"Leave enforce_admins false on the branch protection rule — on a single-maintainer repo an absolute wall has no escape hatch except disabling the rule entirely, which leaves no trace, and that is worse than a bypass that does.\""
+  },
+  {
+    "id": "rb-26",
+    "question": "If scanning a repo's history for secrets before it goes public, is checking just the default branch enough?",
+    "expected_source": "corpus-parameter",
+    "expected_identifier": "corpus:item:it-0db158f572f90244",
+    "rationale": "it-0db158f572f90244 (parameter, hard): \"For a repository going public, scanning the history means all refs, not just the default branch — gitleaks over origin/main misses commits on remote branches that also went public.\""
+  }
+]
