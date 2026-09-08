@@ -1838,3 +1838,126 @@ func TestRuleWeightIsVaultOnly(t *testing.T) {
 		t.Fatal("a repo-docs item was treated as a distilled vault rule")
 	}
 }
+
+// weakMatchIndex builds a two-item fixture for StateMatchedWeak: one item
+// whose Tier1/Tier2 share every term with the question (a strong,
+// high-scoring match) and one that shares only incidental vocabulary (a
+// weak, low-scoring one) -- agent-estate#1315.
+func weakMatchIndex(t *testing.T) string {
+	t.Helper()
+	items := []Item{
+		{
+			ID: "20260908150000", Source: "vault-fact",
+			Permalink:   "/vault/agent/facts/weak-example.md",
+			Tier1:       "an unrelated topic with only a loose policy connection",
+			Tier2:       "a passing mention of rotation in an otherwise unconnected context",
+			Publishable: true, PublishBasis: "test fixture: marked publishable",
+		},
+	}
+	path := filepath.Join(t.TempDir(), "index.json")
+	res := Result{
+		GeneratedAt:   time.Date(2026, 9, 8, 15, 0, 0, 0, time.UTC),
+		StalenessRule: stalenessRule,
+		Note:          derivedNote,
+		Items:         items,
+	}
+	if err := Write(path, res); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestQueryMatchedWeakFiresBelowTheFloor is agent-estate#1315's own
+// acceptance case: a query whose only match shares little real vocabulary
+// with the question must be flagged, not returned as plain StateMatched
+// looking identical to a confident hit.
+func TestQueryMatchedWeakFiresBelowTheFloor(t *testing.T) {
+	origMin := weakMatchMinIndexItems
+	weakMatchMinIndexItems = 0 // this fixture is intentionally tiny -- see weakMatchMinIndexItems' own doc comment
+	defer func() { weakMatchMinIndexItems = origMin }()
+
+	path := weakMatchIndex(t)
+	got := Query(path, "credential rotation keychain policy", 0, true)
+
+	if len(got.Matches) != 1 {
+		t.Fatalf("len(Matches) = %d, want 1 -- the low-scoring item must still be returned, not suppressed", len(got.Matches))
+	}
+	if got.Matches[0].Score >= weakMatchScoreFloor {
+		t.Fatalf("fixture's own score = %d, want < weakMatchScoreFloor (%d) -- fixture no longer exercises the case this test is for", got.Matches[0].Score, weakMatchScoreFloor)
+	}
+	if got.State != StateMatchedWeak {
+		t.Fatalf("State = %q, want %q (score %d, floor %d)", got.State, StateMatchedWeak, got.Matches[0].Score, weakMatchScoreFloor)
+	}
+	if got.Reason == "" {
+		t.Error("Reason is empty on a weak-matched result")
+	}
+}
+
+// TestQueryMatchedWeakFloorIsLoadBearing proves the floor is doing real
+// work, not vacuously true because the fixture never approached it --
+// mirrors TestStandingLawCapsAreLoadBearing's own two-direction proof.
+// Moving the floor below the fixture's own score must turn the SAME
+// result plain StateMatched; moving it back must restore StateMatchedWeak.
+func TestQueryMatchedWeakFloorIsLoadBearing(t *testing.T) {
+	origMin := weakMatchMinIndexItems
+	weakMatchMinIndexItems = 0 // this fixture is intentionally tiny -- see weakMatchMinIndexItems' own doc comment
+	defer func() { weakMatchMinIndexItems = origMin }()
+
+	path := weakMatchIndex(t)
+	orig := weakMatchScoreFloor
+	defer func() { weakMatchScoreFloor = orig }()
+
+	got := Query(path, "credential rotation keychain policy", 0, true)
+	if got.State != StateMatchedWeak {
+		t.Fatalf("State = %q under the real floor (%d), want %q -- fixture setup bug", got.State, orig, StateMatchedWeak)
+	}
+	score := got.Matches[0].Score
+
+	weakMatchScoreFloor = score // no longer strictly below -- must not fire
+	got = Query(path, "credential rotation keychain policy", 0, true)
+	if got.State != StateMatched {
+		t.Fatalf("State = %q with floor lowered to the fixture's own score (%d), want plain %q -- the floor is not load-bearing", got.State, score, StateMatched)
+	}
+
+	weakMatchScoreFloor = score + 1 // strictly below again -- must fire
+	got = Query(path, "credential rotation keychain policy", 0, true)
+	if got.State != StateMatchedWeak {
+		t.Fatalf("State = %q with floor restored above the fixture's score, want %q", got.State, StateMatchedWeak)
+	}
+}
+
+// TestQueryMatchedWeakNeverOverridesWithheldMajority proves the stated
+// priority in StateMatchedWeak's own doc comment: a result that is BOTH
+// weak and majority-private reports the privacy finding, not the weak one.
+func TestQueryMatchedWeakNeverOverridesWithheldMajority(t *testing.T) {
+	origMin := weakMatchMinIndexItems
+	weakMatchMinIndexItems = 0 // this fixture is intentionally tiny -- see weakMatchMinIndexItems' own doc comment
+	defer func() { weakMatchMinIndexItems = origMin }()
+
+	path := withheldMajorityIndex(t, 2) // 1 public, 2 private -- majority private
+	orig := weakMatchScoreFloor
+	defer func() { weakMatchScoreFloor = orig }()
+	// Force the floor far above anything this fixture could score, so the
+	// weak condition is definitely true too -- proving WithheldMajority's
+	// priority is not merely a coincidence of the fixture's own numbers.
+	weakMatchScoreFloor = 1 << 20
+
+	got := Query(path, "credential rotation keychain policy", 0, false)
+	if got.State != StateMatchedWithheldMajority {
+		t.Fatalf("State = %q, want %q -- weak must never override the more actionable privacy finding", got.State, StateMatchedWithheldMajority)
+	}
+}
+
+// TestQueryMatchedWeakDoesNotFireBelowTheMinIndexSize proves
+// weakMatchMinIndexItems is load-bearing, not decorative: the exact same
+// low-scoring fixture that fires StateMatchedWeak once the gate is
+// lowered (TestQueryMatchedWeakFiresBelowTheFloor) must NOT fire under
+// the real, production gate -- this small a fixture never gets close to
+// weakMatchMinIndexItems, and the state must stay plain StateMatched.
+func TestQueryMatchedWeakDoesNotFireBelowTheMinIndexSize(t *testing.T) {
+	path := weakMatchIndex(t) // production weakMatchMinIndexItems untouched
+	got := Query(path, "credential rotation keychain policy", 0, true)
+	if got.State != StateMatched {
+		t.Fatalf("State = %q, want plain %q -- a fixture this small must never trigger a score-based signal calibrated against a much larger index", got.State, StateMatched)
+	}
+}

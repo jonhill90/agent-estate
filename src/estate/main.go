@@ -879,6 +879,15 @@ func printKnowledgeQuery(qr knowledge.QueryResult) {
 		// knowledgeQueryExitCode's own comment for why).
 		fmt.Println("*** MOSTLY WITHHELD -- most matching items are private; the results below are a minority of the answer ***")
 	}
+	if qr.State == knowledge.StateMatchedWeak {
+		// agent-estate#1315: same posture as the withheld-majority banner
+		// above -- exit 0, "matched" alone would read as plain success,
+		// this is the loud signal a caller reading only the state word
+		// needs. qr.Reason names the actual score and the measured floor
+		// it fell under; not restated here so the two can never drift.
+		fmt.Println("*** WEAK MATCH -- nothing below scored with confidence; this may not be your answer ***")
+		fmt.Println(qr.Reason)
+	}
 	printContradictions(qr.Contradictions)
 	printSourceStatuses(qr.SourceStatuses)
 	fmt.Printf("%d match(es) for %q (showing %d, %d not returned, %d withheld as private)\n\n",
@@ -976,7 +985,8 @@ func printRepoDocsRootIfAny(sources []string) {
 // code by omission.
 //
 //	0  StateMatched,
-//	   StateMatchedWithheldMajority -- at least one publishable item answers
+//	   StateMatchedWithheldMajority,
+//	   StateMatchedWeak             -- at least one publishable item answers
 //	                                   this and was returned
 //	1  StateNoMatch          -- the index was read fine; nothing answers this
 //	2  StateIndexMissing,
@@ -1002,6 +1012,9 @@ func printRepoDocsRootIfAny(sources []string) {
 // have turned those into runner failures, moving the golden score, which
 // #1052 explicitly forbids. A caller that inspects the state word itself,
 // not just $?, is the one this state is for.
+//
+// StateMatchedWeak (agent-estate#1315) shares the same exit code for the
+// identical reason -- see its own doc comment in query.go.
 func knowledgeQueryExitCode(state knowledge.QueryState) int {
 	switch state {
 	case knowledge.StateIndexMissing, knowledge.StateIndexUnreadable:
@@ -1010,7 +1023,7 @@ func knowledgeQueryExitCode(state knowledge.QueryState) int {
 		return 3
 	case knowledge.StateNoMatch:
 		return 1
-	default: // StateMatched, StateMatchedWithheldMajority
+	default: // StateMatched, StateMatchedWithheldMajority, StateMatchedWeak
 		return 0
 	}
 }
@@ -1288,9 +1301,10 @@ func parseKnowledgeArgs(args []string) (includePrivate, asJSON bool, rest []stri
 // fully JSON-tagged, so this is transport only, never a second
 // computation of what Query decided. Every state (matched, no_match,
 // index_missing, index_unreadable, withheld_private,
-// matched_withheld_majority) is emitted the same way, unlike prose mode's
-// early stderr returns for the two index-read failures -- a JSON caller
-// reads State, not which stream the process wrote to.
+// matched_withheld_majority, matched_weak) is emitted the same way,
+// unlike prose mode's early stderr returns for the two index-read
+// failures -- a JSON caller reads State, not which stream the process
+// wrote to.
 func printKnowledgeQueryJSON(qr knowledge.QueryResult) {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")

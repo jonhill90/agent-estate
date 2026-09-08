@@ -64,7 +64,83 @@ const (
 	// dedicated banner line (see printKnowledgeQuery in main.go), not in
 	// the exit code.
 	StateMatchedWithheldMajority QueryState = "matched_withheld_majority"
+	// StateMatchedWeak means at least one publishable item scored above
+	// zero and was returned -- same population as StateMatched -- but the
+	// top-ranked item's own score falls below weakMatchScoreFloor
+	// (agent-estate#1315). #1315's own demonstration is this state's
+	// reason to exist: "how do I check which issues a PR will close"
+	// returned ten items, none of them the indexed answer, with no signal
+	// distinguishing that list from a confident one -- a query whose
+	// answer ranks nowhere read identical to a query whose answer does
+	// not exist (it-d43a08d739bf32a8). This is a caution, not a verdict:
+	// weakMatchScoreFloor was chosen to produce zero false positives on
+	// #1315's own 26-question measured baseline (no genuine hit in that
+	// set is ever flagged weak), but it only catches 7 of 17 real misses
+	// -- a result NOT flagged weak is not thereby guaranteed correct. See
+	// weakMatchScoreFloor's own doc comment for the measured rates.
+	//
+	// Deliberately maps to the SAME exit code as StateMatched (0), same
+	// reasoning as StateMatchedWithheldMajority's own doc comment: real,
+	// citable, publishable results were returned. The signal lives in the
+	// state word and a dedicated banner line (see printKnowledgeQuery in
+	// main.go), not in the exit code -- collapsing every already-passing
+	// golden-set hit whose top score happens to sit below the floor (see
+	// above) into a runner failure would move the golden score for a
+	// reason unrelated to whether the answer is right, which #1052
+	// already established must not happen for the sibling state.
+	//
+	// Never overrides StateMatchedWithheldMajority: a result set that is
+	// BOTH weak and mostly-private reports the privacy finding, the more
+	// actionable of the two -- rerunning with --private can only ever
+	// fix one of them.
+	StateMatchedWeak QueryState = "matched_weak"
 )
+
+// weakMatchScoreFloor is the threshold StateMatchedWeak checks the
+// top-ranked match's own (rounded) BM25 score against -- chosen
+// empirically against agent-estate#1315's own 26-question operator-words
+// baseline (src/estate/internal/knowledge/goldenset/retrieval_baseline_cases.json),
+// never picked as a round number. Measured on that set: the 9 genuine
+// top-10 hits' own top scores ranged 27-80 (minimum 27, case rb-10); the
+// 17 misses' top scores ranged 21-49 (case rb-20 scored 49 while still
+// missing its own answer entirely). No score threshold cleanly separates
+// the two populations -- BM25 score reflects TERM OVERLAP MAGNITUDE, not
+// semantic relevance, and a miss can share heavy incidental vocabulary
+// with an unrelated item while a genuine hit shares only the terms that
+// actually matter. 27 (one below the lowest observed hit) was chosen
+// specifically to produce ZERO false positives on the measured set (no
+// genuine hit is ever flagged weak) at the cost of catching only 7 of 17
+// misses (41%) -- see StateMatchedWeak's own doc comment for why
+// under-warning was chosen over ever contradicting a correct answer.
+// This is a v0 number over a 26-case set, not a derived constant --
+// restate it if the measured population changes materially (agent-estate#1315's
+// own PR body carries the full per-case table this was measured from).
+//
+// A var, not a const -- purely so tests can move it and prove the floor is
+// load-bearing rather than merely present, then restore the original --
+// mirrors internal/corpus.MaxStandingLawMembers/MaxStandingLawBytes's own
+// documented reason for the identical choice. Production always runs with
+// the value below.
+var weakMatchScoreFloor = 27
+
+// weakMatchMinIndexItems gates weakMatchScoreFloor on the compiled
+// index actually being close to the scale it was measured against.
+// BM25's score magnitude is corpus-size-dependent through its own IDF
+// term: measured directly while building this feature, the SAME
+// fixture text that scores 27+ against the real ~7,700-item index
+// scores single digits against a handful-of-items test fixture, because
+// a term common in a tiny index is not "rare" the way IDF needs it to
+// be to produce a large score. Retrofitting this file's own pre-existing
+// small fixtures to score realistically would have meant rewriting them
+// to simulate a large corpus merely to dodge a state neither they nor
+// their own tests have any interest in -- the gate is the smaller,
+// more honest change: the signal does not fire below this scale,
+// because a threshold measured against one corpus size is not a
+// portable fact about a different one, and claiming it is would be
+// exactly the kind of unearned confidence #1315 exists to argue
+// against. A var, not a const, for the same test-only reason
+// weakMatchScoreFloor is.
+var weakMatchMinIndexItems = 100
 
 // QueryLimit is the hard cap on items Query returns in one call --
 // #1019's "small by construction" requirement. Ten was picked because it
@@ -1380,6 +1456,27 @@ func Query(indexPath, question string, limit int, includePrivate bool) QueryResu
 	}
 	out.NotReturned = out.TotalMatched - len(out.Matches)
 	out.Contradictions = detectContradictions(out.Matches)
+	// agent-estate#1315: a weak top match gets its own state, checked
+	// last and only when nothing more specific already claimed State --
+	// see StateMatchedWeak's own doc comment for why it never overrides
+	// StateMatchedWithheldMajority. Checked against out.Matches[0], the
+	// actual top-ranked result a caller sees, not the pre-filter
+	// candidate list -- the two differ only when the highest-scoring
+	// candidate itself was private and this call did not ask for private
+	// material, in which case the shown top match is the right one to
+	// judge confidence against.
+	if out.State == StateMatched && len(res.Items) >= weakMatchMinIndexItems &&
+		len(out.Matches) > 0 && out.Matches[0].Score < weakMatchScoreFloor {
+		// Deliberately does NOT touch out.Coverage: Coverage states
+		// whether a SOURCE was withheld or fell behind (a completeness
+		// question), never touched by score alone -- every item that
+		// exists and was eligible to be returned still was; the finding
+		// here is about confidence in what was shown, not about anything
+		// missing from it.
+		out.State = StateMatchedWeak
+		out.Reason = fmt.Sprintf("top match scored %d, below the %d floor measured against agent-estate#1315's own baseline -- treat this as \"nothing matched well,\" not a confident answer",
+			out.Matches[0].Score, weakMatchScoreFloor)
+	}
 	return out
 }
 

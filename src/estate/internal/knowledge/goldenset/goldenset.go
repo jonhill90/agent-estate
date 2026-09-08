@@ -74,6 +74,28 @@ var naturalCasesJSON []byte
 //go:embed star_cases.json
 var starCasesJSON []byte
 
+// retrievalBaselineCasesJSON is agent-estate#1315's own fixture: a
+// question set written in an OPERATOR's words, not the corpus's or a
+// note's own -- the discipline #1315 itself names as the reason the
+// defect went uncaught (5 self-verified questions, all pre-known
+// answers, all passed). Every question here was written and committed to
+// this file (questions-draft.txt in the PR's own history) BEFORE its
+// answer was looked up, and every expected_identifier was chosen by
+// reading the corpus/vault source directly, never by running `estate
+// knowledge query` first and copying back whatever it returned -- the
+// same discipline this package's own top comment requires of every other
+// stratum, applied here to vault-fact and corpus-parameter answers
+// specifically (the layer #1315 names: "distilledRuleWeight reorders
+// items that already matched -- it does not recall"). Kept as its own
+// loader, not folded into Load/LoadNatural/LoadStars, so this stratum's
+// score is never averaged with any other: it measures something none of
+// the others do (recall under vocabulary mismatch against the
+// vault/corpus layer specifically), not a variant of an existing
+// measurement.
+//
+//go:embed retrieval_baseline_cases.json
+var retrievalBaselineCasesJSON []byte
+
 // ExpectedSource names which of estate knowledge's five compiled sources
 // (or "none") a case's answer comes from -- see internal/knowledge's own
 // Item.Source values, which these mirror exactly except for "none".
@@ -191,6 +213,20 @@ func LoadStars() ([]Case, error) {
 	var cases []Case
 	if err := json.Unmarshal(starCasesJSON, &cases); err != nil {
 		return nil, fmt.Errorf("goldenset: star_cases.json is malformed: %w", err)
+	}
+	return cases, nil
+}
+
+// LoadRetrievalBaseline parses the embedded retrieval_baseline_cases.json
+// -- agent-estate#1315's operator-words stratum over vault-fact and
+// corpus-parameter answers. It only ever fails if the file itself is
+// malformed -- there is no filesystem path to miss at runtime. Kept as
+// its own loader, not folded into any other, per this stratum's own
+// doc comment above.
+func LoadRetrievalBaseline() ([]Case, error) {
+	var cases []Case
+	if err := json.Unmarshal(retrievalBaselineCasesJSON, &cases); err != nil {
+		return nil, fmt.Errorf("goldenset: retrieval_baseline_cases.json is malformed: %w", err)
 	}
 	return cases, nil
 }
