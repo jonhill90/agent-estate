@@ -60,7 +60,21 @@ func repoDocsSource(repoRoot string) (SourceResult, []Item) {
 		}
 		if strings.HasSuffix(path, ".md") {
 			if rel, relErr := filepath.Rel(repoRoot, path); relErr == nil {
-				relPaths = append(relPaths, filepath.ToSlash(rel))
+				relSlash := filepath.ToSlash(rel)
+				// docs/plan/ holds working records -- briefs, reports,
+				// queue logs, superseded push plans. They are history,
+				// not authority. Indexing all of them into repo-docs
+				// would drown the canonical docs this source exists to
+				// surface -- the same evidence-drowns-rules layering
+				// error just fixed in the vault (distilledRuleWeight,
+				// query.go). docs/plan/PLAN.md is the one exception: it
+				// is the routing surface stating which plan governs, so
+				// an agent asking about the plan must be able to find
+				// it here.
+				if strings.HasPrefix(relSlash, "docs/plan/") && relSlash != "docs/plan/PLAN.md" {
+					return nil
+				}
+				relPaths = append(relPaths, relSlash)
 			}
 		}
 		return nil
