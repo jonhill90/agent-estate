@@ -53,6 +53,25 @@ REQUIRED_FRONTMATTER = ("type", "created", "source")
 RECOMMENDED_FRONTMATTER = ("title", "description")
 SUBDIR_ROW_RE = re.compile(r"^\| `(\d{2}[a-z])` \| `01 - Notes/([^`/]+)/` \|", re.M)
 
+# Named, not a blanket "any dot-prefixed directory is scratch" -- that shape
+# already burned this same check once (below): trusting a category by
+# default instead of naming what's actually in it. `.obsidian` and `.trash`
+# are Obsidian's own; `.p15-fix-backup`, the numbered `.source-*-backup-*`
+# and `.inmaps-backup-*` directories are migration/tool-generated snapshots
+# actually present in the real vault (enumerated with os.walk, not just the
+# vault root -- the root-only pass this list started from missed 56
+# `.inmaps-backup-*` dirs nested under 99 - Meta/, agent-estate#1296 fix
+# pass). Each currently holds zero *.md files (checked directly), so this
+# list names them for what they are rather than leaving them an accident of
+# "rglob('*.md') never happened to look there yet." A real vault directory
+# someone later dot-prefixes is not silently exempted by this list the way
+# it would be by `startswith(".")`.
+SCRATCH_DIR_RE = re.compile(
+    r"^\.(?:obsidian|trash|p15-fix-backup"
+    r"|source-(?:hub|index|view)-backup-\d+"
+    r"|inmaps-backup-\d+)$"
+)
+
 
 def vault_dir():
     here = os.path.dirname(os.path.abspath(__file__))  # .../99 - Meta/tools
@@ -232,13 +251,21 @@ def main():
     # A target containing "<" is a documented placeholder in a contract or a
     # spec ("01 - Notes/<subdir>/<id>.md"), not a link anyone can follow.
     for path in sorted(Path(vault).rglob("*.md")):
-        # Any dot-directory is scratch or a backup, not the vault proper --
-        # .obsidian, .trash, and the .p15-fix-backup snapshots a migration left.
-        if any(part.startswith(".") for part in path.parts):
+        # Named exemptions only (SCRATCH_DIR_RE above) -- see its comment for
+        # why this isn't a blanket "any dot-prefixed directory" skip.
+        if any(SCRATCH_DIR_RE.match(part) for part in path.parts):
             continue
         try:
             text = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
+        except (OSError, UnicodeDecodeError) as e:
+            # A read that fails and a file with nothing wrong in it must not
+            # look the same (it-d43a08d739bf32a8) -- fail closed, matching
+            # how every other read_text() in this file behaves (raise and
+            # halt), rather than silently skipping whatever link check this
+            # file would have failed.
+            hard_violations.append(
+                f"{path.relative_to(vault)}: could not read for link check -> {e}"
+            )
             continue
         for m in re.finditer(r"\]\(([^)]+\.md)\)", text):
             target = unquote(m.group(1))

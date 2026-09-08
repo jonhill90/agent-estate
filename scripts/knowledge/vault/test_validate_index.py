@@ -1,4 +1,4 @@
-import contextlib, importlib.util, io, pathlib, tempfile, unittest
+import contextlib, importlib.util, io, os, pathlib, tempfile, unittest
 
 P = pathlib.Path(__file__).with_name('validate_index.py')
 spec = importlib.util.spec_from_file_location('validator', P)
@@ -193,6 +193,63 @@ class ValidateIndex(unittest.TestCase):
             self.assertEqual(code, 1)
             self.assertIn("link does not resolve", out)
             self.assertIn("202607120099.md", out)
+
+    def test_unreadable_file_is_a_violation_not_silence(self):
+        # Reviewer's finding on PR #1296 (fix pass, 2026-09-07): check 3a was
+        # the only read_text() in the file wrapped in try/except, and an
+        # unreadable file's broken link vanished with no trace -- chmod 644
+        # reports the violation, chmod 000 reports nothing, same exit code
+        # otherwise. A read that failed and an empty result must not look
+        # the same (it-d43a08d739bf32a8). Isolated fixture, not the live
+        # vault, per the brief.
+        if os.name != "posix" or hasattr(os, "geteuid") and os.geteuid() == 0:
+            self.skipTest("permission bits are not enforced for root or on this platform")
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            self.write_fact(root, "202607120001.md")
+            scratch = root / "03 - Scratch"
+            scratch.mkdir()
+            unreadable = scratch / "unreadable.md"
+            unreadable.write_text("- [Gone](../01 - Notes/202607120099.md)\n")
+            unreadable.chmod(0o000)
+            try:
+                code, out = self.run_against(root, "- [Test](01 - Notes/202607120001.md) — fixture\n")
+            finally:
+                unreadable.chmod(0o644)
+            self.assertEqual(code, 1)
+            self.assertIn("03 - Scratch/unreadable.md", out)
+
+    def test_named_scratch_dirs_still_skipped(self):
+        # The narrowed check (fix pass, PR #1296) must still exempt exactly
+        # the directories the old blanket startswith(".") skip was meant
+        # for -- Obsidian's own plus the numbered backup snapshots.
+        for name in (".obsidian", ".trash", ".p15-fix-backup", ".source-hub-backup-123"):
+            with tempfile.TemporaryDirectory() as d:
+                root = pathlib.Path(d)
+                self.write_fact(root, "202607120001.md")
+                scratch = root / name
+                scratch.mkdir()
+                (scratch / "stale.md").write_text(
+                    "- [Gone](../01 - Notes/202607120099.md)\n"
+                )
+                code, _ = self.run_against(root, "- [Test](01 - Notes/202607120001.md) — fixture\n")
+                self.assertEqual(code, 0, f"{name} should still be exempt")
+
+    def test_unnamed_dot_dir_is_not_silently_exempt(self):
+        # The whole point of narrowing to a named list: a real dot-prefixed
+        # directory that isn't one of the known scratch/backup names is no
+        # longer given a free pass the way a blanket startswith(".") would.
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            self.write_fact(root, "202607120001.md")
+            odd = root / ".in-progress"
+            odd.mkdir()
+            (odd / "notes.md").write_text(
+                "- [Gone](../01 - Notes/202607120099.md)\n"
+            )
+            code, out = self.run_against(root, "- [Test](01 - Notes/202607120001.md) — fixture\n")
+            self.assertEqual(code, 1)
+            self.assertIn(".in-progress/notes.md", out)
 
     def test_placeholder_link_with_angle_bracket_is_not_a_violation(self):
         # A target containing "<" is a documented placeholder in a contract
