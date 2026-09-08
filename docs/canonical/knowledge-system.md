@@ -16,11 +16,17 @@ paraphrase of any private directive — mechanism only, never knowledge.
 
 ## What does `estate knowledge` actually index?
 
-Five sources, none of them owned or written by this package
+Six sources, none of them owned or written by this package
 (`src/estate/internal/knowledge/knowledge.go`):
 
 - GitHub stars (`gh api user/starred`)
-- the Agent Memory vault (`$AGENT_MEMORY_VAULT/agent/facts/*.md`)
+- the Agent Memory vault — INMAPS notes under
+  `$AGENT_MEMORY_VAULT/01 - Notes/**/<12-digit-id>.md` (any earned
+  subdirectory, e.g. `01f - Facts`, `01p - Parameters` — registry:
+  `99 - Meta/note-subdirs.md`), plus the legacy `agent/facts/*.md` shape
+  for a vault that has not migrated. `agent/` was retired from the real
+  vault by A2-COMPLETION (agent-estate#1275); this source tolerates its
+  own absence rather than failing over it.
 - the operator's prompt/parameter corpus (`~/corpus/corpus.sqlite3`'s
   `live_parameters` view only — never the raw `prompts` table)
 - `~/source/repos/Personal/Loops-Research`, numbered markdown files
@@ -28,12 +34,16 @@ Five sources, none of them owned or written by this package
   `docs/**/*.md` file, split by heading at `##`/`###` — which is why this very
   file's headings are phrased as questions rather than nouns: each heading is
   its own retrievable unit.
+- the source catalogue (`~/.local/state/agent-estate/catalogue/register.json`,
+  `source:catalogue-source`) — registered repos, documents and URLs, landed
+  by agent-estate#1264 (lane B); indexed as metadata pointers, which does
+  not by itself establish that the cited material was read.
 
 `estate knowledge` (no further arguments) regenerates the compiled index and
 writes it to `$ESTATE_KNOWLEDGE_INDEX` (a path you can override — see
 "How do I check my own doc changes before shipping them?" below). The index
 is **derived and regenerable, never authoritative**: it is safe to delete and
-rebuild at any time, and never a second source of truth for any of its five
+rebuild at any time, and never a second source of truth for any of its six
 sources.
 
 ## How do I query it?
