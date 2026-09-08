@@ -1799,3 +1799,42 @@ func TestQueryStandingConstraintSurvivesLexicallyDifferentQuestion(t *testing.T)
 			"(agent-estate#1255)", lexicallyDifferent.Matches)
 	}
 }
+
+// TestDistilledRuleOutranksItsOwnEvidence pins the ordering the vault's two
+// layers require. The evidence layer outnumbers the rules layer roughly 10:1,
+// so without this a coincidental word match in evidence beats the rule that
+// answers the question -- measured 2026-09-07, "can I commit directly to
+// main" returned a note about chatting with the director because it contained
+// "directly".
+func TestDistilledRuleOutranksItsOwnEvidence(t *testing.T) {
+	rule := Item{
+		Source: VaultItemSourceTag, Publishable: true, ID: "rule",
+		StructuralTags: []string{"Fact"}, SynapticTags: []string{"#rule"},
+	}
+	evidence := Item{
+		Source: VaultItemSourceTag, Publishable: true, ID: "evidence",
+		StructuralTags: []string{"Parameter"}, SynapticTags: []string{"#merge"},
+	}
+	if !isDistilledRule(rule) {
+		t.Fatal("a Fact carrying the rule tag was not recognised as a distilled rule")
+	}
+	if isDistilledRule(evidence) {
+		t.Fatal("a Parameter projection was misread as a distilled rule")
+	}
+	// The weight must actually lift, or the pin is decorative.
+	if distilledRuleWeight <= 1.0 {
+		t.Fatalf("distilledRuleWeight = %v, which cannot reorder anything", distilledRuleWeight)
+	}
+}
+
+// A non-vault item must never pick up the rule weight, or repo-docs and
+// github-stars start competing on a signal that means nothing for them.
+func TestRuleWeightIsVaultOnly(t *testing.T) {
+	foreign := Item{
+		Source: "repo-docs", Publishable: true, ID: "x",
+		StructuralTags: []string{"Fact"}, SynapticTags: []string{"#rule"},
+	}
+	if isDistilledRule(foreign) {
+		t.Fatal("a repo-docs item was treated as a distilled vault rule")
+	}
+}

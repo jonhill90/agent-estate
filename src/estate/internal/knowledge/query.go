@@ -518,6 +518,34 @@ var stopWords = map[string]bool{
 // ("loggedIn" -> "loggedin", "logged", "in") -- built as a throwaway
 // patched binary (this function plus removing the pre-lowering in
 // tier1SearchableText/tier2SearchableText/ancestorSearchableText in
+// distilledRuleWeight lifts a distilled rule above the evidence it was
+// distilled from. 1.6 was chosen as the smallest factor that reorders the
+// measured failures without letting a weak rule match outrank a strong
+// evidence match: a rule scoring 12 clears evidence at 19, but not at 20.
+const distilledRuleWeight = 1.6
+
+// isDistilledRule reports whether an item is a judged rule from the vault's
+// facts layer, as opposed to a projection of a single corpus item. The marker
+// is the structural tag the vault source derives from the note's own `type:`
+// frontmatter, plus the "rule" tag those notes carry.
+func isDistilledRule(it Item) bool {
+	if it.Source != VaultItemSourceTag {
+		return false
+	}
+	hasFact, hasRule := false, false
+	for _, t := range it.StructuralTags {
+		if strings.EqualFold(t, "Fact") {
+			hasFact = true
+		}
+	}
+	for _, t := range it.SynapticTags {
+		if strings.EqualFold(strings.TrimPrefix(t, "#"), "rule") {
+			hasRule = true
+		}
+	}
+	return hasFact && hasRule
+}
+
 // bm25.go, which otherwise destroys the case information a camelCase
 // split needs before this function ever sees the text) and run against
 // ONE scratch index via cmd/goldenquery. One scratch index sufficed for
@@ -1216,6 +1244,22 @@ func Query(indexPath, question string, limit int, includePrivate bool) QueryResu
 				// measurements.
 				score += vaultFactTitleBonus
 			}
+		}
+		// The distilled layer outranks the evidence layer. Measured
+		// 2026-09-07: the vault holds ~3,070 evidence notes (one per thing
+		// Jon said) against ~300 distilled rules, so on sheer population a
+		// coincidental word match in evidence beat the rule that answers the
+		// question -- "can I commit directly to main" returned a note about
+		// chatting with the director, because it contained "directly".
+		//
+		// A rule is not merely another note: it was selected by reading every
+		// statement on its subject and choosing the one that binds behaviour.
+		// Ranking it level with its own evidence throws that judgement away.
+		// The multiplier is deliberately modest -- it reorders within a
+		// matched set, it does not manufacture a match that BM25 did not
+		// already find.
+		if isDistilledRule(it) {
+			score *= distilledRuleWeight
 		}
 		if !includePrivate && !it.Publishable {
 			withheldPrivate++
