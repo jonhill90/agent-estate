@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -90,5 +91,41 @@ func TestAgentsMDNamesOnlyRealSubcommands(t *testing.T) {
 			"main.go has: %s\n"+
 			"If the command is real on another branch, it is not real here -- say so, or do not name it.",
 			strings.Join(names, ", "), strings.Join(have, ", "))
+	}
+}
+
+// TestAgentsMDRoutesPastTombstones pins that the routing table sends a reader
+// to content, not to a redirect.
+//
+// P12's docs classification moved the living docs into docs/canonical/ and
+// left 2-line tombstones at the old paths for external consumers. AGENTS.md
+// kept pointing at the old paths, so 7 of its 14 routing links landed on
+// "Moved to ..." and the reader had to hop again. A routing surface whose
+// routes are indirections is the thing progressive disclosure exists to
+// prevent: an agent should find what it needs without reading everything, and
+// a wasted hop is reading something that carries no content.
+func TestAgentsMDRoutesPastTombstones(t *testing.T) {
+	root, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(root, "AGENTS.md"))
+	if err != nil {
+		// Refuse rather than pass: a check that cannot find its subject has
+		// not verified anything.
+		t.Fatalf("cannot read AGENTS.md, so nothing was verified: %v", err)
+	}
+	link := regexp.MustCompile(`\(docs/[^)]*\.md\)`)
+	for _, m := range link.FindAllString(string(b), -1) {
+		rel := strings.Trim(m, "()")
+		target, err := os.ReadFile(filepath.Join(root, rel))
+		if err != nil {
+			t.Errorf("AGENTS.md links to %s, which does not exist", rel)
+			continue
+		}
+		if bytes.HasPrefix(bytes.TrimSpace(target), []byte("Moved to ")) {
+			t.Errorf("AGENTS.md routes to a tombstone: %s -- point it at the "+
+				"path the tombstone names, so a reader arrives in one hop", rel)
+		}
 	}
 }
