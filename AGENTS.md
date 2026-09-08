@@ -93,10 +93,23 @@ Do not break these without an explicit decision. Also read, before reporting
 "none"/"empty"/"never": the failure-mode section in the same file — an
 instrument that cannot see a thing looks exactly like the thing being absent.
 
+## Before you take a brief: read the plan
+
+**[docs/plan/PLAN.md](docs/plan/PLAN.md)** says which plan governs, which are
+its children, and which are superseded. Read it before acting on a brief a
+lane or a director handed you.
+
+This exists because on 2026-09-07 ten plan-shaped documents described this
+work, two of them were real plans, and neither referenced the other — so
+agents followed whichever brief was nearest and a weekend of carefully
+executed work never connected to the recorded goal. **A brief is an
+instruction to one worker at one moment. It does not override the plan.**
+
 ## Task routing — open only what your task touches
 
 | Touching… | Read |
 |---|---|
+| What the plan is, what is done, what governs | [docs/plan/PLAN.md](docs/plan/PLAN.md) |
 | The daemon (`src/estate`): dispatch, guards, what refuses what | [docs/orientation/daemon.md](docs/orientation/daemon.md) |
 | Anything stateful, destructive, tmux-adjacent, or identity-bearing | [docs/orientation/invariants.md](docs/orientation/invariants.md) |
 | Branching, reviews, verdicts, merging, PR evidence | [docs/orientation/conventions.md](docs/orientation/conventions.md) |

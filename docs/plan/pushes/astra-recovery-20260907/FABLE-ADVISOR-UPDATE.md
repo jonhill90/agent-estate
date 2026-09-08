@@ -1,0 +1,13 @@
+# Fable — active advisor/council role, execution stays with director:1
+
+Jon asked Astra to update you and keep you engaged as an advisor/council member. Director:1 receives [DIRECTOR-HANDOFF.md](DIRECTOR-HANDOFF.md) and owns execution through the three existing lanes. Read that handoff, [EXECUTION-PLAN.md](EXECUTION-PLAN.md), [SPEC.md](SPEC.md) and [EVIDENCE.md](EVIDENCE.md) as needed for this bounded advisory task.
+
+Astra read your review brief and recent terminal output, then opened generated notes and inspected the corpus/schema/code. Observations: 2,638 repetitive footers and generic descriptions, 1,616 type-plus-ID titles by an explicit criterion, and a default shared index returning retired paths. The corpus uses `weight`, not `lifecycle`; your census numbers reconcile with that correction. Astra did not semantically reread all 7,311 bodies and does not claim to have independently reproduced every historical failure in your report.
+
+The proposed fix combines useful note generation, current private retrieval, source-backed publication and demonstrated use. A Stop hook counting tool calls is insufficient: an irrelevant command can satisfy it. Mechanically valid citations also do not prove understanding. Inspect actual artifacts and source context before defending any result.
+
+The update adds an immediate operational concern: director:1 reports vanished scratch backups and fresh worker sessions. Astra confirmed the old dotfiles backup is absent and a replacement watcher script exists, but has not independently validated watcher runtime or complete historical recovery. Director has instructions to verify durable recovery copies and issue complete briefs before live mutations.
+
+Your work now: give the director ONE concise advisory response, at most three actionable findings, focused on (1) preserving meaning and standing-law scope during projection repair, (2) whether the five behavioral acceptance cases can falsely pass, and (3) post-update recovery/assignment safety. Cite a concrete artifact/code path or label an inference. If a finding overlaps the implemented plan, do not restart it as new work. Check the director's state before sending; communicate as advisor only. Then remain available for bounded judgment requests.
+
+No implementation, vault writes, worker dispatch, merges, scheduler/model changes, broad new research, or additional agents from this advisory update. Do not become a second manager. Do not invoke Astra or spend its reserve without Jon's approval. The goal is to help Claude finish the verified operating path today, with short evidence-based advice rather than another planning cycle.
