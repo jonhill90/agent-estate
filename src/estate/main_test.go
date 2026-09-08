@@ -5,6 +5,9 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/jonhill90/agent-estate/estate/internal/ledger"
+	"github.com/jonhill90/agent-estate/estate/internal/sweep"
 )
 
 // End-to-end on the actual wiring: a real child process, exited non-zero,
@@ -192,5 +195,47 @@ func TestLeakage_PromptMarkerNeverReachesTheNote(t *testing.T) {
 
 	if strings.Contains(note, marker) {
 		t.Fatalf("note = %q, prompt marker leaked into the recorded reason", note)
+	}
+}
+
+// TestSweepSummarySeparatesCategories is agent-estate#1294's acceptance
+// criterion at the layer the defect actually lived in: sweepWorktrees
+// itself only ever asked r.Removed and tallied everything else into one
+// "kept" bucket, printed as "N left in place" -- merging 462 pre-#1000
+// ledger rows that were never worktrees, ~150 genuinely refused because
+// they belong to a different checkout's dispatch root, and a handful
+// already gone from disk into one indistinguishable number. This fixture
+// carries one sweep.Result of every category and asserts the rendered
+// report names each with its own count, not folded together.
+func TestSweepSummarySeparatesCategories(t *testing.T) {
+	results := []sweep.Result{
+		{Record: ledger.Record{ID: "no-path"}, Category: sweep.CategoryNoWorktreePath, Reason: "no worktree path recorded"},
+		{Record: ledger.Record{ID: "outside"}, Category: sweep.CategoryOutsideRoot, Reason: "refusing to consider it"},
+		{Record: ledger.Record{ID: "gone"}, Category: sweep.CategoryAlreadyGone, Reason: "is already gone"},
+		{Record: ledger.Record{ID: "kept"}, Category: sweep.CategoryKeptByPolicy, Reason: "not a corpse"},
+		{Record: ledger.Record{ID: "bound"}, Category: sweep.CategoryBoundReached, Reason: "bound reached"},
+		{Record: ledger.Record{ID: "refused"}, Category: sweep.CategoryRefused, Reason: "kept: refused"},
+		{Record: ledger.Record{ID: "removed"}, Category: sweep.CategoryRemoved, Removed: true, Reason: "removed: ..."},
+	}
+
+	s := summarizeSweep(results)
+	if s.noWorktreePath != 1 || s.outsideRoot != 1 || s.alreadyGone != 1 || s.keptByPolicy != 1 ||
+		s.boundReached != 1 || s.refused != 1 || s.removed != 1 {
+		t.Fatalf("categories were not separated into their own counts: %+v", s)
+	}
+
+	joined := strings.Join(s.report(true), "\n")
+	for _, want := range []string{
+		"1 removed",
+		"1 refused",
+		"1 bound-reached",
+		"1 kept by policy",
+		"1 outside this checkout's dispatch root",
+		"1 already gone",
+		"1 ledger record(s) have no worktree recorded",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("report is missing %q:\n%s", want, joined)
+		}
 	}
 }

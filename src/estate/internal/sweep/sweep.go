@@ -129,6 +129,83 @@ type Config struct {
 	Max int
 }
 
+// Category classifies WHY a record landed where it did, independent of the
+// free-text Reason -- so a caller can count and report each shape
+// separately without parsing prose that is free to change on its own.
+//
+// agent-estate#1294: `estate sweep-worktrees` ended with a single "0
+// removed, 613 left in place" line that silently added three unrelated
+// situations together -- 462 ledger rows that were never worktrees at all
+// (written before agent-estate#1000 added the field), 146-151 genuinely
+// refused because they belong to a different checkout's dispatch root (the
+// gap this issue names), and a handful whose directory is already gone.
+// All three read as "left in place" and were indistinguishable from each
+// other, and from "nothing to clean" -- it-d43a08d739bf32a8: a read that
+// failed and an empty result look the same.
+type Category int
+
+const (
+	// CategoryNoWorktreePath: the record has no Worktree path at all -- a
+	// row written before agent-estate#1000 added the field. There was
+	// never a worktree here; no sweep, of any kind, can ever act on it.
+	// Distinct from CategoryAlreadyGone below, where a worktree genuinely
+	// existed once and its directory is what's missing now.
+	CategoryNoWorktreePath Category = iota
+	// CategoryOutsideRoot: the recorded path is not directly under THIS
+	// checkout's own dispatch root -- refused before anything on disk is
+	// even looked at. This is the genuine, growing gap agent-estate#1294
+	// exists to name: another checkout made this worktree, and this
+	// checkout structurally cannot act on it (see underRoot's own doc
+	// comment).
+	CategoryOutsideRoot
+	// CategoryAlreadyGone: the recorded path IS directly under this
+	// checkout's own root, but nothing is there any more. The directory is
+	// gone; only the ledger row remains.
+	CategoryAlreadyGone
+	// CategoryKeptByPolicy: judge() declined eligibility for a reason that
+	// has nothing to do with the path -- the turn is not terminal, is
+	// unknown (never swept, at any age), or is still recorded in flight
+	// and not yet positively observed as a corpse. A real worktree,
+	// correctly left alone.
+	CategoryKeptByPolicy
+	// CategoryBoundReached: eligible and not yet judged unsafe, but this
+	// run's removal bound (Config.Max) was already spent by earlier
+	// records. Left for the next sweep, not skipped silently.
+	CategoryBoundReached
+	// CategoryRefused: eligible, offered to Remove (apply mode) or
+	// RemovalCheck (report mode), and refused -- uncommitted unique
+	// content, commits not yet landed anywhere origin can vouch for, or
+	// something Remove could not measure.
+	CategoryRefused
+	// CategoryRemoved: actually removed (apply mode, Remove returned nil)
+	// or judged safe to remove (report mode, RemovalCheck found nothing
+	// that refuses it, or -- the pre-agent-estate#1247 fallback when
+	// RemovalCheck is not wired at all -- reported "would remove"
+	// unconditionally, the same as it always has).
+	CategoryRemoved
+)
+
+func (c Category) String() string {
+	switch c {
+	case CategoryNoWorktreePath:
+		return "no worktree recorded"
+	case CategoryOutsideRoot:
+		return "outside this checkout's dispatch root"
+	case CategoryAlreadyGone:
+		return "already gone"
+	case CategoryKeptByPolicy:
+		return "kept by policy"
+	case CategoryBoundReached:
+		return "bound reached"
+	case CategoryRefused:
+		return "refused"
+	case CategoryRemoved:
+		return "removed"
+	default:
+		return "unknown category"
+	}
+}
+
 // Result is one record's outcome. Every record passed in produces exactly
 // one Result, eligible or not: a silent "no" is exactly as unhelpful as a
 // silent "yes", the same posture internal/reclaim.Assessment takes.
@@ -142,6 +219,10 @@ type Result struct {
 	Removed bool
 	// Reason is always populated.
 	Reason string
+	// Category is Reason's closed-set classification -- see Category's
+	// doc comment. Always populated; a caller sums this, never Reason's
+	// text, to count how many of each shape a run produced.
+	Category Category
 }
 
 // Run judges every record and, for the eligible ones, offers each worktree
@@ -158,6 +239,7 @@ func Run(records []ledger.Record, cfg Config) []Result {
 			continue
 		}
 		if cfg.Max > 0 && attempted >= cfg.Max {
+			r.Category = CategoryBoundReached
 			r.Reason = fmt.Sprintf("eligible (%s) but this run's bound of %d removals is reached -- left for the next sweep, not skipped silently", r.Reason, cfg.Max)
 			out = append(out, r)
 			continue
@@ -176,12 +258,14 @@ func Run(records []ledger.Record, cfg Config) []Result {
 			// same handful of eligible-but-refused records sort first every
 			// run, so they alone exhausted the bound and nothing after them
 			// was ever tried, forever.
+			r.Category = CategoryRefused
 			r.Reason = "kept: " + err.Error()
 			out = append(out, r)
 			continue
 		}
 		attempted++
 		r.Removed = true
+		r.Category = CategoryRemoved
 		r.Reason = "removed: " + r.Reason
 		out = append(out, r)
 	}
@@ -195,14 +279,17 @@ func judge(rec ledger.Record, cfg Config) Result {
 	r := Result{Record: rec}
 
 	if strings.TrimSpace(rec.Worktree) == "" {
+		r.Category = CategoryNoWorktreePath
 		r.Reason = "no worktree path recorded -- nothing to sweep (a record written before agent-estate#1000 added the field)"
 		return r
 	}
 	if !underRoot(cfg.Root, rec.Worktree) {
+		r.Category = CategoryOutsideRoot
 		r.Reason = fmt.Sprintf("worktree %s is not directly under the dispatch root %s -- refusing to consider it", rec.Worktree, cfg.Root)
 		return r
 	}
 	if cfg.Exists == nil || !cfg.Exists(rec.Worktree) {
+		r.Category = CategoryAlreadyGone
 		r.Reason = fmt.Sprintf("worktree %s is already gone", rec.Worktree)
 		return r
 	}
@@ -210,10 +297,14 @@ func judge(rec ledger.Record, cfg Config) Result {
 	switch rec.State {
 	case ledger.Complete, ledger.Failed:
 		r.Eligible = true
+		// Category is finalized in Run() once this record's fate (removed,
+		// refused, or bound-starved) is known -- judge() alone cannot say
+		// which yet.
 		r.Reason = fmt.Sprintf("turn is %s, a terminal state", rec.State)
 		return r
 	case ledger.Unknown:
 		// Never, at any age. See this package's doc comment.
+		r.Category = CategoryKeptByPolicy
 		r.Reason = "turn is unknown, which is not terminal -- it may have done work nothing has collected, so its worktree is kept"
 		return r
 	default:
@@ -222,10 +313,13 @@ func judge(rec ledger.Record, cfg Config) Result {
 		// internal/reclaim owns that judgement.
 		a := reclaim.Assess(rec, cfg.Boot, cfg.Probe)
 		if !a.Reclaimable {
+			r.Category = CategoryKeptByPolicy
 			r.Reason = fmt.Sprintf("turn is %s and %s -- not a corpse, so its worktree stays", rec.State, a.Reason)
 			return r
 		}
 		r.Eligible = true
+		// Category finalized in Run(), same as the terminal-state branch
+		// above.
 		r.Reason = fmt.Sprintf("turn is %s but %s -- the dispatch died without tearing down", rec.State, a.Reason)
 		return r
 	}
@@ -250,7 +344,11 @@ func reportJudged(r Result, rec ledger.Record, cfg Config) Result {
 	if cfg.RemovalCheck == nil {
 		// Old behavior, unweakened: a caller that has not wired the check
 		// (an older wiring, or a test exercising something else) reports
-		// exactly as report mode always did before this field existed.
+		// exactly as report mode always did before this field existed --
+		// which, having made no refusal judgement at all, counts as
+		// CategoryRemoved: it is reporting "would remove" unconditionally,
+		// same as it always has.
+		r.Category = CategoryRemoved
 		r.Reason = "would remove: " + r.Reason + " -- report only, nothing was removed"
 		return r
 	}
@@ -264,6 +362,7 @@ func reportJudged(r Result, rec ledger.Record, cfg Config) Result {
 		// sync with whichever shape actually fired. Remove itself fails
 		// closed on this exact error; report mode must agree, not
 		// optimistically call it removable.
+		r.Category = CategoryRefused
 		r.Reason = fmt.Sprintf("would keep: %s -- %s", r.Reason, err)
 		return r
 	}
@@ -275,6 +374,7 @@ func reportJudged(r Result, rec ledger.Record, cfg Config) Result {
 	// Remove's comment). Named explicitly, not collapsed, so the typed
 	// states stay distinguishable in "would remove" output too, not only
 	// in refusals.
+	r.Category = CategoryRemoved
 	r.Reason = fmt.Sprintf("would remove: %s (%s) -- report only, nothing was removed", r.Reason, state)
 	return r
 }
