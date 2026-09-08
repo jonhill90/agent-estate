@@ -74,6 +74,33 @@ SCRATCH_DIR_RE = re.compile(
 
 
 def vault_dir():
+    """Vault root: an explicit path via argv[1], or -- with no argument --
+    two directories up from this file's own location (.../99 - Meta/tools/
+    validate_index.py -> vault root), which is what the vault's own
+    deployed copy relies on and must keep working unargued.
+
+    Director finding, second fix pass on PR #1296: this repo-tracked copy
+    is meant to be runnable against any vault by path, not only from its
+    own deployed location inside one -- that is the entire point of
+    tracking it here separately. Before this fix argv was read nowhere in
+    this file at all: a path argument was silently ignored, the derived
+    path was used regardless, and a caller outside the vault either got a
+    confusing FileNotFoundError against the wrong tree or -- worse, had
+    that wrong tree happened to contain its own index.md -- a clean
+    contract report about entirely the wrong vault. A given path is
+    validated as a real vault root (index.md present) and any mismatch
+    exits loudly here, before main() does anything with it -- never a
+    silent fall-back to the derived path instead."""
+    if len(sys.argv) > 1:
+        given = sys.argv[1]
+        if not os.path.isdir(given):
+            sys.exit(f"error: not a directory: {given!r}")
+        if not os.path.isfile(os.path.join(given, "index.md")):
+            sys.exit(
+                f"error: {given!r} is not a vault root -- no index.md found "
+                "there. Refusing to fall back to this file's own location."
+            )
+        return given
     here = os.path.dirname(os.path.abspath(__file__))  # .../99 - Meta/tools
     meta_dir = os.path.dirname(here)                    # .../99 - Meta
     return os.path.dirname(meta_dir)                    # vault root

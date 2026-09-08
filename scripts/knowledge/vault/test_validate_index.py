@@ -1,9 +1,16 @@
-import contextlib, importlib.util, io, os, pathlib, tempfile, unittest
+import contextlib, importlib.util, io, os, pathlib, sys, tempfile, unittest
+from unittest import mock
 
 P = pathlib.Path(__file__).with_name('validate_index.py')
 spec = importlib.util.spec_from_file_location('validator', P)
 v = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(v)
+
+# Captured once, before any test below overwrites v.vault_dir with a fixture
+# stub (every test using run_against() does) -- the two argv tests need the
+# real function, the one that actually reads sys.argv, not whatever the
+# previously-run test happened to leave behind.
+REAL_VAULT_DIR = v.vault_dir
 
 FACT_FRONTMATTER = '---\ntype: user\ncreated: 2026-07-12\nsource: fixture\ntitle: Test\ndescription: fixture fact\n---\n# Test\n'
 
@@ -250,6 +257,50 @@ class ValidateIndex(unittest.TestCase):
             code, out = self.run_against(root, "- [Test](01 - Notes/202607120001.md) — fixture\n")
             self.assertEqual(code, 1)
             self.assertIn(".in-progress/notes.md", out)
+
+    def test_run_by_argument_from_outside_the_vault(self):
+        # Director finding, second fix pass on PR #1296: the repo copy must
+        # be runnable against an arbitrary vault by path, not only from
+        # inside one -- that's the entire point of tracking it in git
+        # separately from the vault's own deployed copy. Uses the REAL
+        # vault_dir() (REAL_VAULT_DIR), not the v.vault_dir stub every other
+        # test here installs, so this actually exercises the argv-reading
+        # code and not a bypass of it.
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            self.write_fact(root, "202607120001.md")
+            (root / "99 - Meta").mkdir(parents=True, exist_ok=True)
+            (root / "index.md").write_text(
+                "---\nokf_version: \"0.1\"\n---\n\n"
+                "# Facts\n\n- [Test](01 - Notes/202607120001.md) — fixture\n"
+            )
+            v.vault_dir = REAL_VAULT_DIR
+            try:
+                with mock.patch.object(sys, "argv", ["validate_index.py", str(root)]):
+                    with contextlib.redirect_stdout(io.StringIO()) as out:
+                        code = v.main()
+            finally:
+                v.vault_dir = REAL_VAULT_DIR
+            self.assertEqual(code, 0, out.getvalue())
+            self.assertIn(str(root), out.getvalue())
+
+    def test_bad_argument_path_fails_loudly_not_silently(self):
+        # A path that is not a vault root must error, never silently fall
+        # back to validating whatever tree this file's own location derives
+        # (which could be the wrong tree entirely, reporting a false-clean
+        # contract on it -- the same failed-read-looks-like-a-clean-result
+        # shape the rest of this PR closes).
+        with tempfile.TemporaryDirectory() as d:
+            not_a_vault = pathlib.Path(d) / "not-a-vault"
+            not_a_vault.mkdir()
+            v.vault_dir = REAL_VAULT_DIR
+            try:
+                with mock.patch.object(sys, "argv", ["validate_index.py", str(not_a_vault)]):
+                    with self.assertRaises(SystemExit) as cm:
+                        v.main()
+            finally:
+                v.vault_dir = REAL_VAULT_DIR
+            self.assertNotEqual(cm.exception.code, 0)
 
     def test_placeholder_link_with_angle_bracket_is_not_a_violation(self):
         # A target containing "<" is a documented placeholder in a contract
