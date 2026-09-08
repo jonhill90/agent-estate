@@ -53,8 +53,54 @@ REQUIRED_FRONTMATTER = ("type", "created", "source")
 RECOMMENDED_FRONTMATTER = ("title", "description")
 SUBDIR_ROW_RE = re.compile(r"^\| `(\d{2}[a-z])` \| `01 - Notes/([^`/]+)/` \|", re.M)
 
+# Named, not a blanket "any dot-prefixed directory is scratch" -- that shape
+# already burned this same check once (below): trusting a category by
+# default instead of naming what's actually in it. `.obsidian` and `.trash`
+# are Obsidian's own; `.p15-fix-backup`, the numbered `.source-*-backup-*`
+# and `.inmaps-backup-*` directories are migration/tool-generated snapshots
+# actually present in the real vault (enumerated with os.walk, not just the
+# vault root -- the root-only pass this list started from missed 56
+# `.inmaps-backup-*` dirs nested under 99 - Meta/, agent-estate#1296 fix
+# pass). Each currently holds zero *.md files (checked directly), so this
+# list names them for what they are rather than leaving them an accident of
+# "rglob('*.md') never happened to look there yet." A real vault directory
+# someone later dot-prefixes is not silently exempted by this list the way
+# it would be by `startswith(".")`.
+SCRATCH_DIR_RE = re.compile(
+    r"^\.(?:obsidian|trash|p15-fix-backup"
+    r"|source-(?:hub|index|view)-backup-\d+"
+    r"|inmaps-backup-\d+)$"
+)
+
 
 def vault_dir():
+    """Vault root: an explicit path via argv[1], or -- with no argument --
+    two directories up from this file's own location (.../99 - Meta/tools/
+    validate_index.py -> vault root), which is what the vault's own
+    deployed copy relies on and must keep working unargued.
+
+    Director finding, second fix pass on PR #1296: this repo-tracked copy
+    is meant to be runnable against any vault by path, not only from its
+    own deployed location inside one -- that is the entire point of
+    tracking it here separately. Before this fix argv was read nowhere in
+    this file at all: a path argument was silently ignored, the derived
+    path was used regardless, and a caller outside the vault either got a
+    confusing FileNotFoundError against the wrong tree or -- worse, had
+    that wrong tree happened to contain its own index.md -- a clean
+    contract report about entirely the wrong vault. A given path is
+    validated as a real vault root (index.md present) and any mismatch
+    exits loudly here, before main() does anything with it -- never a
+    silent fall-back to the derived path instead."""
+    if len(sys.argv) > 1:
+        given = sys.argv[1]
+        if not os.path.isdir(given):
+            sys.exit(f"error: not a directory: {given!r}")
+        if not os.path.isfile(os.path.join(given, "index.md")):
+            sys.exit(
+                f"error: {given!r} is not a vault root -- no index.md found "
+                "there. Refusing to fall back to this file's own location."
+            )
+        return given
     here = os.path.dirname(os.path.abspath(__file__))  # .../99 - Meta/tools
     meta_dir = os.path.dirname(here)                    # .../99 - Meta
     return os.path.dirname(meta_dir)                    # vault root
@@ -76,7 +122,7 @@ def registered_note_subdirs(vault_dir_path):
 
 def build_link_re(subdirs):
     """A link target is (optionally "../")01 - Notes/<optionally one
-    registered subdir>/(<12-digit-id>|index).md -- built from the
+    registered subdir>/(<12- or 14-digit-id>|index).md -- built from the
     registry, never a second hardcoded list. The leading "../" is
     optional so the same regex validates links written from index.md
     itself (vault root, no "../" needed) and links written one level down
@@ -86,7 +132,7 @@ def build_link_re(subdirs):
         subdir_part = f"(?:(?:{alt})/)?"
     else:
         subdir_part = ""
-    return re.compile(r"(?:\.\./)?01 - Notes/" + subdir_part + r"(?:\d{12}|index)\.md")
+    return re.compile(r"(?:\.\./)?01 - Notes/" + subdir_part + r"(?:\d{12}|\d{14}|index)\.md")
 
 
 def load_frontmatter_keys(path):
@@ -123,12 +169,12 @@ def main():
     subdirs = registered_note_subdirs(vault)
     notes_link_re = build_link_re(subdirs)
 
-    # Fact files: every 01 - Notes/**/<12-digit-id>.md, keyed relative to
+    # Fact files: every 01 - Notes/**/<12- or 14-digit-id>.md, keyed relative to
     # the vault root (root-relative, matching how index.md's own bullets
     # link them -- unlike the pre-A2 scheme, which kept facts/ under
     # agent/ and keyed relative to that).
     paths = [p for p in (Path(vault) / "01 - Notes").rglob("*.md")
-              if re.fullmatch(r"\d{12}", p.stem)]
+              if re.fullmatch(r"\d{12}|\d{14}", p.stem)]
     fact_files = {os.path.relpath(p, vault): p for p in paths}
     aliases = {}
     for key, path in fact_files.items():
@@ -217,6 +263,45 @@ def main():
             text = hub.read_text(encoding="utf-8")
             md_targets, wiki_targets = links_in_text(text, notes_link_re)
             referenced_by_hubs |= resolve(md_targets, wiki_targets)
+
+    # --- check 3a: every Markdown link resolves ---
+    #
+    # This check exists because on 2026-09-07 the vault carried 63 links to
+    # files that did not exist -- hubs pointing at iCloud conflict copies
+    # ("20260805165028 2.md") that were later deleted, and log entries still
+    # naming the retired agent/facts/ layout -- and this tool reported
+    # "Contract holds" throughout. Checks 1-3 only ask whether every NOTE is
+    # reachable; nothing asked whether every LINK arrives somewhere. A reader
+    # following a dead link and a reader finding nothing look identical, which
+    # is the failure this vault's own rules name (it-d43a08d739bf32a8).
+    #
+    # A target containing "<" is a documented placeholder in a contract or a
+    # spec ("01 - Notes/<subdir>/<id>.md"), not a link anyone can follow.
+    for path in sorted(Path(vault).rglob("*.md")):
+        # Named exemptions only (SCRATCH_DIR_RE above) -- see its comment for
+        # why this isn't a blanket "any dot-prefixed directory" skip.
+        if any(SCRATCH_DIR_RE.match(part) for part in path.parts):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            # A read that fails and a file with nothing wrong in it must not
+            # look the same (it-d43a08d739bf32a8) -- fail closed, matching
+            # how every other read_text() in this file behaves (raise and
+            # halt), rather than silently skipping whatever link check this
+            # file would have failed.
+            hard_violations.append(
+                f"{path.relative_to(vault)}: could not read for link check -> {e}"
+            )
+            continue
+        for m in re.finditer(r"\]\(([^)]+\.md)\)", text):
+            target = unquote(m.group(1))
+            if target.startswith(("http://", "https://")) or "<" in target:
+                continue
+            if not (path.parent / target).exists():
+                hard_violations.append(
+                    f"{path.relative_to(vault)}: link does not resolve -> {target}"
+                )
 
     # --- check 3: orphaned facts ---
     referenced = referenced_by_index | referenced_by_facts | referenced_by_hubs
