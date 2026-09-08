@@ -168,6 +168,83 @@ func TestProjectionCarriesContextAndSurvivesRegeneration(t *testing.T) {
 	}
 }
 
+// TestDirectiveDoesNotPresentAsStandingLaw is the dangerous defect named in
+// the brief: an old one-time task directive rendered as apparent standing
+// law, because nothing distinguished a spent instruction from a live rule.
+// Lifted from the abandoned PR #1288 (fix/vaultview-projection-repair);
+// its third assertion is NOT lifted as written -- see below.
+//
+// #1288 asserted the description points at `standinglaw.go`
+// (corpus.StandingLawSet). Read that file: it is a tiny, human-declared,
+// hash-pinned list (1 member today) force-injected into every dispatched
+// turn -- a completely different mechanism from this package's
+// standing-rule tag, and unrelated to any Parameter/Directive projection
+// note. Pointing a spent directive's description at it would assert an
+// authority relationship that does not exist. The corpus item already
+// cited in this note's own frontmatter (`corpus_item`) is the real
+// authority -- that is what a reader should be sent back to, not a file
+// that has nothing to do with this note.
+func TestDirectiveDoesNotPresentAsStandingLaw(t *testing.T) {
+	v := t.TempDir()
+	rows := []Row{{
+		Item: "d2", Prompt: "p1", At: 1788739200, Kind: "directive", Weight: "hard", Status: "acted",
+		Body: "Rename the corpus.sqlite3 file to ledger.sqlite3 across every reference in the estate.",
+	}}
+	r, e := Write(v, rows)
+	if e != nil {
+		t.Fatal(e)
+	}
+	p := filepath.Join(v, NotesDir, r.Mapping["d2"]+".md")
+	b, _ := os.ReadFile(p)
+	s := string(b)
+	if strings.Contains(s, "standing-rule") {
+		t.Fatalf("directive still tagged standing-rule -- exactly the misleading-authority defect: %s", s)
+	}
+	if !strings.Contains(s, "may already be resolved") && !strings.Contains(s, "one-time task instruction") {
+		t.Fatalf("no explicit scope statement distinguishing a task directive from standing law: %s", s)
+	}
+	if !strings.Contains(s, "corpus item cited above") {
+		t.Fatalf("scope statement does not point at the real authority (the cited corpus item): %s", s)
+	}
+}
+
+// TestAmbiguousProjectionRemainsUnresolved is lifted from #1288 to pin that
+// the defect it named is real, then deliberately left unimplemented -- see
+// the t.Skip below and agent-estate#1297.
+//
+// #1288's fix bundled this with the directive fix above under one PR. They
+// are not the same change: this one needs a new ambiguity detector plus two
+// frontmatter fields main has never had (`resolution`, the
+// `needs-editorial-review` tag) -- producer surface unrelated to whether a
+// spent directive keeps a standing-rule tag. Bundling it here would make
+// this PR's diff answer two questions instead of one measured defect, so
+// the brief's instruction stands: land the directive fix alone, and record
+// this as an issue instead of half-doing it silently.
+func TestAmbiguousProjectionRemainsUnresolved(t *testing.T) {
+	t.Skip("deferred to agent-estate#1297 -- ambiguity marker is a separate producer change from the standing-rule authority-scope fix this PR lands; pinned here so the defect is not lost")
+	v := t.TempDir()
+	rows := []Row{{Item: "frag1", Prompt: "p1", At: 1788739200, Kind: "parameter", Weight: "hard", Status: "acted", Body: "tmux"}}
+	r, e := Write(v, rows)
+	if e != nil {
+		t.Fatal(e)
+	}
+	p := filepath.Join(v, NotesDir, r.Mapping["frag1"]+".md")
+	b, _ := os.ReadFile(p)
+	s := string(b)
+	if !strings.Contains(s, "resolution: unresolved") {
+		t.Fatalf("an undeterminable-subject fragment was not marked unresolved: %s", s)
+	}
+	if !strings.Contains(s, "needs-editorial-review") {
+		t.Fatalf("unresolved fragment carries no review tag: %s", s)
+	}
+	if strings.Contains(s, "status: stable") {
+		t.Fatalf("unresolved fragment must not present as stable/authority-bearing: %s", s)
+	}
+	if strings.Contains(s, "title: \"tmux\"") {
+		t.Fatalf("a 1-word fragment was accepted as a determined subject rather than flagged: %s", s)
+	}
+}
+
 // TestProjectionTitleNamesTheSubject pins that a title says what the note is
 // about. The producer used to fall back to "<Kind> <item-id>" -- "Directive
 // it-b29425780b4cd06c" -- which names nothing, and made every hub entry and
