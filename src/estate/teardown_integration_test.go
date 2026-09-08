@@ -144,7 +144,7 @@ func TestSweepRemovesWhatLandedAndKeepsWhatDidNot(t *testing.T) {
 		return commit == landedHead, nil
 	}
 
-	cfg := sweepConfig(root, forge, true)
+	cfg := sweepConfig(isolate.Root(root), forge, true)
 	cfg.Probe = func(int) (reclaim.ProcessInfo, error) {
 		return reclaim.ProcessInfo{}, errors.New("no process in this test")
 	}
@@ -262,7 +262,7 @@ func TestSweepReportModeAgreesWithApplyOnTheSameThreeWorktrees(t *testing.T) {
 
 	// apply: false -- report mode. cfg.Remove stays nil; RemovalCheck is
 	// the only seam sweep.Run consults.
-	cfg := sweepConfig(root, forge, false)
+	cfg := sweepConfig(isolate.Root(root), forge, false)
 	cfg.Probe = func(int) (reclaim.ProcessInfo, error) {
 		return reclaim.ProcessInfo{}, errors.New("no process in this test")
 	}
@@ -332,7 +332,7 @@ func TestSweepTouchesNothingForAnUnknownTurnEvenWhenItsWorkLanded(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	cfg := sweepConfig(root, func(string) (bool, error) { return true, nil }, true)
+	cfg := sweepConfig(isolate.Root(root), func(string) (bool, error) { return true, nil }, true)
 	cfg.Probe = func(int) (reclaim.ProcessInfo, error) { return reclaim.ProcessInfo{Exists: false}, nil }
 	for _, r := range sweep.Run(records, cfg) {
 		if r.Removed || r.Eligible {

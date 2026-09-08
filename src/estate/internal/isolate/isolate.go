@@ -58,6 +58,16 @@ type Worktree struct {
 	// accepted.
 	Landed Landed
 
+	// root is Create/CreateOnBranch's own repoRoot (the git repository
+	// path), or ReattachAt's dispatch root (Root(repoRoot) for Reattach's
+	// own callers, or a named foreign root for agent-estate#1294's sweep
+	// -- ReattachAt is never given a repoRoot for a foreign worktree at
+	// all, only the dispatch root a legitimacy check already confirmed,
+	// so that is the most this field can honestly hold in that case).
+	// Remove no longer uses it -- see gitDirFor's own doc comment for why
+	// removal resolves the worktree's own ".git" pointer fresh instead of
+	// trusting this field to still name the repository that actually
+	// owns the worktree.
 	root string
 }
 
@@ -262,6 +272,17 @@ func gitTimeout(ctx context.Context, dir string, args ...string) ([]byte, error)
 	return out, nil
 }
 
+// DispatchParent is the directory every checkout's own Root (below) lives
+// directly under -- TMPDIR/estate-dispatch. Exported so a caller checking
+// whether an operator-NAMED path is a legitimate dispatch root at all
+// (agent-estate#1294's foreign-root sweep: "the operator typed it" is not
+// sufficient legitimacy on its own) has one place to compare against,
+// rather than reconstructing this join a third time -- Root and
+// IsDispatchWorktree already did it independently before this existed.
+func DispatchParent() string {
+	return filepath.Join(os.TempDir(), "estate-dispatch")
+}
+
 // Root is where dispatch worktrees are created: outside the repository, never
 // inside it. Inside would mean a runaway agent is still writing under the
 // shared checkout, which defeats the point.
@@ -277,7 +298,7 @@ func Root(repoRoot string) string {
 		abs = repoRoot
 	}
 	sum := sha256.Sum256([]byte(abs))
-	return filepath.Join(os.TempDir(), "estate-dispatch", fmt.Sprintf("%s-%x", filepath.Base(abs), sum[:6]))
+	return filepath.Join(DispatchParent(), fmt.Sprintf("%s-%x", filepath.Base(abs), sum[:6]))
 }
 
 // Create makes an isolated worktree for the dispatch identified by id.
@@ -346,8 +367,8 @@ func IsDispatchWorktree(path string) (id string, ok bool) {
 	// failing against a real os.Chdir before EvalSymlinks was added.
 	// Resolving both sides the same way is what makes the comparison below
 	// mean what it says.
-	dispatchRoot := resolveSymlinksOrSelf(filepath.Join(os.TempDir(), "estate-dispatch"))
-	rel, err := filepath.Rel(dispatchRoot, resolveSymlinksOrSelf(abs))
+	dispatchRoot := ResolveSymlinksOrSelf(DispatchParent())
+	rel, err := filepath.Rel(dispatchRoot, ResolveSymlinksOrSelf(abs))
 	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
 		return "", false
 	}
@@ -362,10 +383,22 @@ func IsDispatchWorktree(path string) (id string, ok bool) {
 	return parts[1], true
 }
 
-// resolveSymlinksOrSelf returns p with symlinks resolved, or p unchanged if
+// ResolveSymlinksOrSelf returns p with symlinks resolved, or p unchanged if
 // it cannot be resolved (e.g. it does not exist yet) -- "could not resolve"
 // falls back to the literal path rather than failing the caller outright.
-func resolveSymlinksOrSelf(p string) string {
+//
+// Exported (agent-estate#1294 PR #1330 review) so a caller confining an
+// operator-NAMED path to the dispatch parent -- main.go's resolveSweepRoot,
+// checking a named sweep root the same way this function's own caller
+// (IsDispatchWorktree, below) already checks a worktree path -- reuses this
+// exact symlink resolution rather than a second implementation that could
+// silently disagree with it. Confirmed live: a symlink placed directly
+// under TMPDIR/estate-dispatch pointing outside the dispatch parent
+// entirely was ACCEPTED by a first version of resolveSweepRoot that
+// compared filepath.Clean(abs) against DispatchParent() with no symlink
+// resolution at all -- filepath.Abs/Clean never resolve symlinks, only
+// this function (or filepath.EvalSymlinks directly) does.
+func ResolveSymlinksOrSelf(p string) string {
 	if r, err := filepath.EvalSymlinks(p); err == nil {
 		return r
 	}
@@ -858,6 +891,19 @@ func (w *Worktree) Remove() error {
 	if err != nil {
 		return err
 	}
+	// Resolved from w.Path's OWN ".git" pointer, not trusted from w.root
+	// -- see gitDirFor's own doc comment. w.root is only guaranteed to be
+	// the repository that actually owns this worktree when it was set by
+	// the SAME repository's own Create/CreateOnBranch/Reattach call;
+	// agent-estate#1294's named-foreign-root sweep breaks that assumption
+	// on purpose (an operator's own checkout reattaching to a worktree
+	// SOME OTHER checkout created), so Remove can no longer lean on it.
+	// Resolved BEFORE removal below: afterward w.Path no longer exists
+	// for anything to resolve through.
+	gitDir, gderr := gitDirFor(w.Path)
+	if gderr != nil {
+		return fmt.Errorf("isolate: cannot resolve %s's own git directory, so refusing to remove it: %w", w.Path, gderr)
+	}
 	removeArgs := []string{"worktree", "remove", w.Path}
 	if state == DirtyStateSuperseded {
 		// git itself refuses "contains modified or untracked files" on
@@ -869,7 +915,16 @@ func (w *Worktree) Remove() error {
 		// fix removes (agent-estate#1247).
 		removeArgs = append(removeArgs, "--force")
 	}
-	if _, err := git(w.root, removeArgs...); err != nil {
+	// -C w.Path, not w.root: `git worktree remove` resolves through
+	// w.Path's own ".git" file into the repository that actually holds
+	// this worktree's registration, exactly like every read-only method
+	// above (Committed, Head, DirtyStatus, remoteHasCommit) already does
+	// with "-C w.Path" -- Remove was the one holdout still trusting
+	// w.root, and it is the one call a foreign-root sweep cannot make
+	// work that way (confirmed empirically: an unrelated checkout's own
+	// `git worktree remove <path>` fails "is not a working tree" even
+	// though the exact same command invoked "-C <path>" succeeds).
+	if _, err := git(w.Path, removeArgs...); err != nil {
 		return err
 	}
 	// A CreateOnBranch worktree never had a local branch of its own -- it
@@ -880,10 +935,45 @@ func (w *Worktree) Remove() error {
 	if w.Detached {
 		return nil
 	}
-	if _, err := git(w.root, "branch", "-D", w.Branch); err != nil {
+	// --git-dir, not -C w.root and not -C w.Path: w.Path was just removed
+	// above, so nothing can "-C" into it any more, and w.root is the same
+	// assumption this function just stopped trusting. Deleting a branch
+	// is a ref operation with no working tree involved at all, so the
+	// gitDir resolved before removal is everything this needs -- and it
+	// is invoked with an empty Dir (git's own default: the calling
+	// process's actual cwd, which always exists, unlike w.Path or a
+	// foreign w.root this process was never inside).
+	if _, err := git("", "--git-dir="+gitDir, "branch", "-D", w.Branch); err != nil {
 		return err
 	}
 	return nil
+}
+
+// gitDirFor resolves the real, shared ".git" directory the worktree at path
+// belongs to, by asking git itself rather than trusting a caller-supplied
+// repository path. A secondary worktree's own ".git" is a FILE containing
+// "gitdir: <repo>/.git/worktrees/<name>", and `rev-parse --git-common-dir`
+// is git's own documented way to resolve through it back to the repository
+// every worktree shares -- confirmed to work from a completely unrelated
+// process/checkout, which is exactly the case a foreign-root sweep
+// (agent-estate#1294) needs: this process has no other path into that
+// repository at all, only the worktree's own directory.
+//
+// --path-format=absolute (git >= 2.31) is passed explicitly rather than
+// relying on the default, which can return a path relative to the CALLING
+// process's cwd on older git -- silently wrong the moment path and the
+// caller's own cwd are not the same directory, which after Remove's own
+// worktree-removal step they never are again.
+func gitDirFor(path string) (string, error) {
+	out, err := git(path, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return "", err
+	}
+	dir := strings.TrimSpace(string(out))
+	if dir == "" {
+		return "", fmt.Errorf("git rev-parse --git-common-dir returned nothing for %s", path)
+	}
+	return dir, nil
 }
 
 // Reattach rebuilds a Worktree value for a worktree that some OTHER process
@@ -916,7 +1006,25 @@ func (w *Worktree) Remove() error {
 // record: git is the authority on whether HEAD is a branch or a detached
 // checkout, and Remove uses the answer to decide whether a local branch ref
 // remains to delete. A recorded flag could be stale; `symbolic-ref` cannot.
+//
+// Reattach itself is a thin wrapper over ReattachAt (below), which does the
+// actual work against an ALREADY-COMPUTED root -- see ReattachAt's own doc
+// comment for why a caller needs that split.
 func Reattach(repoRoot, path, branch, base string) (*Worktree, error) {
+	return ReattachAt(Root(repoRoot), path, branch, base)
+}
+
+// ReattachAt is Reattach against an explicit, already-computed dispatch
+// root rather than one this call derives itself from a repoRoot -- the seam
+// agent-estate#1294's named-foreign-root sweep needs. Reattach's own
+// confinement check (path must sit directly under root) is unchanged and
+// unweakened here: the only difference is where root comes from. Reattach
+// passes Root(repoRoot); a caller sweeping a foreign root passes that root
+// verbatim, after its OWN legitimacy check (main.go's sweep-worktrees
+// --root) has already confirmed it is a real dispatch root and not an
+// arbitrary path -- ReattachAt does not repeat that legitimacy judgement,
+// it only ever confines path to root, whatever root turns out to be.
+func ReattachAt(root, path, branch, base string) (*Worktree, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, errors.New("isolate: no worktree path recorded, so there is nothing to reattach to")
 	}
@@ -926,10 +1034,9 @@ func Reattach(repoRoot, path, branch, base string) (*Worktree, error) {
 	if strings.TrimSpace(base) == "" {
 		return nil, fmt.Errorf("isolate: refusing to reattach to %s: no base commit was recorded for it, so there is no way to tell what the turn committed", path)
 	}
-	root := Root(repoRoot)
 	rel, err := filepath.Rel(root, filepath.Clean(path))
 	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || strings.ContainsRune(rel, filepath.Separator) {
-		return nil, fmt.Errorf("isolate: refusing to reattach to %s: it is not a worktree directly under this repository's dispatch root %s", path, root)
+		return nil, fmt.Errorf("isolate: refusing to reattach to %s: it is not a worktree directly under the dispatch root %s", path, root)
 	}
 	st, err := os.Stat(path)
 	if err != nil {
@@ -948,5 +1055,5 @@ func Reattach(repoRoot, path, branch, base string) (*Worktree, error) {
 	if _, err := git(path, "symbolic-ref", "-q", "HEAD"); err != nil {
 		detached = true
 	}
-	return &Worktree{Path: path, Branch: branch, Base: base, Detached: detached, root: repoRoot}, nil
+	return &Worktree{Path: path, Branch: branch, Base: base, Detached: detached, root: root}, nil
 }

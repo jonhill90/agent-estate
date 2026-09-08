@@ -162,3 +162,50 @@ func TestReattachRefusesADirectoryThatIsNotAWorktree(t *testing.T) {
 		t.Fatal("Reattach accepted a plain directory as a worktree")
 	}
 }
+
+// TestReattachAtRemovesAWorktreeFromAForeignRepository is agent-estate#1294's
+// own load-bearing proof for the named-foreign-root sweep: a worktree
+// created by one repository's Create can be reattached and REMOVED via
+// ReattachAt naming that repository's dispatch root directly -- never via
+// the repository path itself, which a real foreign-root sweep never has
+// (the ledger only ever records path/branch/base; it does not, and cannot,
+// record which repository dispatched the turn).
+//
+// FAILS before this fix: Remove used to run `git worktree remove` and
+// `git branch -D` with -C pointed at w.root, and ReattachAt has no
+// repository path to put there at all for a foreign worktree -- only the
+// dispatch root, which is not itself a git repository (`git -C
+// <dispatch-root> worktree remove <path>` fails "not a git repository").
+// Confirmed by reverting Remove's fix in a scratch copy and re-running this
+// test: it fails with exactly that error. After the fix, Remove resolves
+// the worktree's own ".git" pointer (gitDirFor) instead of trusting a
+// caller-supplied root, so it works regardless of which repository is
+// asking.
+func TestReattachAtRemovesAWorktreeFromAForeignRepository(t *testing.T) {
+	foreign := repo(t) // a genuinely different repository -- its own .git
+	w, err := Create(foreign, "foreign-corpse")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, branch, base := w.Path, w.Branch, w.Base
+	foreignRoot := Root(foreign)
+	w = nil // this process has no live *Worktree for it, same as a corpse
+
+	again, err := ReattachAt(foreignRoot, path, branch, base)
+	if err != nil {
+		t.Fatalf("ReattachAt refused a real worktree under the named root: %v", err)
+	}
+	if err := again.Remove(); err != nil {
+		t.Fatalf("could not remove a foreign repository's worktree: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("Remove reported success but %s is still there", path)
+	}
+	// The local branch goes with it, inside the FOREIGN repository -- the
+	// one place it could possibly still be, since nothing here ever named
+	// any other repository.
+	out, _ := exec.Command("git", "-C", foreign, "branch", "--list", branch).Output()
+	if strings.TrimSpace(string(out)) != "" {
+		t.Fatalf("removal left branch %s behind in the foreign repository", branch)
+	}
+}
