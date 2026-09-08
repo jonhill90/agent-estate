@@ -119,3 +119,83 @@ func TestWriteDoesNotCreateAnIndexInTheNotesDirectory(t *testing.T) {
 		t.Fatalf("stat: %v", err)
 	}
 }
+
+// TestProjectionCarriesContextAndSurvivesRegeneration pins the rule that a
+// parameter without its context is a sentence an agent cannot interpret
+// (corpus it-ad6b9208e64ff82, hard weight). Context is RENDERED by the
+// producer from the corpus, not merged forward from the previous file:
+// notemeta.Merge carries tags and a Relations section only, so context added
+// out of band was silently destroyed on the next regeneration -- 3,217 notes
+// lost it in a single pass on 2026-09-07.
+func TestProjectionCarriesContextAndSurvivesRegeneration(t *testing.T) {
+	v := t.TempDir()
+	rows := []Row{{
+		Item: "ctx", Prompt: "p", At: 1788739200, Kind: "parameter", Weight: "hard",
+		Status: "acted", Body: "The rule body.", Title: "a rule",
+		Context: "What was being discussed at the time.",
+	}}
+	first, err := Write(v, rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(v, NotesDir, first.Mapping["ctx"]+".md")
+	b, _ := os.ReadFile(path)
+	if !strings.Contains(string(b), "## Context") ||
+		!strings.Contains(string(b), "What was being discussed at the time.") {
+		t.Fatalf("context missing from a fresh projection:\n%s", b)
+	}
+
+	// Regenerating identical input must not strip it, and must write nothing.
+	second, err := Write(v, rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Changed != 0 {
+		t.Fatalf("an unchanged rerun wrote %d file(s)", second.Changed)
+	}
+	b2, _ := os.ReadFile(path)
+	if !strings.Contains(string(b2), "What was being discussed at the time.") {
+		t.Fatalf("regeneration destroyed the context:\n%s", b2)
+	}
+
+	// A description that merely says "consult the cited item" tells a reader
+	// nothing and made every note read identically -- the shape Jon called junk.
+	if strings.Contains(string(b2), "consult the cited item") {
+		t.Fatal("description fell back to boilerplate when a real body was present")
+	}
+	if !strings.Contains(string(b2), "description: \"The rule body.\"") {
+		t.Fatalf("description does not restate the rule:\n%s", b2)
+	}
+}
+
+// TestProjectionTitleNamesTheSubject pins that a title says what the note is
+// about. The producer used to fall back to "<Kind> <item-id>" -- "Directive
+// it-b29425780b4cd06c" -- which names nothing, and made every hub entry and
+// every search result unreadable. Jon's words on the result: they "all say the
+// same bullshit".
+func TestProjectionTitleNamesTheSubject(t *testing.T) {
+	v := t.TempDir()
+	rows := []Row{{
+		Item: "t1", Prompt: "p", At: 1788739200, Kind: "directive", Weight: "hard",
+		Status: "acted", Body: "Never write to the macOS keychain; a failed read is a report, not a repair.",
+	}}
+	res, err := Write(v, rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(filepath.Join(v, NotesDir, res.Mapping["t1"]+".md"))
+	if strings.Contains(string(b), "title: \"Directive t1\"") {
+		t.Fatalf("title fell back to kind+id:\n%s", b)
+	}
+	if !strings.Contains(string(b), "Never write to the macOS keychain") {
+		t.Fatalf("title does not name the subject:\n%s", b)
+	}
+
+	// A body too short to yield a clause must still produce a note, falling
+	// back rather than emitting a fragment as a title.
+	short := []Row{{Item: "t2", Prompt: "p", At: 1788739300, Kind: "thought",
+		Weight: "hard", Status: "open", Body: "Cut #78."}}
+	if _, err := Write(v, short); err != nil {
+		t.Fatalf("a short body broke the producer: %v", err)
+	}
+}

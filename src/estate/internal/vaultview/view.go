@@ -28,6 +28,19 @@ type Row struct {
 	Status string `json:"status"`
 	Body   string `json:"body"`
 	Title  string `json:"title"`
+	// Context is the sanitized window of what was being discussed when the
+	// operator said this, carried from the corpus prompt. It is REQUIRED for a
+	// projection to be usable: a parameter without its context is a sentence an
+	// agent cannot interpret -- "A sanitized version of the surrounding context
+	// must be stored with the parameter in agent memory, so an agent reading
+	// the note understands what it means" (corpus it-ad6b9208e64ff82, hard).
+	//
+	// It is rendered by the producer rather than preserved by notemeta.Merge,
+	// because Merge only carries tags and a Relations section forward. Context
+	// added out of band was silently destroyed on the next regeneration --
+	// measured 2026-09-07, 3,217 notes lost it in one pass. Deriving it from
+	// the corpus every time makes that unlosable.
+	Context string `json:"context"`
 }
 type Result struct {
 	Changed int               `json:"changed"`
@@ -38,7 +51,9 @@ type Result struct {
 // Read uses the selections stated in all five legacy view banners, not the
 // narrower live_parameters view. SQLite is opened read-only.
 func Read(db string) ([]Row, error) {
-	q := `select i.id item,i.prompt_id prompt,p.at,i.kind,i.weight,i.status,i.body,coalesce(i.resolved_to,'') title from items i join prompts p on p.id=i.prompt_id where i.weight='hard' and i.kind in ('parameter','correction','directive','question','thought') order by p.at,i.id`
+	// p.context is selected, not optional: a projection without the context it
+	// was said in is a sentence an agent cannot interpret (it-ad6b9208e64ff82).
+	q := `select i.id item,i.prompt_id prompt,p.at,i.kind,i.weight,i.status,i.body,coalesce(i.resolved_to,'') title,coalesce(p.context,'') context from items i join prompts p on p.id=i.prompt_id where i.weight='hard' and i.kind in ('parameter','correction','directive','question','thought') order by p.at,i.id`
 	b, err := exec.Command("sqlite3", "-json", "file:"+db+"?mode=ro", q).Output()
 	if err != nil {
 		return nil, fmt.Errorf("read corpus: %w", err)
@@ -58,6 +73,44 @@ func field(raw, key string) string {
 	}
 	return ""
 }
+// oneLine collapses whitespace and truncates by RUNE. Truncating by byte
+// split a multi-byte character mid-sequence and produced files the vault
+// validator could not read at all -- a whole-file failure from a one-byte
+// slice, measured 2026-09-07.
+func oneLine(s string, n int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	r := []rune(s)
+	if len(r) > n {
+		r = r[:n]
+	}
+	return string(r)
+}
+
+// firstClause reduces a statement to something that reads as a title: its
+// first sentence or clause, capped. Returns "" when the body cannot yield one,
+// so the caller can fall back rather than emit a fragment.
+func firstClause(body string) string {
+	s := oneLine(body, 400)
+	for _, sep := range []string{". ", " -- ", " — ", "; "} {
+		if i := strings.Index(s, sep); i > 25 && i < 96 {
+			s = s[:i]
+			break
+		}
+	}
+	s = strings.TrimRight(s, " .;:—-")
+	if r := []rune(s); len(r) > 95 {
+		cut := string(r[:92])
+		if j := strings.LastIndex(cut, " "); j > 0 {
+			cut = cut[:j]
+		}
+		s = cut + "..."
+	}
+	if len([]rune(s)) < 12 {
+		return ""
+	}
+	return s
+}
+
 func quote(s string) string { b, _ := json.Marshal(s); return string(b) }
 
 // Write preserves assigned IDs by corpus_item, refuses unmanaged targets and
@@ -167,12 +220,35 @@ func write(vault string, rows []Row, retireMissing bool) (Result, error) {
 		if standing {
 			tags = append(tags, "standing-rule")
 		}
+		body := regexp.MustCompile(`(^|[\s(])#([A-Za-z0-9_]+)`).ReplaceAllString(row.Body, `${1}\#${2}`)
+		// A title names the subject. It used to fall back to "<Kind> <item-id>"
+		// -- "Directive it-b29425780b4cd06c" -- which names nothing a reader or
+		// an agent can act on, and made every hub entry unreadable. Fall back to
+		// the statement itself; the item id is already in corpus_item, so
+		// nothing is lost by not repeating it as a title.
 		title := row.Title
+		if title == "" {
+			title = firstClause(body) // escaped body: a title is rendered inline too
+		}
 		if title == "" {
 			title = kinds[row.Kind] + " " + row.Item
 		}
-		body := regexp.MustCompile(`(^|[\s(])#([A-Za-z0-9_]+)`).ReplaceAllString(row.Body, `${1}\#${2}`)
-		s := fmt.Sprintf("---\ntype: %s\ntitle: %s\ndescription: %s\ntags: [%s]\nid: %s\ncorpus_item: %s\nprompt_id: %s\ncreated: %s\nupdated: %s\nsource: %s\n%s\nstatus: %s\ncorpus_status: %s\nweight: %s\n---\n\n# %s\n\n%s\n\nProjection of corpus item `%s`, source prompt `%s`. The corpus is authoritative. Questions and thoughts are not decisions.\n", kinds[row.Kind], quote(title), quote("Corpus "+row.Kind+"; consult the cited item and source prompt for authority."), strings.Join(tags, ", "), quote(id), quote(row.Item), quote(row.Prompt), stamp.Format(time.RFC3339), stamp.Format(time.RFC3339), quote("corpus:item:"+row.Item+"; prompt:"+row.Prompt), marker, status, quote(row.Status), quote(row.Weight), strings.ReplaceAll(title, "#", "\\#"), body, row.Item, row.Prompt)
+		// The description restates the rule itself. It used to read "Corpus
+		// <kind>; consult the cited item and source prompt for authority",
+		// which told a reader nothing and made every note look identical in
+		// any list -- the notes Jon called junk because "they all say the same
+		// bullshit".
+		desc := oneLine(body, 280) // escaped body, not row.Body: an inline #tag in a
+		// description is still an inline tag to Obsidian, and the test that caught
+		// this exists because an unescaped one silently creates a phantom tag.
+		if desc == "" {
+			desc = "Corpus " + row.Kind + "; consult the cited item and source prompt for authority."
+		}
+		s := fmt.Sprintf("---\ntype: %s\ntitle: %s\ndescription: %s\ntags: [%s]\nid: %s\ncorpus_item: %s\nprompt_id: %s\ncreated: %s\nupdated: %s\nsource: %s\n%s\nstatus: %s\ncorpus_status: %s\nweight: %s\n---\n\n# %s\n\n%s\n", kinds[row.Kind], quote(title), quote(desc), strings.Join(tags, ", "), quote(id), quote(row.Item), quote(row.Prompt), stamp.Format(time.RFC3339), stamp.Format(time.RFC3339), quote("corpus:item:"+row.Item+"; prompt:"+row.Prompt), marker, status, quote(row.Status), quote(row.Weight), strings.ReplaceAll(title, "#", "\\#"), body)
+		if c := oneLine(row.Context, 400); c != "" {
+			s += "\n## Context\n\nWhat was being discussed when this was said, from the source session:\n\n> " + c + "\n"
+		}
+		s += fmt.Sprintf("\n## Provenance\n\n- corpus item `%s` (%s, %s)\n- source prompt `%s`\n", row.Item, row.Kind, row.Status, row.Prompt)
 		s, err = notemeta.Merge(s, old[id+".md"])
 		if err != nil {
 			return r, err
