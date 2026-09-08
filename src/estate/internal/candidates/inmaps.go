@@ -313,12 +313,28 @@ func publishINMAPS(db, vault, id, action string, r MemoryReview, apply bool) (Me
 			// forward rather than falling back to a 4-digit sequence, which
 			// produced ids whose trailing digits were not a valid time.
 			now := time.Now().UTC()
+			// Notes share one global Obsidian ID namespace across every
+			// earned subdirectory (99 - Meta/note-subdirs.md), not just
+			// 01p - Parameters -- agent-estate#1302: this check named that
+			// one subdirectory directly, so 01f - Facts's 352 notes (and any
+			// future earned subdir) were invisible to it. WalkNotes recurses
+			// the whole 01 - Notes/ tree once, here, rather than
+			// hardcoding a directory list the registry explicitly forbids
+			// ("never hardcode a new subdir path directly") -- built once,
+			// outside the loop below, instead of walking the tree again for
+			// every one of up to 10000 candidate ids.
+			existingNotes, e := WalkNotes(vault)
+			if e != nil {
+				return r, e
+			}
+			taken := make(map[string]bool, len(existingNotes))
+			for _, np := range existingNotes {
+				taken[filepath.Base(np)] = true
+			}
 			for n := 0; n <= 9999; n++ {
 				p := filepath.Join("01 - Notes", now.Add(time.Duration(n)*time.Second).Format("20060102150405")+".md")
 				if _, e := os.Lstat(filepath.Join(vault, p)); os.IsNotExist(e) {
-					// Parameter projections share the global Obsidian ID namespace.
-					nested := filepath.Join(vault, "01 - Notes", "01p - Parameters", filepath.Base(p))
-					if _, err := os.Lstat(nested); !os.IsNotExist(err) {
+					if taken[filepath.Base(p)] {
 						continue
 					}
 					nextPath = p
