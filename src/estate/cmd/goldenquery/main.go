@@ -420,6 +420,30 @@ func runStarStratum(w *bufio.Writer, bin string, verbose bool) (top3Hits, top10H
 	return
 }
 
+// runBaselineStratum measures agent-estate#1315/#1318's own 26-question,
+// operator-words retrieval baseline (goldenset.LoadRetrievalBaseline)
+// against a real, already-compiled index. Always --private (this stratum
+// is majority vault-fact/corpus-parameter by design --
+// retrieval_baseline_cases_test.go's own TestRetrievalBaselineCasesAreVaultOrCorpus
+// -- and both are classified private by #1030); always unscoped (no
+// "source:X " prefix): the question this stratum answers is "does the
+// operator's own unprompted phrasing find it," and scoping to the correct
+// source in advance would answer a different, easier question. Shares
+// runStratum/tallyNatural with the other two stratum runners rather than
+// a fourth reimplementation of the same run-query-then-rank loop.
+func runBaselineStratum(w *bufio.Writer, bin string, verbose bool) (top10Hits, total int, ranAtLeastOne bool) {
+	cases, err := goldenset.LoadRetrievalBaseline()
+	if err != nil {
+		fmt.Fprintln(w, "goldenquery: retrieval-baseline stratum:", err)
+		return 0, 0, false
+	}
+	fmt.Fprintln(w, "=== retrieval-baseline stratum (--private, unscoped -- agent-estate#1315/#1318) ===")
+	var results []naturalResult
+	results, ranAtLeastOne = runStratum(w, bin, verbose, false, true, cases, "")
+	_, top10Hits, total = tallyNatural(results, nil)
+	return top10Hits, total, ranAtLeastOne
+}
+
 // runStratum is the shared run loop behind runNaturalStratum and
 // runStarStratum (generalised in agent-estate#1111 from runNaturalStratum's
 // original repo-docs-only body): it runs every case in cases once, scoping
@@ -982,7 +1006,32 @@ func ratchetFailures(rs []ratchet) []ratchet {
 func main() {
 	bin := flag.String("bin", "estate", "path to the estate binary to exec `knowledge query` against")
 	verbose := flag.Bool("v", false, "print every case, not just misses")
+	baseline := flag.Bool("baseline", false, "run ONLY the retrieval-baseline stratum (agent-estate#1315/#1318) and exit -- for repeatable before/after measurement, bypassing every other stratum and the ratchet below")
 	flag.Parse()
+
+	// agent-estate#1318: a dedicated, narrow mode -- named exactly this by
+	// retrieval_baseline_cases_test.go's own doc comment ("this task's own
+	// cmd/goldenquery -baseline run") before this flag existed. Kept
+	// completely separate from the ratchet/exit-code machinery below: this
+	// stratum is a measurement being actively moved by a fix under
+	// development, not yet a floor CI enforces, and wiring it into
+	// buildRatchets would risk changing this repo's merge gate as a side
+	// effect of adding a measurement tool. Exits 0 always -- a caller
+	// comparing two numbers by hand needs the printed counts, not an exit
+	// code neither number's floor has been decided for yet.
+	if *baseline {
+		w := bufio.NewWriter(os.Stdout)
+		defer w.Flush()
+		top10Hits, total, ran := runBaselineStratum(w, *bin, *verbose)
+		if !ran {
+			fmt.Fprintln(w, "goldenquery: could not run the retrieval-baseline stratum -- is the estate binary on PATH, and has `estate knowledge` been run to compile the index?")
+			w.Flush()
+			os.Exit(2)
+		}
+		fmt.Fprintf(w, "---\nretrieval-baseline stratum, top-10 (--private, unscoped -- agent-estate#1315/#1318): %d/%d\n", top10Hits, total)
+		fmt.Fprintf(w, "retrieval-baseline stratum ranking failures (present, not top-10): %d/%d\n", total-top10Hits, total)
+		return
+	}
 
 	cases, err := goldenset.Load()
 	if err != nil {
