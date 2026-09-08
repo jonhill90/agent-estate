@@ -367,6 +367,13 @@ func TestBudgetLimitAloneRefusesWithItsOwnReasonWhenUnreadable(t *testing.T) {
 func TestNeitherNewLimitRefusesWhenNotArmed(t *testing.T) {
 	v := Check(emptyLedger(t), neutralised())
 	joined := strings.Join(v.Reasons, " ")
+	// These three hold in EITHER environment: on a host that cannot measure
+	// load/memory/paging at all (CI's Linux runner -- hostIsMeasurable's own
+	// doc comment), Check() refuses for "could not measure load/memory/
+	// paging", never for swapReason/worktreeReason/budgetReason -- those
+	// strings only appear when a THRESHOLD is actually crossed, which
+	// neutralised() prevents regardless of whether the instrument reading it
+	// exists at all.
 	if strings.Contains(joined, swapReason) {
 		t.Errorf("the paging limit refused at a threshold of 1e9 swapouts: %v", v.Reasons)
 	}
@@ -376,7 +383,22 @@ func TestNeitherNewLimitRefusesWhenNotArmed(t *testing.T) {
 	if strings.Contains(joined, budgetReason) {
 		t.Errorf("the budget limit refused under neutralised()'s own healthyQuota fixture: %v", v.Reasons)
 	}
-	if !v.OK {
+	// v.OK itself is NOT one of those three -- it is the WHOLE verdict, and
+	// load/memory/paging are not neutralised the way swap/worktree/budget
+	// are (their thresholds are widened past any real value, but the
+	// underlying READ can still fail outright on a host that lacks sysctl/
+	// vm_stat entirely). This assertion originally had no such guard and
+	// failed in CI while passing locally (agent-estate#1321's own fix pass,
+	// found by CI catching what local-only verification did not): the
+	// Linux runner has neither tool, so load/memory/paging all refuse for
+	// "could not measure", v.OK is correctly false, and asserting it true
+	// unconditionally reintroduced exactly the class of environment-
+	// dependent test this PR exists to close, one function later. Gated
+	// the same way TestBelowCapAllowsOrRefusesForTheRightReason already
+	// gates its own OK assertion, rather than skipping this test outright
+	// on an unmeasurable host -- the three checks above still run
+	// unconditionally either way.
+	if hostIsMeasurable(t) && !v.OK {
 		t.Errorf("Check() refused with every limit neutralised and the ledger empty: %v", v.Reasons)
 	}
 }
