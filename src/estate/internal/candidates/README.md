@@ -71,9 +71,16 @@ Regenerate with `estate knowledge` using `ESTATE_KNOWLEDGE_INDEX` pointing to
 an isolated output, then `estate knowledge query --private <terms>`.
 Full vault snapshots are withheld if canonical bytes changed or disappeared,
 including snapshots compiled before adoption. Older pointer-only disclosure
-formats retain their existing behavior. Backups remain private under
-`agent/.memory-backup-*/`; rejection withdraws the canonical file after backing
-it up. The corpus review and memory log retain the rejection. Raw source exchanges
+formats retain their existing behavior. Backups remain private, under
+`99 - Meta/.inmaps-backup-*/` for the INMAPS writer every real vault takes
+(`inmaps(vault)`, true whenever `01 - Notes` exists) -- agent-estate#1284/#1328:
+rejection of an already-published fact deprecates the canonical file in
+place (`status: deprecated`, `memory_status: rejected`), it does not
+withdraw or remove it; `LIFECYCLE.md`'s own INMAPS migration amendment
+names this. (The pre-INMAPS legacy writer below, `agent/.memory-backup-*/`,
+did withdraw the file outright -- unreachable against the real vault today,
+since `agent/` no longer exists.) The corpus review and memory log retain
+the rejection. Raw source exchanges
 stay in their original private files; the workflow stores only citations and
 reviewer-supplied paraphrases. Recover the exchange around the cited prompt before
 writing those paraphrases. Provenance `record` is a zero-based extracted-turn
