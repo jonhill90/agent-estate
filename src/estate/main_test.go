@@ -230,7 +230,7 @@ func TestSweepSummarySeparatesCategories(t *testing.T) {
 		"1 refused",
 		"1 bound-reached",
 		"1 kept by policy",
-		"1 outside this checkout's dispatch root",
+		"1 outside the swept dispatch root",
 		"1 already gone",
 		"1 ledger record(s) have no worktree recorded",
 	} {

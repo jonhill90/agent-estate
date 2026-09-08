@@ -75,14 +75,14 @@ func TestTerminalIsCompleteAndFailedOnly(t *testing.T) {
 // host, is precisely the case where no human is watching.
 func TestDispatchRunsTheSweepItself(t *testing.T) {
 	src := mainSource(t)
-	if !regexp.MustCompile(`sweepWorktrees\(l, repoRoot, true\)`).MatchString(src) {
+	if !regexp.MustCompile(`sweepWorktrees\(l, isolate\.Root\(repoRoot\), true\)`).MatchString(src) {
 		t.Fatal("the dispatch path does not run the worktree sweep in apply mode -- a worktree left by a killed dispatch would then wait for someone to notice")
 	}
 	// And it must run before the pressure gate, so the gate's own worktree
 	// ceiling (agent-estate#999) is measured after housekeeping rather than
 	// refusing work over worktrees this run was about to remove.
 	dispatch := src[strings.Index(src, "\tcase \"dispatch\":"):]
-	sweepAt := strings.Index(dispatch, "sweepWorktrees(l, repoRoot, true)")
+	sweepAt := strings.Index(dispatch, "sweepWorktrees(l, isolate.Root(repoRoot), true)")
 	gateAt := strings.Index(dispatch, "pressure.Check(l, pressure.Default())")
 	if sweepAt < 0 || gateAt < 0 || sweepAt > gateAt {
 		t.Fatal("the sweep does not run before the pressure gate, so the gate can refuse a dispatch over worktrees the same run would have removed")

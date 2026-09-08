@@ -413,20 +413,76 @@ func repoSlug() (string, error) {
 // batch: the backlog drains, it just does not drain in one breath.
 const maxSweepPerRun = 8
 
+// resolveSweepRoot picks which dispatch root `sweep-worktrees` searches:
+// this checkout's own derived one (named == ""), or an operator-named one
+// -- agent-estate#1294's whole point, since the dispatch root is derived
+// per-checkout and nothing else can ever see, let alone clean, another
+// checkout's worktrees otherwise.
+//
+// "The operator typed it" is not legitimacy on its own -- a typo must not
+// delete something else (agent-estate#1294's own brief). named is
+// therefore refused unless it resolves to a path sitting DIRECTLY under
+// isolate.DispatchParent() (TMPDIR/estate-dispatch) -- the exact directory
+// every real per-checkout root already lives in, one level down, the same
+// shape isolate.Root produces. This is the same confinement discipline
+// isolate.ReattachAt/sweep.underRoot already apply one level deeper (a
+// WORKTREE must sit directly under its root); this is that same rule
+// applied to the root itself, so a mistyped `--root=/etc` or
+// `--root=$HOME` is refused before anything reads a single ledger record,
+// and a path two levels deep (a single worktree mistaken for a root)
+// is refused too, not silently accepted as an empty, useless sweep.
+//
+// foreign reports whether the resolved root differs from this checkout's
+// own -- sweep-worktrees' caller uses it to decide whether --apply needs
+// the stronger --allow-foreign-root acknowledgement (see that flag's own
+// usage text). A named root that happens to equal this checkout's own
+// (an operator redundantly spelling out what --root would default to
+// anyway) is correctly reported as NOT foreign: it is not a different
+// trust boundary, just a more verbose way to ask for the same sweep.
+func resolveSweepRoot(repoRoot, named string) (root string, foreign bool, err error) {
+	own := isolate.Root(repoRoot)
+	if strings.TrimSpace(named) == "" {
+		return own, false, nil
+	}
+	abs, aerr := filepath.Abs(named)
+	if aerr != nil {
+		return "", false, fmt.Errorf("cannot resolve %q to an absolute path: %w", named, aerr)
+	}
+	abs = filepath.Clean(abs)
+	parent := isolate.DispatchParent()
+	rel, relErr := filepath.Rel(parent, abs)
+	if relErr != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || strings.ContainsRune(rel, filepath.Separator) {
+		return "", false, fmt.Errorf("%s is not directly under the dispatch-root parent %s -- a named root must be one of THESE directories, never an arbitrary path", abs, parent)
+	}
+	return abs, abs != own, nil
+}
+
 // sweepWorktrees runs internal/sweep against the ledger's current view and
 // prints one line per record. It never returns an error to its caller: a
 // sweep is housekeeping, and housekeeping that can refuse a dispatch would
 // be a new way for the estate to stop working. Whatever it could not do, it
 // says.
-// sweepConfig assembles the Config a sweep of repoRoot runs with. It is a
+// sweepConfig assembles the Config a sweep of root runs with. It is a
 // function of its own, rather than inline in sweepWorktrees, so a test can
-// exercise the REAL Remover closure -- Reattach followed by Remove, against
-// real git -- with a stubbed forge, instead of a fake standing in for the
-// one piece of wiring that actually deletes directories. landed nil means
-// the forge is not consulted at all.
-func sweepConfig(repoRoot string, landed isolate.Landed, apply bool) sweep.Config {
+// exercise the REAL Remover closure -- ReattachAt followed by Remove,
+// against real git -- with a stubbed forge, instead of a fake standing in
+// for the one piece of wiring that actually deletes directories. landed nil
+// means the forge is not consulted at all.
+//
+// root is the dispatch root itself, not a repoRoot this would derive
+// Root() from -- agent-estate#1294's named-foreign-root sweep needs to
+// hand this an operator-named root that has no repoRoot of its own to
+// derive it from at all. sweepWorktrees' caller (resolveSweepRoot) picks
+// which one: isolate.Root(repoRoot) for an ordinary sweep, or the named
+// root once its own legitimacy check has passed. isolate.ReattachAt(root,
+// ...), not isolate.Reattach(repoRoot, ...), for the identical reason --
+// Reattach IS exactly ReattachAt(Root(repoRoot), ...), so calling
+// ReattachAt with the already-resolved root reproduces its own-root
+// behaviour unchanged and extends the same confinement to a named one,
+// with no second code path.
+func sweepConfig(root string, landed isolate.Landed, apply bool) sweep.Config {
 	cfg := sweep.Config{
-		Root:  isolate.Root(repoRoot),
+		Root:  root,
 		Probe: reclaim.PSProbe,
 		Exists: func(path string) bool {
 			_, err := os.Stat(path)
@@ -445,11 +501,11 @@ func sweepConfig(repoRoot string, landed isolate.Landed, apply bool) sweep.Confi
 		// passes to Remove below, not left nil, so report mode's
 		// judgement runs on the identical inputs Remove's would -- one
 		// judgement, two callers, not two judgements that can drift.
-		// Read-only: Reattach, CheckRemovable, and everything it calls
+		// Read-only: ReattachAt, CheckRemovable, and everything it calls
 		// (Committed, remoteHasCommit, Landed, DirtyStatus) never write
 		// anything.
 		RemovalCheck: func(rec ledger.Record) (isolate.DirtyState, error) {
-			corpse, rerr := isolate.Reattach(repoRoot, rec.Worktree, rec.Branch, rec.Base)
+			corpse, rerr := isolate.ReattachAt(root, rec.Worktree, rec.Branch, rec.Base)
 			if rerr != nil {
 				return isolate.DirtyStateUnique, rerr
 			}
@@ -463,7 +519,7 @@ func sweepConfig(repoRoot string, landed isolate.Landed, apply bool) sweep.Confi
 		return cfg
 	}
 	cfg.Remove = func(rec ledger.Record) error {
-		corpse, rerr := isolate.Reattach(repoRoot, rec.Worktree, rec.Branch, rec.Base)
+		corpse, rerr := isolate.ReattachAt(root, rec.Worktree, rec.Branch, rec.Base)
 		if rerr != nil {
 			return rerr
 		}
@@ -528,8 +584,13 @@ func (s sweepSummary) report(apply bool) []string {
 	}
 	worktreeBearing := s.outsideRoot + s.alreadyGone + s.keptByPolicy + s.boundReached + s.refused + s.removed
 	lines := []string{
+		// "the swept dispatch root", not "this checkout's own" --
+		// agent-estate#1294's --root can name a different one, and this
+		// line must stay accurate either way; the exact root a given
+		// record is outside of is already named in that record's own
+		// per-line Reason (sweep.judge's CategoryOutsideRoot text).
 		fmt.Sprintf(
-			"%d worktree-bearing record(s): %d %s, %d refused, %d bound-reached, %d kept by policy, %d outside this checkout's dispatch root, %d already gone",
+			"%d worktree-bearing record(s): %d %s, %d refused, %d bound-reached, %d kept by policy, %d outside the swept dispatch root, %d already gone",
 			worktreeBearing, s.removed, verb, s.refused, s.boundReached, s.keptByPolicy, s.outsideRoot, s.alreadyGone,
 		),
 	}
@@ -542,7 +603,7 @@ func (s sweepSummary) report(apply bool) []string {
 	return lines
 }
 
-func sweepWorktrees(l *ledger.Ledger, repoRoot string, apply bool) {
+func sweepWorktrees(l *ledger.Ledger, root string, apply bool) {
 	records, err := l.Current()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "estate: cannot read the ledger to sweep worktrees:", err)
@@ -568,7 +629,7 @@ func sweepWorktrees(l *ledger.Ledger, repoRoot string, apply bool) {
 	} else {
 		fmt.Fprintln(os.Stderr, "estate: could not read this repository's name, so a squash-merged branch cannot be recognised this run:", serr)
 	}
-	cfg := sweepConfig(repoRoot, landed, apply)
+	cfg := sweepConfig(root, landed, apply)
 	// A boot time that cannot be read narrows what can be judged a corpse;
 	// reclaim treats zero as "skip that check", never as evidence. Same
 	// handling, and the same explicit note, as `estate reclaim`.
@@ -724,7 +785,8 @@ func usage() {
   estate reclaim [--apply]              report in-flight turns and whether their
                                         process is still alive; --apply frees the
                                         slot for any turn positively observed dead
-  estate sweep-worktrees [--apply]      report which dispatch worktrees may be torn
+  estate sweep-worktrees [--apply] [--root=PATH] [--allow-foreign-root]
+                                        report which dispatch worktrees may be torn
                                         down -- terminal turns, and turns whose
                                         process is positively dead -- and why each
                                         of the rest is kept; --apply removes them.
@@ -733,6 +795,19 @@ func usage() {
                                         so a worktree holding uncollected work is
                                         kept whatever this reports. Runs
                                         automatically before each dispatch.
+                                        --root names a dispatch root explicitly,
+                                        instead of this checkout's own derived
+                                        one (agent-estate#1294: nothing else can
+                                        ever see another checkout's worktrees) --
+                                        must sit directly under TMPDIR/estate-
+                                        dispatch, refused otherwise, so a typo
+                                        cannot name something else on disk.
+                                        --apply against a --root other than this
+                                        checkout's own additionally requires
+                                        --allow-foreign-root (or
+                                        ESTATE_SWEEP_ALLOW_FOREIGN_ROOT=1) --
+                                        report mode needs neither, since it
+                                        mutates nothing.
   estate tick record <phase-item> [artifact]
                                         append this tick to the record
   estate tick check                     has the loop stalled? resolves each
@@ -2361,9 +2436,19 @@ func main() {
 
 	case "sweep-worktrees":
 		apply := false
+		allowForeign := os.Getenv("ESTATE_SWEEP_ALLOW_FOREIGN_ROOT") == "1"
+		var namedRoot string
 		for _, a := range os.Args[2:] {
-			if a == "--apply" {
+			switch {
+			case a == "--apply":
 				apply = true
+			case a == "--allow-foreign-root":
+				allowForeign = true
+			case strings.HasPrefix(a, "--root="):
+				namedRoot = strings.TrimPrefix(a, "--root=")
+			default:
+				fmt.Fprintf(os.Stderr, "estate: unrecognised flag %q for sweep-worktrees -- valid: --apply, --root=PATH, --allow-foreign-root\n", a)
+				os.Exit(2)
 			}
 		}
 		repoRoot, err := repoTopLevel()
@@ -2371,7 +2456,22 @@ func main() {
 			fmt.Fprintln(os.Stderr, "estate: cannot locate the repository root to sweep its worktrees:", err)
 			os.Exit(2)
 		}
-		sweepWorktrees(l, repoRoot, apply)
+		root, foreign, rerr := resolveSweepRoot(repoRoot, namedRoot)
+		if rerr != nil {
+			fmt.Fprintln(os.Stderr, "estate: refusing the named sweep root:", rerr)
+			os.Exit(2)
+		}
+		// agent-estate#1294: --apply against a root this checkout did not
+		// derive itself needs a stronger confirmation than --apply alone --
+		// it acts on records this process never wrote and cannot verify by
+		// any means beyond the same in-tree safety every worktree already
+		// gets. Report mode needs neither: it mutates nothing, named root
+		// or not.
+		if apply && foreign && !allowForeign {
+			fmt.Fprintf(os.Stderr, "estate: --apply against %s, which is not this checkout's own dispatch root -- pass --allow-foreign-root or set ESTATE_SWEEP_ALLOW_FOREIGN_ROOT=1 if this is deliberate\n", root)
+			os.Exit(1)
+		}
+		sweepWorktrees(l, root, apply)
 
 	case "tick":
 		// The Director's loop cannot remember its own history -- every tick is
@@ -2980,7 +3080,7 @@ func main() {
 		// rather than refusing work over worktrees this run was about to
 		// remove anyway. It cannot itself refuse a dispatch: every failure
 		// inside it is reported and stepped over.
-		sweepWorktrees(l, repoRoot, true)
+		sweepWorktrees(l, isolate.Root(repoRoot), true)
 
 		if v := pressure.Check(l, pressure.Default()); !v.OK {
 			fmt.Fprintln(os.Stderr, "estate: refusing to dispatch --")
