@@ -3,47 +3,83 @@ package knowledge
 import (
 	"bufio"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 )
 
-// loopsSource reads every top-level .md file directly under dir
-// (~/source/repos/Personal/Loops-Research) -- one Item per file, Tier1
-// from the file's own first `# ` heading (falling back to its filename),
-// Tier2 the first non-empty paragraph after it. Never recurses, never
-// rewrites: this is a plain read of a plain directory of notes.
+// LoopsResearchFiles lists every .md file under dir, at any depth --
+// agent-estate#1305's decided rule: this is a single-purpose research repo
+// (jonhill90/Loops-Research), and everything in it, at every depth, is
+// research content. specs/ (a routing README, two full skill specs, and a
+// deferred-sketches file, read in full before deciding) is the same KIND of
+// material as the 24 top-level files it sits beside -- the top-level
+// README.md is itself a routing document mixed with real content, the exact
+// shape specs/README.md has, and specs/deferred.md cites the same numbered
+// research files (../04-verifiers.md, ../07-isolation.md, ...) the indexed
+// files already do. No file in this repo is scaffolding by depth alone.
+//
+// Exported and shared: loopsSource (content) and main.go's staleness check
+// both call this SAME function, so they describe the same set of files by
+// construction, not by two independently written walks that happen to
+// agree today and can drift apart tomorrow -- the exact coupling gap
+// agent-estate#1305 was filed to close. Only dot-directories are skipped
+// (.git and similar VCS/tooling metadata, never research content); nothing
+// else is excluded, matching the "everything here is research" rule above.
+func LoopsResearchFiles(dir string) ([]string, error) {
+	var files []string
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if path != dir && strings.HasPrefix(d.Name(), ".") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(d.Name(), ".md") {
+			files = append(files, path)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(files)
+	return files, nil
+}
+
+// loopsSource reads every .md file under dir (~/source/repos/Personal/
+// Loops-Research), at any depth -- one Item per file, Tier1 from the
+// file's own first `# ` heading (falling back to its filename), Tier2 the
+// first non-empty paragraph after it. Never rewrites: this is a plain read
+// of a research directory's own notes, via LoopsResearchFiles so this
+// source and main.go's staleness check can never describe different sets
+// of files (agent-estate#1305).
 func loopsSource(dir string) (SourceResult, []Item) {
 	res := SourceResult{Name: "loops-research"}
 	if dir == "" {
 		res.Reason = "no Loops-Research path configured"
 		return res, nil
 	}
-	entries, err := os.ReadDir(dir)
+	paths, err := LoopsResearchFiles(dir)
 	if err != nil {
 		res.Reason = fmt.Sprintf("cannot list %s: %v", dir, err)
 		return res, nil
 	}
 
-	var names []string
-	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".md") {
-			names = append(names, e.Name())
-		}
-	}
-	sort.Strings(names)
-
 	var items []Item
-	for _, name := range names {
-		path := filepath.Join(dir, name)
+	for _, path := range paths {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			continue // one unreadable note does not fail the source
 		}
 		heading, para := firstHeadingAndParagraph(string(data))
 		if heading == "" {
-			heading = strings.TrimSuffix(name, ".md")
+			heading = strings.TrimSuffix(filepath.Base(path), ".md")
 		}
 		publishable, basis := classify("loops-research")
 		items = append(items, Item{
