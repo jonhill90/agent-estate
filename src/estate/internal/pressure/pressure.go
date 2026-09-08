@@ -27,6 +27,31 @@ type Limits struct {
 	MaxSwapoutsPerSample float64
 	MaxWorktrees         int
 	MaxInFlight          int
+	// ReadQuota overrides how the budget limit takes its reading -- nil
+	// (the zero value, what Default() and every production call site
+	// leaves it) means the real quota.Read.
+	//
+	// agent-estate#1321: the other four limits are neutralised in tests by
+	// widening their THRESHOLD past whatever the real reading is (e.g.
+	// MaxLoadPerCore = 1e9) -- that works because their underlying reads
+	// (sysctl, vm_stat, git worktree list) always succeed on a normal
+	// host; only the compared VALUE varies. Budget cannot be neutralised
+	// that way: quota.Allow's threshold is quota.StopThresholdPercent, a
+	// package constant Limits never carried, and quota.Read shells out to
+	// `codexbar` -- a live, external, sometimes-unavailable dependency
+	// whose FAILURE (not just a low value) must also refuse. Widening a
+	// threshold cannot neutralise a call that might error outright. A
+	// function seam is the only shape that covers both, mirroring
+	// swapoutRate's own `sample func() (float64, error)` parameter --
+	// established in this same file for the identical reason (a raw OS
+	// reading with no built-in test seam).
+	//
+	// Placed on Limits, not as a new Check parameter, so every existing
+	// caller (main.go's two pressure.Check(l, pressure.Default()) sites,
+	// this package's own other tests) needs no change: nil already meant
+	// "use the real one" for every other field's zero value in spirit,
+	// and this keeps that reading true for the fifth limit too.
+	ReadQuota func(time.Time) (quota.Reading, error)
 }
 
 func Default() Limits {
@@ -192,7 +217,11 @@ func Check(l *ledger.Ledger, lim Limits) Verdict {
 
 	// Budget is a limit like any other, and the one whose blindness actually
 	// cost a week. A reading that cannot be taken refuses.
-	if r, err := quota.Read(time.Now()); err != nil {
+	readQuota := lim.ReadQuota
+	if readQuota == nil {
+		readQuota = quota.Read
+	}
+	if r, err := readQuota(time.Now()); err != nil {
 		v.OK = false
 		v.Reasons = append(v.Reasons, "could not measure token budget: "+err.Error())
 	} else {

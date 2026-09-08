@@ -7,8 +7,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jonhill90/agent-estate/estate/internal/ledger"
+	"github.com/jonhill90/agent-estate/estate/internal/quota"
 )
 
 // hostIsMeasurable reports whether this host exposes the readings the gate
@@ -82,6 +84,11 @@ func TestBelowCapAllowsOrRefusesForTheRightReason(t *testing.T) {
 	// exactly the state that killed the host on 2026-09-03.
 	lim.MaxSwapoutsPerSample = 1e9
 	lim.MaxWorktrees = 1e9
+	// Budget neutralised the same way, via the seam agent-estate#1321 added:
+	// this test isolates the IN-FLIGHT cap, and the real weekly quota being
+	// at or below its own stop threshold is a true reading, not a reason
+	// this specific test should fail -- see healthyQuota's own comment.
+	lim.ReadQuota = healthyQuota
 	if err := l.Append(ledger.Record{ID: "a", State: ledger.Complete}); err != nil {
 		t.Fatal(err)
 	}
@@ -192,6 +199,13 @@ func TestSwapoutsUnreadableRefusesRatherThanPasses(t *testing.T) {
 
 // neutralised returns limits under which no limit can refuse, so a test can
 // arm exactly one and know what any refusal it sees came from.
+//
+// ReadQuota is neutralised the same way (agent-estate#1321): a fixed,
+// comfortably healthy reading, not the real quota.Read -- the fifth limit
+// this file's own tests could not previously isolate, so
+// TestBelowCapAllowsOrRefusesForTheRightReason failed whenever the real
+// weekly budget happened to be at or below the 10% stop threshold, on a
+// host with no other real pressure at all.
 func neutralised() Limits {
 	return Limits{
 		MaxLoadPerCore:       1e9,
@@ -199,12 +213,37 @@ func neutralised() Limits {
 		MaxSwapoutsPerSample: 1e9,
 		MaxWorktrees:         1e9,
 		MaxInFlight:          1e9,
+		ReadQuota:            healthyQuota,
 	}
+}
+
+// healthyQuota is a fixed reading well clear of quota.StopThresholdPercent
+// (10% remaining) -- 50% used, 50% remaining -- so budget cannot be the
+// reason a test refuses, regardless of the real, live weekly quota this
+// process happens to be running under.
+func healthyQuota(time.Time) (quota.Reading, error) {
+	return quota.Reading{WeeklyUsedPercent: 50}, nil
+}
+
+// lowQuota simulates a real reading at the stop threshold -- the state
+// TestBelowCapAllowsOrRefusesForTheRightReason used to depend on the live
+// host actually being in, by accident, to exercise this refusal at all.
+func lowQuota(time.Time) (quota.Reading, error) {
+	return quota.Reading{WeeklyUsedPercent: 95}, nil // 5% remaining
+}
+
+// unreadableQuota simulates codexbar itself failing -- a live, external
+// dependency, unlike the other four limits' OS-level reads, which do not
+// fail on a normal host. Budget blindness must refuse exactly like a low
+// reading does, never pass as if nothing were wrong.
+func unreadableQuota(time.Time) (quota.Reading, error) {
+	return quota.Reading{}, errors.New("codexbar unreachable: fixture")
 }
 
 const (
 	swapReason     = "actively paging"
 	worktreeReason = "worktrees above ceiling"
+	budgetReason   = "stop threshold"
 )
 
 func emptyLedger(t *testing.T) *ledger.Ledger {
@@ -272,6 +311,56 @@ func TestWorktreeCeilingAloneRefusesWithItsOwnReason(t *testing.T) {
 	}
 }
 
+// Arms the budget limit alone with a simulated LOW reading -- agent-estate
+// #1321's own required coverage. Before this, the budget refusal was only
+// ever exercised BY ACCIDENT, when the real live quota happened to be low
+// (which is also what made TestBelowCapAllowsOrRefusesForTheRightReason
+// fail on exactly those hosts). This pins the direction deliberately,
+// independent of whatever the real weekly quota is when the suite runs.
+func TestBudgetLimitAloneRefusesWithItsOwnReasonWhenLow(t *testing.T) {
+	lim := neutralised()
+	lim.ReadQuota = lowQuota
+	v := Check(emptyLedger(t), lim)
+
+	if v.OK {
+		t.Fatalf("Check() allowed dispatch with the budget at 5%% remaining; the budget gate is not wired. reading=%+v", v.Reading)
+	}
+	joined := strings.Join(v.Reasons, " ")
+	if !strings.Contains(joined, budgetReason) {
+		t.Errorf("refusal did not name the budget limit that caused it; got %v", v.Reasons)
+	}
+	if strings.Contains(joined, swapReason) || strings.Contains(joined, worktreeReason) {
+		t.Errorf("the budget limit's refusal is contaminated by another limit; the two are not independent: %v", v.Reasons)
+	}
+	if v.Reading.WeeklyRemaining != 5 {
+		t.Errorf("Check reported %.0f%% remaining, want 5%% from the fixture reading", v.Reading.WeeklyRemaining)
+	}
+}
+
+// Arms the budget limit alone with a simulated UNREADABLE reading --
+// agent-estate#1321's other required case. Budget blindness ("cost him the
+// week", per quota.go's own doc comment) must refuse exactly like a low
+// reading does, not pass as if nothing were wrong -- codexbar failing
+// outright is the failure mode the other four limits do not share (their
+// own OS-level reads do not fail on a normal host), so this direction has
+// no equivalent test among the existing four and needs its own.
+func TestBudgetLimitAloneRefusesWithItsOwnReasonWhenUnreadable(t *testing.T) {
+	lim := neutralised()
+	lim.ReadQuota = unreadableQuota
+	v := Check(emptyLedger(t), lim)
+
+	if v.OK {
+		t.Fatal("Check() allowed dispatch with an unreadable budget reading; blindness is not capacity")
+	}
+	joined := strings.Join(v.Reasons, " ")
+	if !strings.Contains(joined, "could not measure token budget") {
+		t.Errorf("a refusal for an unreadable budget must say so; got: %v", v.Reasons)
+	}
+	if strings.Contains(joined, swapReason) || strings.Contains(joined, worktreeReason) {
+		t.Errorf("the budget limit's refusal is contaminated by another limit; the two are not independent: %v", v.Reasons)
+	}
+}
+
 // Neither limit fires when neither is armed -- the other direction, and the
 // thing that stops the two tests above from being satisfied by a gate that
 // refuses everything.
@@ -283,6 +372,12 @@ func TestNeitherNewLimitRefusesWhenNotArmed(t *testing.T) {
 	}
 	if strings.Contains(joined, worktreeReason) {
 		t.Errorf("the worktree ceiling refused at a ceiling of 1e9: %v", v.Reasons)
+	}
+	if strings.Contains(joined, budgetReason) {
+		t.Errorf("the budget limit refused under neutralised()'s own healthyQuota fixture: %v", v.Reasons)
+	}
+	if !v.OK {
+		t.Errorf("Check() refused with every limit neutralised and the ledger empty: %v", v.Reasons)
 	}
 }
 
