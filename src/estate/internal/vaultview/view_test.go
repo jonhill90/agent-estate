@@ -7,6 +7,75 @@ import (
 	"testing"
 )
 
+// TestCollisionGuardSeesFactsSubdir closes agent-estate#1307: the id-collision
+// guard read the flat "01 - Notes" root plus its own NotesDir
+// ("01p - Parameters") only, so an id already claimed by a note under
+// "01f - Facts" -- an earned subdir #1309 fixed candidates.go for, but never
+// applied here -- was invisible to it. Obsidian ids are a single global
+// namespace across every subdir; 352 Facts notes and 3,217 Parameter notes
+// share it.
+//
+// Pre-plants a Facts note at exactly the id Write() would otherwise mint for
+// the fixture row (Row.At = 1788739200 -> "20260907000000", the same fixture
+// timestamp TestProjectionStableIdentityAndRetirement already uses with an
+// empty `used` set) and asserts the guard steps past it rather than reusing
+// it. FAILS on main before agent-estate#1307's fix: the flat-root check never
+// looks under 01f - Facts at all.
+func TestCollisionGuardSeesFactsSubdir(t *testing.T) {
+	v := t.TempDir()
+	factsDir := filepath.Join(v, "01 - Notes", "01f - Facts")
+	if err := os.MkdirAll(factsDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	collidingID := "20260907000000" // what At=1788739200 mints against an empty `used` set
+	factPath := filepath.Join(factsDir, collidingID+".md")
+	factBody := "---\ntype: Fact\nid: \"" + collidingID + "\"\n---\n\n# Pre-existing fact\n\nAlready claims this id.\n"
+	if err := os.WriteFile(factPath, []byte(factBody), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := Write(v, []Row{{Item: "a", At: 1788739200, Kind: "parameter", Weight: "hard", Status: "open", Body: "New parameter"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Mapping["a"] == collidingID {
+		t.Fatalf("minted id %q -- already claimed by 01f - Facts/%s.md, invisible to the collision guard", r.Mapping["a"], collidingID)
+	}
+	got, err := os.ReadFile(factPath)
+	if err != nil || string(got) != factBody {
+		t.Fatalf("pre-existing fact file was modified: err=%v body=%q", err, string(got))
+	}
+}
+
+// TestCollisionGuardSeesFourteenDigitFlatIDs closes the adjacent bug named in
+// agent-estate#1307: the flat-root check's regex matched only 12-digit ids
+// (`^\d{12}\.md$`), while every live note id is 14 digits, YYYYMMDDHHMMSS
+// (agent-estate#1289). Even a note the flat-root check DOES look at -- no
+// subdir involved at all -- was invisible if its id used the current, real
+// format. FAILS on main before agent-estate#1307's fix: a 14-digit filename
+// does not match a 12-digit-exact regex.
+func TestCollisionGuardSeesFourteenDigitFlatIDs(t *testing.T) {
+	v := t.TempDir()
+	notesRoot := filepath.Join(v, "01 - Notes")
+	if err := os.MkdirAll(notesRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
+	collidingID := "20260907000000" // what At=1788739200 mints against an empty `used` set
+	flatPath := filepath.Join(notesRoot, collidingID+".md")
+	body := "flat 14-digit note, no subdir, no marker -- not vaultview-managed"
+	if err := os.WriteFile(flatPath, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := Write(v, []Row{{Item: "a", At: 1788739200, Kind: "parameter", Weight: "hard", Status: "open", Body: "New parameter"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Mapping["a"] == collidingID {
+		t.Fatalf("minted id %q -- already claimed by 01 - Notes/%s.md, invisible to the 12-digit-only regex", r.Mapping["a"], collidingID)
+	}
+}
+
 func TestProjectionStableIdentityAndRetirement(t *testing.T) {
 	v := t.TempDir()
 	rows := []Row{{Item: "b", Prompt: "p", At: 1788739200, Kind: "parameter", Weight: "hard", Status: "acted", Body: "fixture #NNN"}, {Item: "a", Prompt: "q", At: 1788739200, Kind: "question", Weight: "hard", Status: "open", Body: "A question"}}
