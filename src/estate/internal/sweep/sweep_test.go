@@ -556,3 +556,80 @@ func TestReportModeWithRemovalCheckStillMutatesNothing(t *testing.T) {
 		}
 	}
 }
+
+// TestCategoriesSeparateWhatReasonMerges is agent-estate#1294's acceptance
+// criterion: `estate sweep-worktrees` ended with one merged "N left in
+// place" that added three unrelated situations together -- 462 ledger rows
+// that were never worktrees at all, 146-151 genuinely refused because
+// they belong to a different checkout's dispatch root, and a handful
+// already gone from disk. All three had distinct Reason text even before
+// this fix, but nothing counted them separately -- main.go's caller only
+// ever asked r.Removed, a plain bool. This fixture carries one record of
+// every shape Category now distinguishes and asserts each lands in its
+// own bucket, not folded into whatever bucket happens to come first.
+func TestCategoriesSeparateWhatReasonMerges(t *testing.T) {
+	c := Config{
+		Root:  root,
+		Probe: alive,
+		// "gone" is the only path this fixture reports missing -- every
+		// other eligible record's path is treated as present.
+		Exists: func(p string) bool { return !strings.Contains(p, "gone") },
+		Remove: func(r ledger.Record) error {
+			if r.ID == "refused" {
+				return errors.New("isolate: holds uncommitted work; refusing to remove it")
+			}
+			return nil
+		},
+		// A bound of 2, reached by refused + removed-a + removed-b below:
+		// the refusal is free (agent-estate#1247's own fix -- a refusal
+		// never consumes the bound), so it is the two real removals that
+		// exhaust it, leaving bound-reached genuinely bound-starved.
+		Max: 2,
+	}
+
+	noPath := rec("no-path", ledger.Complete)
+	noPath.Worktree = ""
+
+	outside := rec("outside", ledger.Complete)
+	outside.Worktree = "/somewhere/else/entirely/outside"
+
+	gone := rec("gone", ledger.Complete)
+	unknown := rec("unknown", ledger.Unknown)
+	refused := rec("refused", ledger.Complete)
+	removedA := rec("removed-a", ledger.Complete)
+	removedB := rec("removed-b", ledger.Failed)
+	boundReached := rec("bound-reached", ledger.Complete)
+
+	records := []ledger.Record{noPath, outside, gone, unknown, refused, removedA, removedB, boundReached}
+	results := Run(records, c)
+
+	want := map[string]Category{
+		"no-path":       CategoryNoWorktreePath,
+		"outside":       CategoryOutsideRoot,
+		"gone":          CategoryAlreadyGone,
+		"unknown":       CategoryKeptByPolicy,
+		"refused":       CategoryRefused,
+		"removed-a":     CategoryRemoved,
+		"removed-b":     CategoryRemoved,
+		"bound-reached": CategoryBoundReached,
+	}
+	for id, wantCat := range want {
+		r := find(t, results, id)
+		if r.Category != wantCat {
+			t.Errorf("%s: got category %q, want %q (reason: %s)", id, r.Category, wantCat, r.Reason)
+		}
+	}
+
+	// The whole point: a caller can now count each shape separately. The
+	// three the issue measured by hand with grep -c must never collapse
+	// into one bucket, whichever happens to be zero-valued.
+	counts := map[Category]int{}
+	for _, r := range results {
+		counts[r.Category]++
+	}
+	for _, cat := range []Category{CategoryNoWorktreePath, CategoryOutsideRoot, CategoryAlreadyGone} {
+		if counts[cat] != 1 {
+			t.Errorf("category %q: got count %d, want 1 -- %+v", cat, counts[cat], counts)
+		}
+	}
+}

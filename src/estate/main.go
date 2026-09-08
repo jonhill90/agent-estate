@@ -473,6 +473,75 @@ func sweepConfig(repoRoot string, landed isolate.Landed, apply bool) sweep.Confi
 	return cfg
 }
 
+// sweepSummary is the categorized tally sweepWorktrees prints -- computed
+// separately from printing (summarizeSweep) so it can be tested without a
+// live ledger, git repository, or the network calls sweepWorktrees itself
+// makes (isolate.GHLanded, reclaim.BootTime). agent-estate#1294: sweepWorktrees
+// used to ask only r.Removed and tally everything else into one "kept"
+// number, printed as "N left in place" -- silently adding three unrelated
+// situations together (never a worktree, another checkout's dispatch
+// root, and a directory already gone) that read identically to "nothing
+// to clean" (it-d43a08d739bf32a8).
+type sweepSummary struct {
+	noWorktreePath int
+	outsideRoot    int
+	alreadyGone    int
+	keptByPolicy   int
+	boundReached   int
+	refused        int
+	removed        int
+}
+
+func summarizeSweep(results []sweep.Result) sweepSummary {
+	var s sweepSummary
+	for _, r := range results {
+		switch r.Category {
+		case sweep.CategoryNoWorktreePath:
+			s.noWorktreePath++
+		case sweep.CategoryOutsideRoot:
+			s.outsideRoot++
+		case sweep.CategoryAlreadyGone:
+			s.alreadyGone++
+		case sweep.CategoryKeptByPolicy:
+			s.keptByPolicy++
+		case sweep.CategoryBoundReached:
+			s.boundReached++
+		case sweep.CategoryRefused:
+			s.refused++
+		case sweep.CategoryRemoved:
+			s.removed++
+		}
+	}
+	return s
+}
+
+// report renders the categorized summary sweepWorktrees prints after its
+// per-record lines. worktreeBearing sums every category except
+// noWorktreePath -- those rows were never worktrees, so they cannot be
+// counted as one "left in place" and folding them back in is exactly the
+// defect this exists to fix. noWorktreePath gets its own line only when
+// nonzero, named for what it actually is rather than silently dropped.
+func (s sweepSummary) report(apply bool) []string {
+	verb := "removed"
+	if !apply {
+		verb = "removable"
+	}
+	worktreeBearing := s.outsideRoot + s.alreadyGone + s.keptByPolicy + s.boundReached + s.refused + s.removed
+	lines := []string{
+		fmt.Sprintf(
+			"%d worktree-bearing record(s): %d %s, %d refused, %d bound-reached, %d kept by policy, %d outside this checkout's dispatch root, %d already gone",
+			worktreeBearing, s.removed, verb, s.refused, s.boundReached, s.keptByPolicy, s.outsideRoot, s.alreadyGone,
+		),
+	}
+	if s.noWorktreePath > 0 {
+		lines = append(lines, fmt.Sprintf(
+			"%d ledger record(s) have no worktree recorded -- pre-agent-estate#1000 rows, never a worktree, not counted above",
+			s.noWorktreePath,
+		))
+	}
+	return lines
+}
+
 func sweepWorktrees(l *ledger.Ledger, repoRoot string, apply bool) {
 	records, err := l.Current()
 	if err != nil {
@@ -508,16 +577,21 @@ func sweepWorktrees(l *ledger.Ledger, repoRoot string, apply bool) {
 	} else {
 		fmt.Fprintln(os.Stderr, "estate: could not read host boot time, the sweep's reboot check is disabled this run:", berr)
 	}
-	removed, kept := 0, 0
-	for _, r := range sweep.Run(records, cfg) {
-		if r.Removed {
-			removed++
-		} else {
-			kept++
+	results := sweep.Run(records, cfg)
+	for _, r := range results {
+		if r.Category == sweep.CategoryNoWorktreePath {
+			// Never a worktree -- a pre-agent-estate#1000 ledger row. A
+			// line per row here (462 measured 2026-09-07) drowns the
+			// records that ARE worktrees, which is the whole reason "0
+			// removed, 613 left in place" read as clean when it wasn't.
+			// Counted once in the summary below instead of not at all.
+			continue
 		}
 		fmt.Printf("%-28s %-9s %s\n", r.Record.ID, r.Record.State, r.Reason)
 	}
-	fmt.Fprintf(os.Stderr, "%d worktree(s) removed, %d left in place\n", removed, kept)
+	for _, line := range summarizeSweep(results).report(apply) {
+		fmt.Fprintln(os.Stderr, line)
+	}
 	if !apply {
 		fmt.Fprintln(os.Stderr, "report only -- re-run with --apply to remove them")
 	}
