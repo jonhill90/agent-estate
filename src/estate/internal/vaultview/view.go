@@ -207,6 +207,30 @@ func write(vault string, rows []Row, retireMissing bool) (Result, error) {
 			used[id] = true
 			r.Mapping[row.Item] = id
 		}
+		body := regexp.MustCompile(`(^|[\s(])#([A-Za-z0-9_]+)`).ReplaceAllString(row.Body, `${1}\#${2}`)
+		// A title names the subject. It used to fall back to "<Kind> <item-id>"
+		// -- "Directive it-b29425780b4cd06c" -- which names nothing a reader or
+		// an agent can act on, and made every hub entry unreadable. Fall back to
+		// the statement itself; the item id is already in corpus_item, so
+		// nothing is lost by not repeating it as a title.
+		title := row.Title
+		if title == "" {
+			title = firstClause(body) // escaped body: a title is rendered inline too
+		}
+		// ambiguous is true exactly when the fallback below is about to fire
+		// -- both row.Title (a curated subject from the corpus) and
+		// firstClause(body) (a real clause found in the statement itself)
+		// came back empty. This is the honest signal, not a length check on
+		// the title that results: a short but real subject ("idle=defect",
+		// "Check lane 2", "What is next?" -- all under firstClause's own
+		// 12-rune floor plus a few) is not ambiguous, it is short. Only
+		// "neither method found a subject" means the note itself does not
+		// say what it's about (agent-estate#1297; measured 2026-09-07: 10 of
+		// 3,217 notes hit this fallback).
+		ambiguous := title == ""
+		if ambiguous {
+			title = kinds[row.Kind] + " " + row.Item
+		}
 		status := "stable"
 		standing := row.Kind != "question" && row.Kind != "thought"
 		spentDirective := false
@@ -229,22 +253,31 @@ func write(vault string, rows []Row, retireMissing bool) (Result, error) {
 			standing = false
 			spentDirective = true
 		}
+		if ambiguous && status != "deprecated" {
+			// draft, not a new status value: inmaps-spec.md §2's own
+			// frontmatter contract closes `status` to draft|stable|
+			// deprecated ("draft = Inbox state"). An ambiguous projection
+			// -- its own subject undetermined -- is exactly an Inbox-state
+			// note: it needs a human's eye before it can stand as
+			// authority-bearing, the same reason `needs_review` already
+			// maps to draft above. Inventing a fourth status value would
+			// violate a written, closed enum for a distinction the spec
+			// already has a slot for.
+			//
+			// Guarded by status != "deprecated": a withdrawn item (dropped
+			// in the corpus) stays deprecated even if its title also
+			// happened to be short -- retirement is a stronger, more
+			// terminal fact than "needs editorial review," and ambiguity
+			// must not resurrect a withdrawn row into draft/Inbox state.
+			status = "draft"
+			standing = false
+		}
 		tags := []string{"note", stamp.Format("01-2006")}
 		if standing {
 			tags = append(tags, "standing-rule")
 		}
-		body := regexp.MustCompile(`(^|[\s(])#([A-Za-z0-9_]+)`).ReplaceAllString(row.Body, `${1}\#${2}`)
-		// A title names the subject. It used to fall back to "<Kind> <item-id>"
-		// -- "Directive it-b29425780b4cd06c" -- which names nothing a reader or
-		// an agent can act on, and made every hub entry unreadable. Fall back to
-		// the statement itself; the item id is already in corpus_item, so
-		// nothing is lost by not repeating it as a title.
-		title := row.Title
-		if title == "" {
-			title = firstClause(body) // escaped body: a title is rendered inline too
-		}
-		if title == "" {
-			title = kinds[row.Kind] + " " + row.Item
+		if ambiguous {
+			tags = append(tags, "needs-editorial-review")
 		}
 		// The description restates the rule itself. It used to read "Corpus
 		// <kind>; consult the cited item and source prompt for authority",
@@ -257,7 +290,17 @@ func write(vault string, rows []Row, retireMissing bool) (Result, error) {
 		if desc == "" {
 			desc = "Corpus " + row.Kind + "; consult the cited item and source prompt for authority."
 		}
-		s := fmt.Sprintf("---\ntype: %s\ntitle: %s\ndescription: %s\ntags: [%s]\nid: %s\ncorpus_item: %s\nprompt_id: %s\ncreated: %s\nupdated: %s\nsource: %s\n%s\nstatus: %s\ncorpus_status: %s\nweight: %s\n---\n\n# %s\n\n%s\n", kinds[row.Kind], quote(title), quote(desc), strings.Join(tags, ", "), quote(id), quote(row.Item), quote(row.Prompt), stamp.Format(time.RFC3339), stamp.Format(time.RFC3339), quote("corpus:item:"+row.Item+"; prompt:"+row.Prompt), marker, status, quote(row.Status), quote(row.Weight), strings.ReplaceAll(title, "#", "\\#"), body)
+		// resolution is never fabricated (inmaps-spec.md §3's own hard rule)
+		// -- present only for the ambiguous case, so the other 3,207-odd
+		// notes' frontmatter is untouched by this change. "unresolved" is
+		// the one legal value this issue asks for; there is no companion
+		// "resolved" value to assert for a determined subject, since a
+		// determined subject is simply the normal, unmarked case.
+		resolutionLine := ""
+		if ambiguous {
+			resolutionLine = "resolution: unresolved\n"
+		}
+		s := fmt.Sprintf("---\ntype: %s\ntitle: %s\ndescription: %s\ntags: [%s]\nid: %s\ncorpus_item: %s\nprompt_id: %s\ncreated: %s\nupdated: %s\nsource: %s\n%s\nstatus: %s\n%scorpus_status: %s\nweight: %s\n---\n\n# %s\n\n%s\n", kinds[row.Kind], quote(title), quote(desc), strings.Join(tags, ", "), quote(id), quote(row.Item), quote(row.Prompt), stamp.Format(time.RFC3339), stamp.Format(time.RFC3339), quote("corpus:item:"+row.Item+"; prompt:"+row.Prompt), marker, status, resolutionLine, quote(row.Status), quote(row.Weight), strings.ReplaceAll(title, "#", "\\#"), body)
 		if c := oneLine(row.Context, 400); c != "" {
 			s += "\n## Context\n\nWhat was being discussed when this was said, from the source session:\n\n> " + c + "\n"
 		}

@@ -58,7 +58,10 @@ func TestProjectionRefusesUnmanagedCollision(t *testing.T) {
 
 func TestPartialBatchDoesNotWithdrawUnselectedRows(t *testing.T) {
 	v := t.TempDir()
-	rows := []Row{{Item: "a", At: 1788739200, Kind: "parameter", Weight: "hard", Status: "acted"}, {Item: "b", At: 1788739200, Kind: "parameter", Weight: "hard", Status: "acted"}}
+	rows := []Row{
+		{Item: "a", At: 1788739200, Kind: "parameter", Weight: "hard", Status: "acted", Body: "Selected in the first batch."},
+		{Item: "b", At: 1788739200, Kind: "parameter", Weight: "hard", Status: "acted", Body: "Not selected in the second batch."},
+	}
 	r, e := Write(v, rows)
 	if e != nil {
 		t.Fatal(e)
@@ -208,20 +211,19 @@ func TestDirectiveDoesNotPresentAsStandingLaw(t *testing.T) {
 	}
 }
 
-// TestAmbiguousProjectionRemainsUnresolved is lifted from #1288 to pin that
-// the defect it named is real, then deliberately left unimplemented -- see
-// the t.Skip below and agent-estate#1297.
+// TestAmbiguousProjectionRemainsUnresolved is lifted from #1288, was
+// t.Skip-ped pending agent-estate#1297, and is now implemented.
 //
-// #1288's fix bundled this with the directive fix above under one PR. They
-// are not the same change: this one needs a new ambiguity detector plus two
-// frontmatter fields main has never had (`resolution`, the
-// `needs-editorial-review` tag) -- producer surface unrelated to whether a
-// spent directive keeps a standing-rule tag. Bundling it here would make
-// this PR's diff answer two questions instead of one measured defect, so
-// the brief's instruction stands: land the directive fix alone, and record
-// this as an issue instead of half-doing it silently.
+// Its four assertions were judged, not implemented to blindly (the same
+// discipline #1298 applied to the standinglaw.go assertion it rejected):
+// resolution/needs-editorial-review/not-stable/not-title all held up.
+// "status: stable" -> "status: draft" reuses inmaps-spec.md §2's own closed
+// status enum (draft = Inbox state) rather than inventing a fourth value;
+// "resolution: unresolved" is a genuinely new fact this schema had no slot
+// for (status governs publication lifecycle, not whether a subject was
+// ever determined), so a new key is warranted, not redundant. Measured
+// 2026-09-07: 10 of 3,217 notes hit the fallback this pins.
 func TestAmbiguousProjectionRemainsUnresolved(t *testing.T) {
-	t.Skip("deferred to agent-estate#1297 -- ambiguity marker is a separate producer change from the standing-rule authority-scope fix this PR lands; pinned here so the defect is not lost")
 	v := t.TempDir()
 	rows := []Row{{Item: "frag1", Prompt: "p1", At: 1788739200, Kind: "parameter", Weight: "hard", Status: "acted", Body: "tmux"}}
 	r, e := Write(v, rows)
