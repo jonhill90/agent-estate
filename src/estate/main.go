@@ -432,6 +432,17 @@ const maxSweepPerRun = 8
 // and a path two levels deep (a single worktree mistaken for a root)
 // is refused too, not silently accepted as an empty, useless sweep.
 //
+// Symlinks are resolved on BOTH named and the parent (isolate.
+// ResolveSymlinksOrSelf) before this comparison, the same way
+// isolate.IsDispatchWorktree already resolves both sides of the
+// conceptually identical "is this legitimately under the dispatch
+// parent" question one level up -- a first version of this function
+// compared filepath.Clean(abs) directly, which never resolves symlinks,
+// so a symlink placed directly under the dispatch parent but pointing
+// anywhere else on disk entirely was ACCEPTED as "directly under" while
+// actually naming something outside it (agent-estate#1294 PR #1330
+// review, confirmed live with a real symlink before this fix).
+//
 // foreign reports whether the resolved root differs from this checkout's
 // own -- sweep-worktrees' caller uses it to decide whether --apply needs
 // the stronger --allow-foreign-root acknowledgement (see that flag's own
@@ -448,11 +459,43 @@ func resolveSweepRoot(repoRoot, named string) (root string, foreign bool, err er
 	if aerr != nil {
 		return "", false, fmt.Errorf("cannot resolve %q to an absolute path: %w", named, aerr)
 	}
-	abs = filepath.Clean(abs)
-	parent := isolate.DispatchParent()
-	rel, relErr := filepath.Rel(parent, abs)
+	// filepath.Abs already calls Clean internally -- abs is fully
+	// cleaned, still unresolved (no symlink component followed).
+	//
+	// Resolved on BOTH sides for THIS CHECK ONLY, never for the value
+	// returned below -- the same discipline isolate.IsDispatchWorktree
+	// already applies to this identical question ("is this path
+	// legitimately under the dispatch parent") one level up, and the
+	// confinement is worthless without it: filepath.Abs/Clean never
+	// resolve symlinks, so a symlink placed directly under the dispatch
+	// parent but pointing anywhere else on disk entirely would otherwise
+	// compare as "directly under" while actually naming something
+	// outside it -- confirmed live before this fix (agent-estate#1294 PR
+	// #1330 review: a real symlink built under TMPDIR/estate-dispatch
+	// pointing at an arbitrary outside directory was accepted).
+	//
+	// The function still RETURNS abs (unresolved), not the resolved
+	// value: isolate.Root/isolate.Create never resolve symlinks either,
+	// so every ledger-recorded rec.Worktree is in that same unresolved
+	// spelling -- returning a resolved root here would silently stop
+	// matching them the moment any component of TMPDIR is itself a
+	// symlink (macOS routinely symlinks /var -> /private/var), which a
+	// first version of this fix got wrong: it returned the resolved path
+	// and every worktree in a genuinely legitimate named root then
+	// misclassified as CategoryOutsideRoot, caught by this task's own
+	// fixture regressing.
+	resolved := isolate.ResolveSymlinksOrSelf(abs)
+	parent := isolate.ResolveSymlinksOrSelf(isolate.DispatchParent())
+	rel, relErr := filepath.Rel(parent, resolved)
 	if relErr != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || strings.ContainsRune(rel, filepath.Separator) {
-		return "", false, fmt.Errorf("%s is not directly under the dispatch-root parent %s -- a named root must be one of THESE directories, never an arbitrary path", abs, parent)
+		detail := abs
+		if resolved != abs {
+			// Named transparently: an operator refused for this reason
+			// should see that what they typed is not what it actually
+			// names, not just a bare path that looks legitimate.
+			detail = fmt.Sprintf("%s (resolves to %s)", abs, resolved)
+		}
+		return "", false, fmt.Errorf("%s is not directly under the dispatch-root parent %s -- a named root must be one of THESE directories, never an arbitrary path", detail, isolate.DispatchParent())
 	}
 	return abs, abs != own, nil
 }

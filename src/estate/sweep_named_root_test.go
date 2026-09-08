@@ -151,4 +151,28 @@ func TestSweepNamedRootFixture(t *testing.T) {
 			t.Fatalf("resolveSweepRoot accepted %s, which is a worktree's own path, not a dispatch root", tooDeep)
 		}
 	})
+
+	// A symlink placed directly under the dispatch parent, pointing
+	// anywhere else on disk entirely -- PR #1330's own review, attack
+	// vector 4 of 4 ("a symlink pointing out... each must refuse"), and
+	// the one that was NOT refused: filepath.Abs/Clean never resolve
+	// symlinks, so a first version of resolveSweepRoot compared the
+	// symlink's own literal path against DispatchParent() and accepted
+	// it as "directly under", while the symlink actually named something
+	// outside the dispatch parent entirely.
+	t.Run("a symlink under the dispatch parent pointing outside it is refused", func(t *testing.T) {
+		outsideTarget := t.TempDir() // a real directory OUTSIDE the dispatch parent
+		symlinkPath := filepath.Join(isolate.DispatchParent(), "sweep-root-symlink-poc-1330")
+		if err := os.Symlink(outsideTarget, symlinkPath); err != nil {
+			t.Fatal(err)
+		}
+		// The symlink is created directly under the SHARED dispatch
+		// parent, not under this test's own t.TempDir() -- it must be
+		// cleaned up explicitly, not left for other lanes to trip over.
+		t.Cleanup(func() { _ = os.Remove(symlinkPath) })
+
+		if root, foreignFlag, rerr := resolveSweepRoot(own, symlinkPath); rerr == nil {
+			t.Fatalf("resolveSweepRoot accepted a symlink under the dispatch parent pointing outside it: root=%q foreign=%v -- symlinkPath=%q resolves to %q, which is not under the dispatch parent at all", root, foreignFlag, symlinkPath, outsideTarget)
+		}
+	})
 }

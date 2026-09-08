@@ -367,8 +367,8 @@ func IsDispatchWorktree(path string) (id string, ok bool) {
 	// failing against a real os.Chdir before EvalSymlinks was added.
 	// Resolving both sides the same way is what makes the comparison below
 	// mean what it says.
-	dispatchRoot := resolveSymlinksOrSelf(DispatchParent())
-	rel, err := filepath.Rel(dispatchRoot, resolveSymlinksOrSelf(abs))
+	dispatchRoot := ResolveSymlinksOrSelf(DispatchParent())
+	rel, err := filepath.Rel(dispatchRoot, ResolveSymlinksOrSelf(abs))
 	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
 		return "", false
 	}
@@ -383,10 +383,22 @@ func IsDispatchWorktree(path string) (id string, ok bool) {
 	return parts[1], true
 }
 
-// resolveSymlinksOrSelf returns p with symlinks resolved, or p unchanged if
+// ResolveSymlinksOrSelf returns p with symlinks resolved, or p unchanged if
 // it cannot be resolved (e.g. it does not exist yet) -- "could not resolve"
 // falls back to the literal path rather than failing the caller outright.
-func resolveSymlinksOrSelf(p string) string {
+//
+// Exported (agent-estate#1294 PR #1330 review) so a caller confining an
+// operator-NAMED path to the dispatch parent -- main.go's resolveSweepRoot,
+// checking a named sweep root the same way this function's own caller
+// (IsDispatchWorktree, below) already checks a worktree path -- reuses this
+// exact symlink resolution rather than a second implementation that could
+// silently disagree with it. Confirmed live: a symlink placed directly
+// under TMPDIR/estate-dispatch pointing outside the dispatch parent
+// entirely was ACCEPTED by a first version of resolveSweepRoot that
+// compared filepath.Clean(abs) against DispatchParent() with no symlink
+// resolution at all -- filepath.Abs/Clean never resolve symlinks, only
+// this function (or filepath.EvalSymlinks directly) does.
+func ResolveSymlinksOrSelf(p string) string {
 	if r, err := filepath.EvalSymlinks(p); err == nil {
 		return r
 	}
