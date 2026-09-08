@@ -252,6 +252,7 @@ func ReviewMOC(vault, name, reviewer string, accept, apply bool) error {
 	}
 	at := time.Now().UTC().Format(time.RFC3339)
 	changes := map[string][]byte{}
+	draft := replaceField(replaceField(raw, "status", "deprecated"), "updated", at)
 	if accept {
 		dest := filepath.Join(vault, "02 - MOCs", strings.TrimPrefix(name, "moc-"))
 		if _, e := os.Stat(dest); e == nil {
@@ -261,10 +262,105 @@ func ReviewMOC(vault, name, reviewer string, accept, apply bool) error {
 		live = replaceField(live, "updated", at)
 		live = replaceField(live, "verified", fmt.Sprintf("[{by: %s, at: %s}]", scalar(reviewer), at))
 		changes[dest] = []byte(live)
+		// agent-estate#1284: promoted_to is the one thing missing from the
+		// deprecated draft that RemoveMOCDraft needs to confirm the durable
+		// copy actually landed before it may remove this draft -- the same
+		// reciprocal-pointer shape inmaps.go's own publishINMAPS already
+		// gives an accepted proposal (superseded_by), just missing here.
+		// destRel, not dest: every other path this package writes into
+		// changes/log entries is vault-relative (see writeSet's own
+		// filepath.Rel(vault, p) calls); an absolute path here would be the
+		// one inconsistent frontmatter value in the file.
+		destRel, e := filepath.Rel(vault, dest)
+		if e != nil {
+			return e
+		}
+		draft = replaceField(draft, "promoted_to", scalar(destRel))
 	}
-	changes[path] = []byte(replaceField(replaceField(raw, "status", "deprecated"), "updated", at))
+	changes[path] = []byte(draft)
 	if !apply {
 		return nil
+	}
+	return writeSet(vault, changes)
+}
+
+// RemoveMOCDraft removes an already-reviewed (status: deprecated) Inbox
+// draft -- agent-estate#1284 finding 1: ReviewMOC's own guard (status !=
+// "draft") makes a draft it already reviewed unreachable by the verb that
+// created it, so after a birth pass the accepted-and-superseded stubs it
+// leaves behind (42 of them, per the issue) sit in "00 - Inbox" forever,
+// clearable only by a hand edit Rule 17 nominally forbids.
+//
+// Scoped narrowly to exactly the artifact class the issue argues is safe
+// to remove -- a regenerable, tool-owned MOC stub -- never a fact or any
+// other note with independent provenance: this function only ever reads
+// and removes "00 - Inbox/moc-*.md" paths, the same basename shape
+// ReviewMOC itself is scoped to, and refuses anything not already
+// status: deprecated (i.e. not yet reviewed by ReviewMOC at all).
+//
+// If the draft carries promoted_to (set by ReviewMOC on accept, above),
+// the named hub must exist and be status: stable before removal is
+// allowed -- proof the durable copy already landed, so nothing the draft
+// carried is lost. A rejected draft (no promoted_to) has no durable copy
+// anywhere in the vault; it is still removable, on the issue's own
+// argument that a proposal's regenerable Overview+links body carries no
+// provenance worth keeping once reviewed -- but never silently: reason is
+// required and is folded into writeSet's own log.md entry (below), which
+// backs up the draft's full bytes before removing it either way. This is
+// `it-83575286b075761` applied to a tool-driven removal, not only a hand
+// one: every file is read, and the log says what was kept (the hub, if
+// any), and what was deleted.
+func RemoveMOCDraft(vault, name, reason string, apply bool) error {
+	if apply {
+		unlock, e := lockFile(filepath.Join(vault, "99 - Meta/.candidate-memory.lock"))
+		if e != nil {
+			return e
+		}
+		defer unlock()
+	}
+	if filepath.Base(name) != name || !strings.HasPrefix(name, "moc-") || !strings.HasSuffix(name, ".md") {
+		return fmt.Errorf("MOC basename required")
+	}
+	if strings.TrimSpace(reason) == "" {
+		return fmt.Errorf("reason required -- a removal must say why, not just that")
+	}
+	path := filepath.Join(vault, "00 - Inbox", name)
+	b, e := os.ReadFile(path)
+	if e != nil {
+		return e
+	}
+	raw := string(b)
+	if field(raw, "type") != "MOC" || field(raw, "status") != "deprecated" {
+		return fmt.Errorf("not a deprecated MOC draft -- review it first (ReviewMOC), or it is already gone")
+	}
+	if promoted := field(raw, "promoted_to"); promoted != "" {
+		hubPath := filepath.Join(vault, filepath.FromSlash(promoted))
+		hb, e := os.ReadFile(hubPath)
+		if e != nil {
+			return fmt.Errorf("promoted hub %s could not be read -- refusing to remove the draft it was promoted from: %w", promoted, e)
+		}
+		if field(string(hb), "status") != "stable" {
+			return fmt.Errorf("promoted hub %s is not status: stable -- refusing to remove the draft until its durable copy is confirmed live", promoted)
+		}
+	}
+	if !apply {
+		return nil
+	}
+	logPath := filepath.Join(vault, "99 - Meta/log.md")
+	previous, e := os.ReadFile(logPath)
+	if e != nil && !os.IsNotExist(e) {
+		return e
+	}
+	at := time.Now().UTC().Format(time.RFC3339)
+	title := field(raw, "title")
+	if title == "" {
+		title = name
+	}
+	entry := "## " + at[:10] + "\n\n**Delete** process:estate-candidates — 00 - Inbox/" + name +
+		" (" + scalar(title) + ", " + scalar(reason) + ") (" + at + ")\n\n"
+	changes := map[string][]byte{
+		path:    nil, // removes it -- see writeSet's own doc comment
+		logPath: []byte(entry + string(previous)),
 	}
 	return writeSet(vault, changes)
 }

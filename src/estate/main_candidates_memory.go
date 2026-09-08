@@ -18,7 +18,8 @@ func runCandidatesMemory(args []string) {
 	id := fs.String("id", "", "candidate id")
 	roster := fs.String("roster", "", "canonical agent roster path for roster-link")
 	reviewer := fs.String("reviewer", "", "explicit reviewer actor for MOC decisions")
-	action := fs.String("action", "show", "propose, show, accept, reject, moc-propose, moc-accept, moc-reject, refresh")
+	reason := fs.String("reason", "", "why a moc-remove is safe (required; agent-estate#1284)")
+	action := fs.String("action", "show", "propose, show, accept, reject, moc-propose, moc-accept, moc-reject, moc-remove, refresh")
 	proposal := fs.String("proposal", "", "private proposal JSON file")
 	vault := fs.String("vault", os.Getenv("AGENT_MEMORY_VAULT"), "Agent Memory vault root")
 	apply := fs.Bool("apply", false, "apply reviewed change (default validates only)")
@@ -74,6 +75,15 @@ func runCandidatesMemory(args []string) {
 			}
 		case "moc-accept", "moc-reject":
 			err = candidates.ReviewMOC(*vault, *id, *reviewer, *action == "moc-accept", *apply)
+			out = map[string]bool{"applied": *apply && err == nil}
+		case "moc-remove":
+			// agent-estate#1284: the verb ReviewMOC's own guard made
+			// unreachable -- a draft it already reviewed (accepted into a
+			// stable hub, or rejected) is status: deprecated, not draft,
+			// so moc-accept/moc-reject refuse it. This is scoped
+			// narrowly to that one already-reviewed state; see
+			// RemoveMOCDraft's own doc comment for the safety conditions.
+			err = candidates.RemoveMOCDraft(*vault, *id, *reason, *apply)
 			out = map[string]bool{"applied": *apply && err == nil}
 		case "refresh":
 			out, err = candidates.RefreshMOCs(*vault, *apply)
