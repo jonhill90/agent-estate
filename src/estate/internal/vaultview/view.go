@@ -213,6 +213,13 @@ func write(vault string, rows []Row, retireMissing bool) (Result, error) {
 		// an agent can act on, and made every hub entry unreadable. Fall back to
 		// the statement itself; the item id is already in corpus_item, so
 		// nothing is lost by not repeating it as a title.
+		//
+		// row.Title IS the corpus's own resolved_to (Read()'s query:
+		// "coalesce(i.resolved_to,'') title") -- captured here, before the
+		// firstClause/kind-fallback below can overwrite it, because its
+		// presence is also agent-estate#1313's own durability signal: see
+		// the directive+acted branch further down.
+		hasResolvedTo := row.Title != ""
 		title := row.Title
 		if title == "" {
 			title = firstClause(body) // escaped body: a title is rendered inline too
@@ -240,7 +247,7 @@ func write(vault string, rows []Row, retireMissing bool) (Result, error) {
 		} else if row.Status == "needs_review" || !standing {
 			status = "draft"
 			standing = false
-		} else if row.Kind == "directive" && row.Status == "acted" {
+		} else if row.Kind == "directive" && row.Status == "acted" && !hasResolvedTo {
 			// A directive is a one-time order, not a durable constraint. Once
 			// the corpus itself records it as acted on, it is spent -- the
 			// task happened, it did not become law. Tagging it standing-rule
@@ -250,6 +257,37 @@ func write(vault string, rows []Row, retireMissing bool) (Result, error) {
 			// anything. Status stays "stable": the record itself is accurate
 			// and won't change, so this is not corrected or under review --
 			// only its authority is scoped down.
+			//
+			// Guarded by !hasResolvedTo (agent-estate#1313, the false-negative
+			// #1298 shipped): status='acted' means someone acted on this, not
+			// that it is spent -- a standing rule that was stated and then
+			// followed is marked 'acted' identically to a one-time order that
+			// was carried out, and #1298 could not tell them apart. resolved_to
+			// is the corpus's OWN judgement that this specific statement became
+			// a durable, reusable operator parameter (e.g.
+			// "merge_policy=ci_green_and_independent_review_required") --
+			// already selected by Read()'s query and threaded through as
+			// row.Title, but never consulted here before this fix. A directive
+			// carrying one is corpus-canonicalized, not spent, whatever its
+			// status says; measured 2026-09-08: 85 of the 1,237 notes #1298
+			// stripped already had a resolved_to and were false negatives.
+			//
+			// NOT a complete fix: resolved_to is a REAL, existing signal but a
+			// PARTIAL one. An acted directive can be a genuinely enduring rule
+			// stated as free text that the corpus judging process never
+			// canonicalized into a key -- agent-estate#1313's own second
+			// example, it-95c1ce060b8e93a5 ("Always check for the twin..."),
+			// has no resolved_to and no other field in the corpus schema
+			// (checked: status_reason is verification narrative, not a
+			// durability marker; a vault-side `scope:` field the original
+			// brief assumed exists does not -- the 233 "hand-judged" facts
+			// under 01f - Facts/ are `type: Fact`, produced by a SEPARATE
+			// distill-judged pipeline that picks one canonical statement per
+			// SUBJECT cluster, not a per-item durability field for these
+			// per-corpus-item projections) turns up nothing. That note, and
+			// however many others share its shape, are NOT recovered by this
+			// fix -- see this PR's own report for what would have to be
+			// recorded to close that remaining gap.
 			standing = false
 			spentDirective = true
 		}
