@@ -51,7 +51,7 @@ func (m Model) View() string {
 	b.WriteString(statLine("OPEN PRS", renderCount(s.OpenPRs)) + "\n")
 	b.WriteString(statLine("MERGED TODAY", renderCount(s.MergedToday)) + "\n")
 	b.WriteString(statLine("SPEND TODAY", renderUSD(s.SpendToday)) + "\n")
-	b.WriteString(statLine("VAULT FACTS", renderCount(s.VaultFacts)) + "\n")
+	b.WriteString(statLine("VAULT FACTS", renderVaultFacts(s)) + "\n")
 
 	b.WriteString("\n")
 	if m.fetchedOnce {
@@ -84,6 +84,27 @@ func renderUSD(u USD) string {
 		return unknown
 	}
 	return fmt.Sprintf("$%.2f", u.Value)
+}
+
+// renderVaultFacts mirrors renderAgents' own shape for VaultFacts/
+// VaultFactsUnavailable (agent-estate#1304): VaultFacts.Known false
+// renders the reason CountFacts could not answer -- "absent" (no vault
+// configured) or "unreadable" (the vault is set but the read failed) --
+// never a bare "unknown" that cannot be told apart from either, and never
+// "0": a vault CountFacts could not read is not the same as a vault with
+// zero facts in it.
+func renderVaultFacts(s Stats) string {
+	if !s.VaultFacts.Known {
+		switch s.VaultFactsUnavailable {
+		case "absent":
+			return "unknown -- no vault configured"
+		case "unreadable":
+			return "unknown -- vault UNREADABLE, this is not zero"
+		default:
+			return unknown
+		}
+	}
+	return fmt.Sprintf("%d", s.VaultFacts.Value)
 }
 
 // renderAgents shows a total plus every ledger state with at least one
