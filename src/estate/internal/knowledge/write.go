@@ -125,7 +125,7 @@ func resolveOutputPath() (path string, sharedFallback bool, err error) {
 	}
 	shared := filepath.Join(home, ".local", "state", "agent-estate", "knowledge", "index.json")
 
-	if p := os.Getenv("ESTATE_KNOWLEDGE_INDEX"); p != "" {
+	if p := os.Getenv(KnowledgeIndexEnv); p != "" {
 		return p, samePath(p, shared), nil
 	}
 	if wd, err := os.Getwd(); err == nil {
@@ -335,6 +335,41 @@ func flipFirstLetterCase(s string) string {
 // explicit ESTATE_KNOWLEDGE_INDEX override nor a recognised dispatch
 // worktree (isolate.IsDispatchWorktree).
 const AllowSharedWriteEnv = "ESTATE_KNOWLEDGE_ALLOW_SHARED_WRITE"
+
+// KnowledgeIndexEnv is the explicit override resolveOutputPath checks
+// first -- named here, rather than left as a bare string literal at each
+// call site, for the same reason AllowSharedWriteEnv above already is:
+// agent-estate#1306 found a staleness message that told an agent to
+// "regenerate with `estate knowledge`" with no mention of this override at
+// all, and the fix is a remedy string (PrivateIndexRemedy, below) built
+// from this same constant -- a second, independently-typed copy of the
+// env var's name is exactly how that string and this package's own
+// resolution would drift apart the next time either one changes.
+const KnowledgeIndexEnv = "ESTATE_KNOWLEDGE_INDEX"
+
+// PrivateIndexRemedy is the one phrasing every staleness/freshness message
+// in this package and in main.go's CLI prose points a reader at --
+// agent-estate#1306. The defect it fixes: `estate knowledge query`'s own
+// staleness line used to say "regenerate with `estate knowledge`", which
+// is the literal shared-write path ResolveWritePath's own guard refuses
+// without an explicit acknowledgement (see AllowSharedWriteEnv above) --
+// an agent following that advice broke the standing order ("the operator
+// refreshes the shared index, not an agent"), and one following the order
+// was offered no remedy at all. The permitted remedy -- point
+// KnowledgeIndexEnv at a private path and build there -- always existed
+// (every lane already does this); it just was not named where the
+// staleness warning told the reader what to do next.
+//
+// Built from KnowledgeIndexEnv and the same `--allow-shared-write` /
+// AllowSharedWriteEnv vocabulary the write guard's own refusal message
+// uses (main.go, ResolveWritePath's caller) so this text and that one can
+// never independently drift into two different spellings of the same
+// permitted path -- exactly what agent-estate#1306 warns is "how the next
+// drift starts."
+const PrivateIndexRemedy = "rebuild a private index instead: set " +
+	KnowledgeIndexEnv + " to a scratch path, then run `estate knowledge` " +
+	"(never `--allow-shared-write` -- only the operator regenerates the " +
+	"shared index)"
 
 // ResolveWritePath is DefaultOutputPath's counterpart for the one caller
 // that actually WRITES the compiled index (`estate knowledge`'s

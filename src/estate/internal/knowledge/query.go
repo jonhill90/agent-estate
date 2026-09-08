@@ -94,6 +94,47 @@ const (
 	// actionable of the two -- rerunning with --private can only ever
 	// fix one of them.
 	StateMatchedWeak QueryState = "matched_weak"
+	// StateStaleWithheldRefused means a result that would otherwise be
+	// StateMatchedWithheldMajority ALSO carries a CoverageStale finding --
+	// agent-estate#1306 item 3. Either alone is a defensible warn-then-
+	// answer: StateMatchedWithheldMajority's own doc comment explains why
+	// a majority-private result still deserves exit 0, and CoverageStale
+	// is "report, never repair" by design. Together they compound instead
+	// of cancelling -- the surviving, printed answer is simultaneously a
+	// minority of the matches (most were withheld) AND drawn from an
+	// index already known to be behind its sources, and 8 items under
+	// four lines of caveat invites exactly the skim the caveats exist to
+	// prevent (the same shape as #1294's "0 removed, 613 left in place",
+	// which read as "tidy" for a day).
+	//
+	// This state does NOT invent a second majority-withheld threshold or
+	// a second staleness definition -- it fires on exactly the existing
+	// StateMatchedWithheldMajority condition (withheldPrivate >
+	// TotalMatched, computed by Query below) and the existing
+	// CoverageStale finding (computed by main.go's freshnessFindings, the
+	// same comparison StateMatchedWithheldMajority's staleness-blind
+	// sibling already folds into Coverage). Because that fold happens in
+	// main.go, after Query returns (see CoverageState's own doc comment
+	// for why staleness detection deliberately lives outside this
+	// package), THIS package never assigns StateStaleWithheldRefused
+	// itself -- main.go's applyStaleWithheldRefusal upgrades an already-
+	// computed StateMatchedWithheldMajority result once both folds have
+	// run, the same "detection lives where the filesystem access already
+	// is" split foldFreshnessIntoCoverage/foldGeneratedByIntoCoverage
+	// already established.
+	//
+	// Maps to its own exit code (4), deliberately DIFFERENT from
+	// StateMatchedWithheldMajority's 0 -- see knowledgeQueryExitCode in
+	// main.go. This is the one difference from its sibling: #1052 ruled
+	// out a non-zero exit for majority-withheld ALONE because real,
+	// citable public answers were still being returned and should not
+	// read as runner failures. This state refuses to return an answer at
+	// all (see printKnowledgeQuery's early return for it in main.go), so
+	// a refusal that exits 0 -- indistinguishable from success to any
+	// caller reading only $? -- would be its own defect (agent-estate#1306
+	// asks explicitly: "a refusal that exits 0 cannot be detected by a
+	// caller").
+	StateStaleWithheldRefused QueryState = "stale_withheld_refused"
 )
 
 // weakMatchScoreFloor is the threshold StateMatchedWeak checks the
