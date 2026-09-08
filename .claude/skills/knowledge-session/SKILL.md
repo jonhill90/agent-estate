@@ -6,7 +6,7 @@ description: Turn something worth knowing into a retrievable, cited fact (regist
 # Knowledge session
 
 This skill **references** `agent-estate`'s own canonical guide — it does
-not restate it. Read [`docs/knowledge-workflow.md`](../../../docs/knowledge-workflow.md)
+not restate it. Read [`docs/knowledge-workflow.md`](../../../docs/canonical/knowledge-workflow.md)
 for the seven-step loop (register → inspect → propose → review →
 publish/link → retrieve → refresh) with the exact, verified `estate`
 commands for each step.
