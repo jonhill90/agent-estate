@@ -5,19 +5,29 @@ that makes that survivable: a supervisor that decides whether there is room to
 start an agent, starts it, and records what happened — and a terminal
 application that shows the operator the live state of the estate.
 
-**Everything here is Go.** Shell and Python are not an implementation option.
-`src/langguard` enforces that in CI.
+**The app is Go.** Shell and Python are not an implementation option for it,
+at any size, for any reason. That rule covers the app; *tooling* — a lint, a
+migration script, the vault validator — may be shell or Python (Jon,
+2026-09-07). `scripts/` is where that tooling lives.
 
 ```
-src/estate      supervisor: pressure gate, append-only ledger, dispatch
+src/estate      supervisor: pressure gate, append-only ledger, dispatch,
+                knowledge index, corpus projection, distilled rules
 src/tui         the terminal UI
-src/langguard   fails the build on shell or Python outside reference/
 src/notify      sends a message to the operator's Telegram
 src/issuemine   distils closed issues into rules worth carrying forward
+src/progress    progress reporting
+scripts/        tooling, not app: docs-lint (a CI gate), evidence, knowledge
 reference/      the deleted shell and Python supervisor, read-only
+docs/plan/      the plan, and PLAN.md which says which plan governs
+docs/canonical/ living specs; docs/historical/ what they superseded
 docs/product/   PRD (parameters) and SPEC (what is actually built)
 docs/tui/       TUI design, with a verification banner on unchecked claims
 ```
+
+Start at **[`docs/plan/PLAN.md`](docs/plan/PLAN.md)**. It names what governs,
+what is a child of it, and what is superseded — and a brief handed to a lane
+does not override it.
 
 ## The supervisor
 
@@ -28,27 +38,31 @@ estate tasks                          latest state of every task
 estate inflight                       tasks still occupying a slot
 ```
 
-An agent turn is a **subprocess** — `claude -p --output-format json` with the
-brief on stdin. Delivery is a process exit and a parsed result. Nothing is ever
-concluded from what a terminal pane appears to show.
+An agent turn is a **subprocess** — `claude -p --output-format json`, brief on
+stdin. Delivery is a process exit and a parsed result; nothing is concluded
+from what a pane appears to show. The turn is still watchable: its output is
+teed to a transcript a tmux window tails.
 
-A turn is nonetheless **watchable**: its output is teed into a transcript under
-`~/.local/state/estate/mirror/`, and a tmux window in the `estate` session runs
-`tail -f` on that file. The pane is a viewer, not a terminal the turn runs in —
-nothing typed there reaches the agent and killing it does not touch the turn.
-Windows are bounded by the same in-flight cap that bounds concurrent turns, and
-a turn that cannot get one runs unmirrored rather than waiting. `ESTATE_MIRROR=0`
-switches it off; `estate` with no arguments lists the rest of the switches.
-Note that with the default `claude` harness the agent's own output only appears
-when the turn exits (`--output-format json` emits one envelope at the end); a
-15-second heartbeat line is what keeps such a pane distinguishable from a broken
-one. `--harness=codex` streams genuinely.
+Three limits gate dispatch — load per core, free memory, lanes in flight — and
+**every one fails closed**: a limit that cannot be measured refuses. A turn
+that timed out or produced unparseable output is `unknown`, which is not
+terminal and not failed; it keeps its slot until something establishes
+otherwise.
 
-Three limits gate dispatch and all must pass: load per core, free memory, and
-lanes in flight. **Every one fails closed** — a limit that cannot be measured
-refuses. A turn that timed out or produced unparseable output is recorded
-`unknown`, which is *not* terminal: it keeps its slot until something
-establishes otherwise. Unknown is not failed.
+See [docs/orientation/daemon.md](docs/orientation/daemon.md) for the mirror,
+the switches, and how each harness differs.
+
+## Knowledge
+
+The estate remembers what the operator has decided, and an agent can ask it:
+
+```
+estate knowledge query "should I merge my own PR"
+```
+
+Three layers — the corpus is evidence, the vault's facts layer is what binds,
+the compiled index is a regenerable view. See
+[docs/canonical/knowledge.md](docs/canonical/knowledge.md).
 
 ## The TUI
 
@@ -58,16 +72,13 @@ into `src/tui` and are unverified.
 
 ## History
 
-This repo previously carried a supervisor written in shell and Python. It was
-deleted on 2026-08-30 and restored under `reference/` as material to read when
-recovering a rule it encoded. Recovering a rule means reimplementing it in Go —
-nothing under `reference/` is maintained, run, or fixed.
-
-`src/issuemine` scans the closed issue history and finds the ones carrying
-durable rules — fail-closed guards, instruments that lie, orderings that
-matter. That is the specification input for what still needs building.
+A shell and Python supervisor was deleted on 2026-08-30 and kept under
+`reference/` as material to read when recovering a rule it encoded — read-only,
+never run. `src/issuemine` mines closed issues for the durable rules worth
+reimplementing.
 
 ## Not built yet
 
-Named so this reads honestly: no merge gate, no reviewer-vs-author independence
-check, no worktree lifecycle, no lane view.
+No lane view. No relation proposer — the corpus `links` table has zero rows,
+so nothing is recorded as superseding or contradicting anything. The rules
+layer covers a fraction of the corpus.

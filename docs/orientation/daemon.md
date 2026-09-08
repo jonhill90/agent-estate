@@ -45,3 +45,19 @@ of those five rules actually *said* is recorded in
 [`docs/historical/ci-rules-retired.md`](../historical/ci-rules-retired.md), along with
 `gh-comment-gate.sh` and `mark-pr-external.sh` — read it there rather than
 recovering a rule from `reference/`'s source.
+
+## Watching a turn (moved from README, 2026-09-07)
+
+A turn's output is teed into a transcript under
+`~/.local/state/estate/mirror/`, and a tmux window in the `estate` session runs
+`tail -f` on it. The pane is a **viewer, not a terminal the turn runs in** —
+nothing typed there reaches the agent, and killing the pane does not touch the
+turn. Windows are bounded by the same in-flight cap that bounds concurrent
+turns; a turn that cannot get one runs unmirrored rather than waiting.
+`ESTATE_MIRROR=0` switches it off, and `estate` with no arguments lists the
+rest of the switches.
+
+With the default `claude` harness the agent's own output only appears when the
+turn exits — `--output-format json` emits one envelope at the end — so a
+15-second heartbeat line is what keeps such a pane distinguishable from a
+broken one. `--harness=codex` streams genuinely.
