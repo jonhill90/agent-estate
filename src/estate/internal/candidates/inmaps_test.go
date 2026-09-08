@@ -395,6 +395,65 @@ func TestMarkSourceDriftSeesNestedNoteSubdirs(t *testing.T) {
 	}
 }
 
+// TestPublishAcceptSkipsIDsTakenUnderAnyEarnedSubdir is agent-estate#1302's
+// required proof: the mint loop's collision scan named "01p - Parameters"
+// directly instead of consulting the whole 01 - Notes/ namespace, so a note
+// already published under "01f - Facts" (352 real notes, measured
+// 2026-09-08) at the exact id the loop would pick next was invisible to
+// it -- the buggy loop mints that same id a second time, a real Obsidian-ID
+// collision across two different files. The registry (99 - Meta/
+// note-subdirs.md) forbids hardcoding a subdir path for exactly this
+// reason: a third earned subdirectory would fall outside the guard the
+// same way 01f - Facts already did.
+//
+// A margin of consecutive candidate seconds is blocked, not just one exact
+// instant: the mint loop reads its own "now" fresh inside Publish, a few
+// DB/file operations after this test reads its own -- blocking only one
+// exact second would flake if that internal call lands one second later.
+func TestPublishAcceptSkipsIDsTakenUnderAnyEarnedSubdir(t *testing.T) {
+	db := newFixtureDB(t, withOneUnit("p1", "prov1"))
+	if _, err := Derive(db, true); err != nil {
+		t.Fatal(err)
+	}
+	id := query(t, db, "select id from knowledge_candidates where prompt_id='p1'")
+	vault := t.TempDir()
+	os.MkdirAll(filepath.Join(vault, "01 - Notes/01f - Facts"), 0700)
+	os.MkdirAll(filepath.Join(vault, "99 - Meta"), 0700)
+	os.WriteFile(filepath.Join(vault, "99 - Meta/tags.md"), []byte("`kind/decision`"), 0600)
+	os.WriteFile(filepath.Join(vault, "index.md"), []byte("---\nokf_version: \"0.1\"\n---\n\n# Facts\n\nintro\n"), 0600)
+
+	p := catalogueProposal("collision-under-facts", "memory", "01 - Notes")
+	p.Tags = []string{"kind/decision"}
+	p.Type = "Fact"
+	r, err := Propose(db, id, p, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = StageMemory(vault, id, r, true); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now().UTC()
+	blocked := make(map[string]bool, 5)
+	for n := 0; n < 5; n++ {
+		name := now.Add(time.Duration(n)*time.Second).Format("20060102150405") + ".md"
+		blocked[name] = true
+		if e := os.WriteFile(filepath.Join(vault, "01 - Notes/01f - Facts", name),
+			[]byte("---\ntype: Fact\nstatus: stable\ntitle: Pre-existing fact\n---\n\nAlready published under 01f - Facts.\n"), 0600); e != nil {
+			t.Fatal(e)
+		}
+	}
+
+	res, err := Publish(db, vault, id, "accept", true)
+	if err != nil {
+		t.Fatalf("accept failed: %v", err)
+	}
+	if blocked[filepath.Base(res.NotePath)] {
+		t.Fatalf("minted id %s collides with a note already published under 01f - Facts -- "+
+			"the collision scan did not consult the whole namespace", res.NotePath)
+	}
+}
+
 // TestPublishAcceptFindsAdoptionHashUnderNestedNoteSubdirs is
 // agent-estate#1283's first named site: publishINMAPS's accept-flow
 // search for an inspected, unmanaged fact by content hash globbed the
