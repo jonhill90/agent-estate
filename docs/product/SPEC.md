@@ -23,10 +23,12 @@ scripts/        tooling, not app: docs-lint (a CI gate), evidence, knowledge
 reference/      the deleted shell and Python supervisor, read-only
 ```
 
-There is no `src/langguard`. It does not exist in the tree and no CI job
-enforces the app-is-Go rule today (see "Not yet built") — the name survives
-only as a stale path string inside `src/progress`'s own scaffolding count,
-unrelated to any enforcement.
+There is no `src/langguard`. It does not exist in the tree, and no CI job
+enforces the app-is-Go rule today — deliberately, not as an unfinished gap;
+a hard CI gate was tried and reverted on 2026-09-02 (`PRD.md` parameter 1,
+`docs/orientation/go-only.md`). The name survives only as a stale path
+string inside `src/progress`'s own scaffolding count, unrelated to any
+enforcement.
 
 ## The ledger — `src/estate/internal/ledger`
 
@@ -135,10 +137,9 @@ below it.
 ## Not yet built
 
 Named so nobody reads this as complete: no lane view in `src/estate` itself
-(the TUI's own lane surfaces are documented separately, `docs/tui/`), no
-mechanical CI enforcement of the Go-only rule (the deleted `src/langguard`
-was never rebuilt), and no relation proposer for the corpus — the `links`
-table records nothing as superseding or contradicting anything yet, so that
-judgement stays entirely human. The rules a future `src/langguard` needs are
-recoverable from `reference/` and from the closed issues `src/issuemine`
-identifies as carrying durable ones.
+(the TUI's own lane surfaces are documented separately, `docs/tui/`), and no
+relation proposer for the corpus — the `links` table records nothing as
+superseding or contradicting anything yet, so that judgement stays entirely
+human. (Mechanical CI enforcement of the Go-only rule does not belong on
+this list: it was tried and deliberately rejected, not merely postponed —
+see the Layout section above.)

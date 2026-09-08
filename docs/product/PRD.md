@@ -27,8 +27,13 @@ human can do after it that they could not before.
    read when recovering a rule; recovering a rule means reimplementing it in
    Go. This binds the app; it does not bind tooling — `scripts/` runs Python
    today (docs-lint, evidence, knowledge tooling), and that is correct, not a
-   violation (Jon, 2026-09-07). No CI job enforces this today: it is a stated
-   rule, not yet a gate — see "Not yet built."
+   violation (Jon, 2026-09-07). No CI job enforces this today, and that is a
+   decision, not a gap: a hard CI block on new shell/Python was tried and
+   deliberately reverted on 2026-09-02, an over-extreme reading that could
+   wedge an agent legitimately needing a script for tooling, a sandbox or an
+   experiment. See [`docs/orientation/go-only.md`](../orientation/go-only.md)
+   for the full reasoning — this is guidance the operator checks by hand,
+   not something waiting to be built.
 2. **Every guard fails closed.** A limit that cannot be measured refuses. "Could
    not measure" is never reported as clean, and blindness is never capacity.
 3. **Delivery is observed, not inferred.** An agent turn is a subprocess whose
