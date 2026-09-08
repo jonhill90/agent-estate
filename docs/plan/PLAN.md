@@ -71,6 +71,17 @@ projections) and slice 2 (reachable knowledge) are the unfinished half of the
 memory foundation Push 3 began. Its slices 3 and 4 were cut on 2026-09-07 as
 not delivering either operator-visible outcome.
 
+**The recovery packet carries its own PRD/SPEC**
+([`pushes/astra-recovery-20260907/PRD.md`](pushes/astra-recovery-20260907/PRD.md) /
+[`SPEC.md`](pushes/astra-recovery-20260907/SPEC.md)) — proposed knowledge-system
+requirements for this push only, not a third product authority alongside
+`docs/product/` (the supervisor/daemon) and `docs/tui/` (the TUI). Its own
+opening line: "not a claim of delivery... does not replace the estate's
+orchestration/TUI requirements." Root `docs/product/PRD.md`/`SPEC.md` predate
+it (dated 2026-08-30) and cover the supervisor; neither file mentions the
+knowledge system at all (checked directly) — no conflict, just no routing
+that said so before this line.
+
 ## The two outcomes everything is measured against
 
 Recorded by Jon, and the only test that matters:

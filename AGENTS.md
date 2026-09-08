@@ -117,16 +117,26 @@ instruction to one worker at one moment. It does not override the plan.**
 | Adding any script, or tempted by shell/Python | [docs/orientation/go-only.md](docs/orientation/go-only.md) |
 | A rule that used to be a CI gate | [docs/ci-rules-retired.md](docs/historical/ci-rules-retired.md) |
 | `estate knowledge`'s index: what it queries, how it ranks, `coverage`/`contradictions`, `--private` | [docs/knowledge-system.md](docs/canonical/knowledge-system.md) |
-| Turning something worth knowing into a cited fact, or finding one already recorded: register/inspect/propose/review/publish/retrieve/refresh | [docs/knowledge-workflow.md](docs/knowledge-workflow.md) |
+| Turning something worth knowing into a cited fact, or finding one already recorded: register/inspect/propose/review/publish/retrieve/refresh | [docs/knowledge-workflow.md](docs/canonical/knowledge-workflow.md) |
 | Running as, or reasoning about, the Director's cron loop (`estate tick check/record/escalate`) | [docs/director-brief.md](docs/canonical/director-brief.md) and [docs/director-loop.md](docs/canonical/director-loop.md) |
 | What phase the meta-harness roadmap is in, or what to build next | [docs/phase-plan.md](docs/canonical/phase-plan.md) |
 | Whether the one-independent-review convention is worth its cost | [docs/reviewer-value.md](docs/canonical/reviewer-value.md) |
 | What a dispatched turn actually costs, per harness, and how `estate spend` reads it | [docs/spend-observation.md](docs/canonical/spend-observation.md) |
 
-`docs/product/` and `docs/tui/` (PRD/SPEC) are already routed to from `README.md` and
-`docs/orientation/tui-arrival.md` respectively — not re-listed here to avoid a third
-path to the same file. `docs/tui-arrival.md`'s own citations (`src/tui/testdata/vhs/README.md`,
-`full-nav-walk-report.md`) are likewise already reachable from there.
+## Three PRD/SPEC pairs — different scopes, not competing authorities
+
+Read all three headers before assuming a conflict; none has been found. Each
+governs a different scope:
+
+| Pair | Governs |
+|---|---|
+| [`docs/product/PRD.md`](docs/product/PRD.md) / [`SPEC.md`](docs/product/SPEC.md) | The supervisor/daemon product — dispatch, guards, pressure. Routed to from `README.md`. Says nothing about the knowledge system (checked: zero mentions of knowledge/vault/corpus in either file). |
+| [`docs/tui/PRD.md`](docs/tui/PRD.md) / [`SPEC.md`](docs/tui/SPEC.md) | The TUI product (`src/tui`). Routed to from `docs/orientation/tui-arrival.md`. |
+| [`docs/plan/pushes/astra-recovery-20260907/PRD.md`](docs/plan/pushes/astra-recovery-20260907/PRD.md) / [`SPEC.md`](docs/plan/pushes/astra-recovery-20260907/SPEC.md) | Proposed knowledge-system requirements for ONE in-flight push (`docs/plan/PLAN.md`'s Pushes table, row "Recovery"). Its own opening line: "not a claim of delivery... does not replace the estate's orchestration/TUI requirements." Not a third product authority. |
+
+Not re-listed as a fourth path elsewhere. `docs/tui-arrival.md`'s own citations
+(`src/tui/testdata/vhs/README.md`, `full-nav-walk-report.md`) are likewise
+already reachable from there.
 
 Run `go run ./src/estate` with no arguments for the current subcommand list —
 it grows, and a list written in prose goes stale between commits.
