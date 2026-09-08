@@ -15,7 +15,7 @@ import (
 )
 
 // refreshInterval matches internal/skills/internal/mcpservers' identical
-// reasoning: agent/index.md changes by hand (a fact gets added/updated),
+// reasoning: index.md changes by hand (a fact gets added/updated),
 // not by the second -- a slow poll plus [r] for "I just wrote one" is the
 // same shape those two packages' own refreshInterval doc comments already
 // justify.
@@ -55,7 +55,7 @@ const (
 )
 
 // sortMode is the list's own sort key -- both options are computable from
-// IndexEntry alone (index order, the order agent/index.md itself lists
+// IndexEntry alone (index order, the order index.md itself lists
 // facts in, and alphabetical by title), never Type or Created: those two
 // are unknown for a row that has never been opened (this package's own
 // progressive-disclosure constraint), so sorting by either would silently
@@ -80,8 +80,8 @@ type Row struct {
 }
 
 // Model is the knowledge view: a list of every fact in $AGENT_MEMORY_VAULT
-// (via Fetcher, agent/index.md only) and, once one is opened, that one
-// fact's full body (via FactLoader, agent/facts/<slug>.md -- read ONLY at
+// (via Fetcher, index.md only) and, once one is opened, that one
+// fact's full body (via FactLoader, 01 - Notes/<earned subdir>/<id>.md -- read ONLY at
 // that point, never before). Read-only: this package has no write path at
 // all, matching the requirement directly -- there is no Update case, no
 // key, no method anywhere in this package that opens a vault file for
@@ -116,7 +116,7 @@ type Model struct {
 	// show stale content from whatever was open before.
 	opening string
 	// readErr is a failed LoadFact for the fact currently (attempted to
-	// be) open -- a slug in agent/index.md with no corresponding file is
+	// be) open -- a slug in index.md with no corresponding file is
 	// a real, visible error, never a silent fall-back to the list.
 	readErr string
 

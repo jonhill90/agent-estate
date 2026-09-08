@@ -74,7 +74,24 @@ type Stats struct {
 
 	OpenPRs     Count // gh pr list --state open, summed across board.ReposFor's repos
 	MergedToday Count // gh pr list --state merged --search "merged:>=<today>", same repos
-	VaultFacts  Count // len(knowledge.LoadIndex(vault)) -- one file read, matching that package's own progressive-disclosure rule
+	// VaultFacts is knowledge.CountFacts(vault) -- the real count of fact
+	// files under 01 - Notes/01f - Facts/, not len(knowledge.LoadIndex(vault)):
+	// index.md is a deliberately capped, prunable subset (352 facts vs.
+	// 119 index entries, measured 2026-09-08 -- see CountFacts' own doc
+	// comment), so the index's own length would silently understate this
+	// figure by roughly two thirds. agent-estate#1304.
+	VaultFacts Count
+	// VaultFactsUnavailable explains VaultFacts.Known == false, the same
+	// two reasons AgentsUnavailable distinguishes above: "absent"
+	// ($AGENT_MEMORY_VAULT unset -- not offered) or "unreadable" (the
+	// vault is configured but CountFacts could not read it -- a real
+	// failure, not zero facts). agent-estate#1304: before this field
+	// existed, a read pointed at a directory agent-estate#1275 had already deleted
+	// swallowed its own error silently, and the result rendered
+	// identically to "no vault configured" -- exactly the "instrument
+	// that cannot see a thing looks exactly like the thing being absent"
+	// failure (it-d43a08d739bf32a8) invariant 6 exists to prevent.
+	VaultFactsUnavailable string
 
 	// SpendToday is summed across internal/cost.Snapshot's Harnesses --
 	// Snapshot's own doc comment already establishes this figure is
