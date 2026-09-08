@@ -1403,6 +1403,24 @@ func indexSourceMtimes(cfg knowledge.Config) []indexSourceMtime {
 		// went uncaught.
 		statVaultNotes("agent-memory-vault", cfg.VaultDir),
 		statFile("corpus-db", cfg.CorpusDBPath),
+		// statNewest, not a recursive stat like statVaultNotes above --
+		// deliberately, not because this directory happens to be flat.
+		// It is NOT flat: it has one subdirectory, "specs/", holding four
+		// real .md files (imported once, 2026-07-27..08-02, never edited
+		// since -- confirmed directly, agent-estate#1299 fix-pass review).
+		// An in-place edit to one of those four would be exactly as
+		// invisible to this check as the vault defect #1283 fixed.
+		//
+		// Left unfixed here on purpose: internal/knowledge/loops.go's
+		// loopsSource is ALSO deliberately non-recursive ("Never
+		// recurses" is its own doc comment) -- specs/'s files are not in
+		// the knowledge index today regardless of this check. Making only
+		// the staleness signal recursive would report "stale, regenerate"
+		// for an edit that regenerating would still never pick up, which
+		// is a worse, actively misleading defect than the silent one
+		// being traded for. Fixing both together is a real product
+		// decision (does specs/ belong in the index at all?), not a
+		// mechanical one -- tracked, not fixed blindly, as agent-estate#1305.
 		statNewest("loops-research", cfg.LoopsResearch),
 		{
 			name:   "github-stars",
