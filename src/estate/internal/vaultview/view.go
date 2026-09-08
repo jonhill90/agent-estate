@@ -5,6 +5,7 @@ package vaultview
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/jonhill90/agent-estate/estate/internal/candidates"
 	"github.com/jonhill90/agent-estate/estate/internal/notemeta"
 	"os"
 	"os/exec"
@@ -129,14 +130,48 @@ func write(vault string, rows []Row, retireMissing bool) (Result, error) {
 	dir := filepath.Join(vault, NotesDir)
 	old := map[string]string{}
 	used := map[string]bool{}
-	rootNotes, err := os.ReadDir(filepath.Join(vault, "01 - Notes"))
-	if err != nil && !os.IsNotExist(err) {
+	// Obsidian ids are a single GLOBAL namespace across "01 - Notes" --
+	// 352 Facts notes and 3,217 Parameter notes share it, so this
+	// collision guard must see every earned subdir, not just its own
+	// (NotesDir, "01p - Parameters"). It used to read only the flat
+	// "01 - Notes" root plus NotesDir directly -- the same narrow shape
+	// #1309 fixed in candidates.go's inmaps.go, left unfixed here
+	// (agent-estate#1307): an id already claimed under "01f - Facts/" was
+	// invisible to it, and could be re-minted for a brand-new parameter
+	// note in a different subdir -- two files, one id, the exact
+	// invariant this guard exists to hold.
+	//
+	// candidates.WalkNotes(vault) is the canonical, already-established
+	// enumerator for "every real note under 01 - Notes, at any depth"
+	// (agent-estate#1283's own stated purpose: "exactly one correct
+	// implementation... for every caller in the estate to share instead
+	// of a shape to remember to reproduce"). Reusing it here is a new
+	// package edge, vaultview -> candidates -- weighed against moving
+	// WalkNotes to a package both already import (their only shared
+	// import is notemeta, which parses frontmatter/tags and does no
+	// filesystem walking at all -- the wrong home semantically, and
+	// moving the function would touch six existing call sites for no
+	// cycle-safety gain). The edge is safe: candidates does not import
+	// vaultview (checked directly), so this introduces no cycle, and it
+	// keeps the "one enumeration for this namespace" property #1283
+	// established rather than reproducing a third implementation --
+	// exactly what this issue's own "Establish before implementing"
+	// section asked to be judged, not defaulted.
+	//
+	// This also folds in the adjacent bug named in the same issue: the
+	// old flat-root regex, `^\d{12}\.md$`, matched only 12-digit ids,
+	// while every live note id is 14 digits, YYYYMMDDHHMMSS
+	// (agent-estate#1289) -- a 14-digit flat note was invisible even
+	// though the old code DID look at "01 - Notes" directly.
+	// WalkNotes' own noteFilename (`^\d{12}(\d{2})?\.md$`) accepts both
+	// widths, so switching to it fixes both defects in the same line
+	// rather than leaving the digit-width bug for a second pass.
+	notes, err := candidates.WalkNotes(vault)
+	if err != nil {
 		return r, err
 	}
-	for _, e := range rootNotes {
-		if regexp.MustCompile(`^\d{12}\.md$`).MatchString(e.Name()) {
-			used[strings.TrimSuffix(e.Name(), ".md")] = true
-		}
+	for _, p := range notes {
+		used[strings.TrimSuffix(filepath.Base(p), ".md")] = true
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil && !os.IsNotExist(err) {
