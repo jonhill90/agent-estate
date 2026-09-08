@@ -3,24 +3,48 @@ package corpus
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-// writeFixtureFact writes a synthetic vault fact file (never the real one --
+// fixtureNoteSeq gives each writeFixtureFact call in a test its own
+// filename, since a single test (TestStandingLawResolvesOnlyDeclaredMembers,
+// TestStandingLawMemberCapIsEnforced) writes more than one fixture note into
+// the same t.TempDir() vault. Package tests run sequentially, so a plain
+// counter is enough -- no atomic needed.
+var fixtureNoteSeq int
+
+// writeFixtureFact writes a synthetic vault fact note (never the real one --
 // vault content is private and test fixtures here are synthesised, never
-// copied from an operator fact) and returns its sha256 hex digest, so a
-// test can declare a StandingLawMember whose HashPrefix actually matches.
+// copied from an operator fact) in the CURRENT (INMAPS-relayout) shape --
+// 01 - Notes/01f - Facts/<id>.md, carrying an `aliases: [slug]` line so
+// resolveStandingLawMemberFile's alias walk finds it exactly as it would a
+// real migrated note. Returns its sha256 hex digest, so a test can declare a
+// StandingLawMember whose HashPrefix actually matches.
+//
+// Used to write agent/facts/<slug>.md -- the legacy, pre-relayout shape,
+// tried by a first arm resolveStandingLawMemberFile no longer has
+// (agent-estate#1281: that arm could never succeed against the one vault
+// this package is ever run against, and was retired). Repointed here so the
+// default fixture shape matches the only path production actually takes --
+// a dead arm being the path of least resistance for new tests is exactly
+// how agent-estate#1280/#1254 passed blind. A test that needs the OLD shape
+// specifically (there are three: proving alias resolution itself, and
+// TestLegacyFactsPathNoLongerResolves below) builds it directly rather than
+// through this helper.
 func writeFixtureFact(t *testing.T, vaultDir, slug, body string) string {
 	t.Helper()
-	dir := filepath.Join(vaultDir, "agent", "facts")
+	fixtureNoteSeq++
+	id := fmt.Sprintf("20260906%06d", fixtureNoteSeq)
+	dir := filepath.Join(vaultDir, "01 - Notes", "01f - Facts")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	content := "---\ntype: fixture\ntitle: " + slug + "\n---\n" + body + "\n"
-	path := filepath.Join(dir, slug+".md")
+	content := "---\nid: \"" + id + "\"\naliases: [" + slug + "]\ntype: fixture\ntitle: " + slug + "\n---\n" + body + "\n"
+	path := filepath.Join(dir, id+".md")
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -255,6 +279,40 @@ func TestStandingLawResolvesMigratedMemberByAlias(t *testing.T) {
 	}
 	if !strings.Contains(entries[0].Body, "member body text") {
 		t.Fatalf("StandingLaw() resolved the wrong content for the migrated member: %+v", entries[0])
+	}
+}
+
+// TestLegacyFactsPathNoLongerResolves is agent-estate#1281's own required
+// proof: resolveStandingLawMemberFile used to try agent/facts/<slug>.md
+// before the alias walk, retained on the theory that some vault predating
+// the INMAPS relayout might still need it. It never could in production --
+// the only vault this package is ever run against is $AGENT_MEMORY_VAULT,
+// already migrated (A2-COMPLETION, agent-estate#1275) -- so that arm was
+// retired outright rather than kept as untested insurance. This writes
+// ONLY into the legacy shape (bypassing writeFixtureFact, which now writes
+// the current shape) and confirms StandingLaw() refuses rather than
+// resolving it: the doc comment's claim that the legacy arm is gone is
+// worth nothing until a test fails the moment someone adds it back.
+func TestLegacyFactsPathNoLongerResolves(t *testing.T) {
+	vault := t.TempDir()
+	dir := filepath.Join(vault, "agent", "facts")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	content := "---\ntype: fixture\ntitle: legacy-only-fact\n---\nbody text that only exists at the legacy path.\n"
+	path := filepath.Join(dir, "legacy-only-fact.md")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256([]byte(content))
+	hash := hex.EncodeToString(sum[:])
+
+	withStandingLawSet(t, []StandingLawMember{
+		{Slug: "legacy-only-fact", HashPrefix: hash[:12], Reason: "fixture reason"},
+	})
+
+	if _, err := StandingLaw(vault); err == nil {
+		t.Fatal("StandingLaw() resolved a member that exists only at the retired agent/facts/ path -- the legacy arm is back, silently")
 	}
 }
 

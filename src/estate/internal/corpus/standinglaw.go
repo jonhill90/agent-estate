@@ -37,7 +37,12 @@ import (
 // applied, and an unpinned hash means a body could drift after review
 // without anyone noticing.
 type StandingLawMember struct {
-	// Slug is the vault fact's filename stem under agent/facts/ (no .md).
+	// Slug is the vault fact's pre-migration filename stem (no .md),
+	// resolved today via the `aliases:` frontmatter line on its
+	// INMAPS-relayout note under 01 - Notes/ -- see
+	// resolveStandingLawMemberFile. Never a literal directory: agent/facts/
+	// itself was retired in full (agent-estate#1275) and no longer exists
+	// in any vault this package resolves against (agent-estate#1281).
 	Slug string
 	// HashPrefix is a prefix of the sha256 hex digest of the fact file's
 	// bytes as they stood at the moment this member was declared. Checked
@@ -205,42 +210,36 @@ func StandingLaw(vaultDir string) ([]StandingLawEntry, error) {
 // `aliases: [slug]` (bare) and `aliases: ["slug"]` (quoted).
 var aliasesLineRE = regexp.MustCompile(`(?m)^aliases:\s*\[(.*)\]\s*$`)
 
-// resolveStandingLawMemberFile locates a declared member's vault file
-// without hardcoding a single path shape, so a member declared before a
-// vault relayout keeps resolving after one. Two shapes are tried, in
-// order:
+// resolveStandingLawMemberFile locates a declared member's vault file by
+// alias resolution under 01 - Notes/, walked RECURSIVELY (not a flat
+// ReadDir) so a member resolves regardless of which earned subdirectory
+// (registry: 99 - Meta/note-subdirs.md, e.g. 01f - Facts, 01p -
+// Parameters) its note actually lives under -- P9 (run/iteration-queue.md)
+// moved every W1 fact one level deeper than a flat ReadDir would see, and
+// this must not silently stop resolving standing-law members the day that
+// happened. Every note migrated by the W1 fact migration carries
+// `aliases: [<old-slug>]` in its frontmatter specifically so a reference
+// to the old slug keeps resolving post-move (see run/w1-migration-report.md
+// for the full old-slug -> new-ID mapping this mechanism generalizes,
+// rather than hardcoding any one mapping entry here). The first note whose
+// aliases include the slug wins; StandingLawSet is small and reviewed, so
+// a genuine alias collision would be caught by a human before it could
+// matter.
 //
-//  1. The legacy path, agent/facts/<slug>.md -- retained for a vault that
-//     has not been migrated (existing test fixtures still use this
-//     shape). A2-COMPLETION (run/iteration-queue.md, run/inmaps-spec.md
-//     §7b's last item) removed agent/ from the real vault entirely, so
-//     this arm can no longer succeed there; it stays as a fast,
-//     unambiguous path for any fixture or vault state that still has it,
-//     existence-probed rather than assumed gone.
-//  2. Alias resolution under 01 - Notes/, walked RECURSIVELY (not a flat
-//     ReadDir) so a member resolves regardless of which earned subdirectory
-//     (registry: 99 - Meta/note-subdirs.md, e.g. 01f - Facts, 01p -
-//     Parameters) its note actually lives under -- P9 (run/iteration-queue.md)
-//     moved every W1 fact one level deeper than a flat ReadDir would see,
-//     and this must not silently stop resolving standing-law members the
-//     day that happened. Every note migrated by the W1 fact migration
-//     carries `aliases: [<old-slug>]` in its frontmatter specifically so a
-//     reference to the old slug keeps resolving post-move (see
-//     run/w1-migration-report.md for the full old-slug -> new-ID mapping
-//     this mechanism generalizes, rather than hardcoding any one mapping
-//     entry here). The first note whose aliases include the slug wins;
-//     StandingLawSet is small and reviewed, so a genuine alias collision
-//     would be caught by a human before it could matter.
-//
-// Neither shape is preferred by configuration -- this is existence-probed,
-// not vault-version-flagged, so a partially migrated vault (some facts
-// moved, some not) resolves correctly member-by-member.
+// There used to be a first arm here, agent/facts/<slug>.md, tried before
+// this one -- retained on the theory that a vault predating the INMAPS
+// relayout might still need it. It never could, in production: the only
+// vault this function is ever called against is $AGENT_MEMORY_VAULT
+// (main.go's one call site), the relayout that removed agent/ from it is
+// complete (A2-COMPLETION, agent-estate#1275 -- `ls $AGENT_MEMORY_VAULT/agent`
+// errors), and nothing restores or reintroduces that shape into the live
+// vault. The dead arm was also the path of least resistance for test
+// fixtures (writeFixtureFact wrote into it by default), which is how a
+// reviewer mutating this alias walk once passed every test in the package
+// blind (agent-estate#1280/#1254) -- a dead arm tried first is not neutral,
+// it actively hides the arm that matters. Retired outright, agent-estate#1281;
+// TestLegacyFactsPathNoLongerResolves pins that it stays gone.
 func resolveStandingLawMemberFile(vaultDir, slug string) (path string, raw []byte, err error) {
-	legacy := filepath.Join(vaultDir, "agent", "facts", slug+".md")
-	if b, e := os.ReadFile(legacy); e == nil {
-		return legacy, b, nil
-	}
-
 	notesDir := filepath.Join(vaultDir, "01 - Notes")
 	var found string
 	var foundRaw []byte
@@ -264,16 +263,13 @@ func resolveStandingLawMemberFile(vaultDir, slug string) (path string, raw []byt
 		return nil
 	})
 	if walkErr != nil {
-		return "", nil, fmt.Errorf(
-			"not found at legacy path %s, and %s could not be searched by alias: %w",
-			legacy, notesDir, walkErr)
+		return "", nil, fmt.Errorf("%s could not be searched by alias: %w", notesDir, walkErr)
 	}
 	if found != "" {
 		return found, foundRaw, nil
 	}
 	return "", nil, fmt.Errorf(
-		"not found at legacy path %s, and no file under %s declares %q as an alias",
-		legacy, notesDir, slug)
+		"no file under %s declares %q as an alias", notesDir, slug)
 }
 
 // noteDeclaresAlias reports whether raw's frontmatter carries an
