@@ -347,3 +347,56 @@ func TestIndexSourceMtimesSeesEditedNestedNote(t *testing.T) {
 		t.Fatalf("editing a nested note's content in place was invisible to the staleness check: reported mtime %v, want after generatedAt %v (note actually edited at %v)", got.mtime, generatedAt, edited)
 	}
 }
+
+// TestIndexSourceMtimesSeesEditedNestedLoopsResearchFile is
+// agent-estate#1305's staleness-side proof, mirroring
+// TestIndexSourceMtimesSeesEditedNestedNote above for a different source:
+// the old statNewest read only the direct entries of the Loops-Research
+// root, so an edit inside a subdirectory like specs/ moved nothing at that
+// level. Confirmed FAILING against unmodified main first (reported mtime
+// stayed at the backdated "created" time); statLoopsResearch now walks the
+// same recursive file list loopsSource reads content from
+// (knowledge.LoopsResearchFiles), so the edit is visible.
+func TestIndexSourceMtimesSeesEditedNestedLoopsResearchFile(t *testing.T) {
+	root := t.TempDir()
+	sub := filepath.Join(root, "specs")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	note := filepath.Join(sub, "loop-contract.md")
+	created := time.Now().Add(-3 * time.Hour)
+	if err := os.WriteFile(note, []byte("# Spec: loop-contract\n\noriginal\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{note, sub, root} {
+		if err := os.Chtimes(p, created, created); err != nil {
+			t.Fatalf("chtimes %s: %v", p, err)
+		}
+	}
+	generatedAt := created.Add(time.Hour)
+	edited := generatedAt.Add(time.Hour)
+
+	// Simulate editing the file's content in place: overwrite the same
+	// path, touch only its own mtime. Neither "specs" nor the
+	// Loops-Research root gains or loses an entry, so neither directory's
+	// own mtime moves.
+	if err := os.WriteFile(note, []byte("# Spec: loop-contract\n\nedited\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(note, edited, edited); err != nil {
+		t.Fatal(err)
+	}
+
+	var got indexSourceMtime
+	for _, m := range indexSourceMtimes(knowledge.Config{LoopsResearch: root}) {
+		if m.name == "loops-research" {
+			got = m
+		}
+	}
+	if !got.known {
+		t.Fatalf("loops-research mtime not known: %+v", got)
+	}
+	if !got.mtime.After(generatedAt) {
+		t.Fatalf("editing a nested Loops-Research file's content in place was invisible to the staleness check: reported mtime %v, want after generatedAt %v (file actually edited at %v)", got.mtime, generatedAt, edited)
+	}
+}

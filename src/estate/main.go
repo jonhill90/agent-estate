@@ -1443,36 +1443,15 @@ type indexSourceMtime struct {
 // here too: no such file exists to check, so it is reported unknown
 // rather than guessed at).
 func indexSourceMtimes(cfg knowledge.Config) []indexSourceMtime {
-	statNewest := func(name, dir string) indexSourceMtime {
-		if dir == "" {
-			return indexSourceMtime{name: name, reason: "path not configured", checkable: true}
-		}
-		fi, err := os.Stat(dir)
-		if err != nil {
-			return indexSourceMtime{name: name, reason: err.Error(), checkable: true}
-		}
-		newest := fi.ModTime()
-		// A directory's own mtime only moves when an entry is added or
-		// removed, not when an existing file's content changes -- so
-		// editing an existing vault fact or research note in place
-		// would look fresh under the directory mtime alone. Reading
-		// each entry's own mtime too (one extra stat each, still
-		// read-only) catches that case.
-		entries, err := os.ReadDir(dir)
-		if err == nil {
-			for _, e := range entries {
-				info, err := e.Info()
-				if err != nil {
-					continue
-				}
-				if info.ModTime().After(newest) {
-					newest = info.ModTime()
-				}
-			}
-		}
-		return indexSourceMtime{name: name, mtime: newest, known: true}
-	}
-
+	// The old one-level statNewest closure that used to live here is gone:
+	// its only caller was loops-research (agent-estate#1305 made that
+	// recursive, statLoopsResearch below), and agent-memory-vault and
+	// corpus-db already had their own purpose-built stats
+	// (statVaultNotes, statFile) for the same "one level was wrong"
+	// reason. Every checkable source now has a stat function that reads
+	// exactly the file set its own content source does -- no generic
+	// one-level fallback left to reach for by default and reintroduce
+	// this class of drift at the next new source.
 	return []indexSourceMtime{
 		// agent/facts -> 01 - Notes under A2-COMPLETION (run/iteration-queue.md,
 		// run/inmaps-spec.md §7b's last item -- agent/ retired entirely,
@@ -1491,25 +1470,15 @@ func indexSourceMtimes(cfg knowledge.Config) []indexSourceMtime {
 		// went uncaught.
 		statVaultNotes("agent-memory-vault", cfg.VaultDir),
 		statFile("corpus-db", cfg.CorpusDBPath),
-		// statNewest, not a recursive stat like statVaultNotes above --
-		// deliberately, not because this directory happens to be flat.
-		// It is NOT flat: it has one subdirectory, "specs/", holding four
-		// real .md files (imported once, 2026-07-27..08-02, never edited
-		// since -- confirmed directly, agent-estate#1299 fix-pass review).
-		// An in-place edit to one of those four would be exactly as
-		// invisible to this check as the vault defect #1283 fixed.
-		//
-		// Left unfixed here on purpose: internal/knowledge/loops.go's
-		// loopsSource is ALSO deliberately non-recursive ("Never
-		// recurses" is its own doc comment) -- specs/'s files are not in
-		// the knowledge index today regardless of this check. Making only
-		// the staleness signal recursive would report "stale, regenerate"
-		// for an edit that regenerating would still never pick up, which
-		// is a worse, actively misleading defect than the silent one
-		// being traded for. Fixing both together is a real product
-		// decision (does specs/ belong in the index at all?), not a
-		// mechanical one -- tracked, not fixed blindly, as agent-estate#1305.
-		statNewest("loops-research", cfg.LoopsResearch),
+		// statLoopsResearch, not statNewest -- agent-estate#1305 decided
+		// specs/ (a routing README, two full skill specs, a deferred-
+		// sketches file, all read before deciding) is research content of
+		// the same kind as the 24 top-level files beside it, not working
+		// material to exclude. loopsSource was made recursive to match;
+		// this check now walks the identical set via the same shared
+		// knowledge.LoopsResearchFiles, so the two can no longer describe
+		// different files even by accident.
+		statLoopsResearch("loops-research", cfg.LoopsResearch),
 		{
 			name:   "github-stars",
 			reason: "read live via `gh api user/starred`, no local cache file to stat",
@@ -1541,6 +1510,41 @@ func statVaultNotes(name, vaultDir string) indexSourceMtime {
 		return indexSourceMtime{name: name, reason: err.Error(), checkable: true}
 	}
 	for _, p := range notes {
+		info, err := os.Stat(p)
+		if err != nil {
+			continue
+		}
+		if info.ModTime().After(newest) {
+			newest = info.ModTime()
+		}
+	}
+	return indexSourceMtime{name: name, mtime: newest, known: true}
+}
+
+// statLoopsResearch stats the Loops-Research tree recursively, via
+// knowledge.LoopsResearchFiles -- the exact same file list loopsSource
+// itself reads content from (agent-estate#1305), not a second,
+// independently written walk that could silently drift from it again the
+// way statNewest's one-level read did. Deliberately NOT candidates.
+// WalkNotes: that helper filters to the vault's own note-id shape,
+// `^\d{12}(\d{2})?\.md$`, which no research filename matches -- reusing it
+// here would find zero files, reproducing #1283's exact defect at a new
+// call site (the mistake agent-estate#1305's own brief was written to
+// name and avoid).
+func statLoopsResearch(name, dir string) indexSourceMtime {
+	if dir == "" {
+		return indexSourceMtime{name: name, reason: "path not configured", checkable: true}
+	}
+	fi, err := os.Stat(dir)
+	if err != nil {
+		return indexSourceMtime{name: name, reason: err.Error(), checkable: true}
+	}
+	newest := fi.ModTime()
+	files, err := knowledge.LoopsResearchFiles(dir)
+	if err != nil {
+		return indexSourceMtime{name: name, reason: err.Error(), checkable: true}
+	}
+	for _, p := range files {
 		info, err := os.Stat(p)
 		if err != nil {
 			continue
