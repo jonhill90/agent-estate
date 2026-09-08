@@ -1393,7 +1393,15 @@ func indexSourceMtimes(cfg knowledge.Config) []indexSourceMtime {
 		// reads today; stating agent/facts here would report every real
 		// vault edit as a permanently gone source, since that directory
 		// no longer exists to be stat'd at all.
-		statNewest("agent-memory-vault", filepath.Join(cfg.VaultDir, "01 - Notes")),
+		//
+		// statVaultNotes, not statNewest (agent-estate#1283): every note
+		// now lives one directory deeper than "01 - Notes" itself, under
+		// an earned subdir like "01p - Parameters", so statNewest's own
+		// one-level os.ReadDir sees only those subdirectories -- add/remove
+		// of a NOTE moves nothing at that level. Editing an existing note's
+		// content in place, the exact case this check's own comment names,
+		// went uncaught.
+		statVaultNotes("agent-memory-vault", cfg.VaultDir),
 		statFile("corpus-db", cfg.CorpusDBPath),
 		statNewest("loops-research", cfg.LoopsResearch),
 		{
@@ -1401,6 +1409,41 @@ func indexSourceMtimes(cfg knowledge.Config) []indexSourceMtime {
 			reason: "read live via `gh api user/starred`, no local cache file to stat",
 		},
 	}
+}
+
+// statVaultNotes stats the vault's note tree recursively, via
+// candidates.WalkNotes (agent-estate#1283), rather than statNewest's one
+// level of os.ReadDir. The INMAPS relayout moved every note out of a flat
+// "01 - Notes/*.md" into earned subdirectories (01f - Facts, 01p -
+// Parameters, ...); reading only the DIRECT entries of "01 - Notes" sees
+// those subdirectories' own mtimes, which move when a note is added or
+// removed inside one but not when an existing note's content is edited in
+// place -- exactly the case statNewest's neighbouring comment says this
+// class of check exists to catch. Reusing candidates.WalkNotes (already
+// correct and tested against this exact shape, #1282) rather than writing
+// a second recursive walk keeps there being exactly one implementation of
+// "what counts as a note" for every caller in the estate to agree with.
+func statVaultNotes(name, vaultDir string) indexSourceMtime {
+	dir := filepath.Join(vaultDir, "01 - Notes")
+	fi, err := os.Stat(dir)
+	if err != nil {
+		return indexSourceMtime{name: name, reason: err.Error(), checkable: true}
+	}
+	newest := fi.ModTime()
+	notes, err := candidates.WalkNotes(vaultDir)
+	if err != nil {
+		return indexSourceMtime{name: name, reason: err.Error(), checkable: true}
+	}
+	for _, p := range notes {
+		info, err := os.Stat(p)
+		if err != nil {
+			continue
+		}
+		if info.ModTime().After(newest) {
+			newest = info.ModTime()
+		}
+	}
+	return indexSourceMtime{name: name, mtime: newest, known: true}
 }
 
 // statFile stats a single file (the corpus database, unlike the vault

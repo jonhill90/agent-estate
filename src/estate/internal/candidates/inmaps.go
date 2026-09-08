@@ -262,7 +262,16 @@ func publishINMAPS(db, vault, id, action string, r MemoryReview, apply bool) (Me
 	changes := map[string][]byte{}
 	oldPath := r.NotePath
 	if oldPath == "" && r.Proposal.ExistingFactHash != "" {
-		paths, _ := filepath.Glob(filepath.Join(vault, "01 - Notes", "*.md"))
+		// WalkNotes (agent-estate#1283), not filepath.Glob's flat
+		// "01 - Notes/*.md": every real note lives one directory deeper,
+		// under an earned subdir like "01p - Parameters", so the flat
+		// glob never found the inspected fact it was searching for and
+		// this adoption path failed with "inspected adoption hash not
+		// found" for every note, every time.
+		paths, e := WalkNotes(vault)
+		if e != nil {
+			return r, e
+		}
 		for _, p := range paths {
 			b, e := os.ReadFile(p)
 			if e != nil {
@@ -439,7 +448,17 @@ func MarkSourceDrift(vault, sourceID string) (int, error) {
 		return 0, e
 	}
 	defer unlock()
-	paths, _ := filepath.Glob(filepath.Join(vault, "01 - Notes", "*.md"))
+	// WalkNotes (agent-estate#1283), not filepath.Glob's flat
+	// "01 - Notes/*.md": against the real, subdirectory-shaped vault the
+	// glob silently matched nothing, so a note whose catalogue source
+	// drifted was never marked needs_review -- no error, invisible
+	// blindness, since this function's own return signature has no way
+	// to report "found nothing to check" versus "checked and nothing
+	// drifted".
+	paths, err := WalkNotes(vault)
+	if err != nil {
+		return 0, err
+	}
 	changes := map[string][]byte{}
 	for _, p := range paths {
 		b, e := os.ReadFile(p)

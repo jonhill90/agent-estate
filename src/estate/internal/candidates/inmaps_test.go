@@ -238,7 +238,7 @@ func TestMOCProposalsAndRefreshSeeNestedNoteSubdirs(t *testing.T) {
 // TestWalkNotesExcludesNonNoteMarkdownFiles is the negative case
 // TestMOCProposalsAndRefreshSeeNestedNoteSubdirs never covered: that test
 // only proves a real, canonically-named nested note is INCLUDED; nothing
-// proved a non-note .md file is EXCLUDED. walkNotes's first recursive
+// proved a non-note .md file is EXCLUDED. WalkNotes's first recursive
 // pass (a bare ".md" suffix check) admitted ANY markdown file under
 // "01 - Notes" -- a per-subdir index.md or README, say -- while
 // internal/knowledge/vault.go's own traversal of the identical directory
@@ -262,16 +262,16 @@ func TestWalkNotesExcludesNonNoteMarkdownFiles(t *testing.T) {
 		name := fmt.Sprintf("20260907%04d.md", n)
 		os.WriteFile(filepath.Join(v, "01 - Notes/01f - Facts", name), []byte("---\nstatus: stable\ntitle: Real Note\ntags: [\"kind/decision\"]\n---\n"), 0600)
 	}
-	notes, e := walkNotes(v)
+	notes, e := WalkNotes(v)
 	if e != nil {
 		t.Fatal(e)
 	}
 	if len(notes) != 8 {
-		t.Fatalf("walkNotes returned %d entries, want exactly the 8 canonically-named notes (README.md/index.md must be excluded): %v", len(notes), notes)
+		t.Fatalf("WalkNotes returned %d entries, want exactly the 8 canonically-named notes (README.md/index.md must be excluded): %v", len(notes), notes)
 	}
 	for _, p := range notes {
 		if filepath.Base(p) == "README.md" || filepath.Base(p) == "index.md" {
-			t.Fatalf("walkNotes included a non-note file: %s", p)
+			t.Fatalf("WalkNotes included a non-note file: %s", p)
 		}
 	}
 	got, _, e := MOCProposals(v, true)
@@ -360,6 +360,83 @@ func TestSourceDriftInvalidatesWithoutRewritingMeaning(t *testing.T) {
 	knowledge.Write(idx, knowledge.Generate(knowledge.Config{VaultDir: v, RunGH: func(...string) ([]byte, error) { return []byte("[]"), nil }}, time.Now()))
 	if q := knowledge.Query(idx, "source:vault-fact recovery", 10, true); len(q.Matches) != 0 {
 		t.Fatal("needs-review note remains active")
+	}
+}
+
+// TestMarkSourceDriftSeesNestedNoteSubdirs is agent-estate#1283's second
+// named site: MarkSourceDrift globbed a flat "01 - Notes/*.md", exactly
+// like TestSourceDriftInvalidatesWithoutRewritingMeaning's own fixture
+// above -- but the live vault has not been flat since the INMAPS relayout
+// (measured 2026-09-07: 0 notes directly under "01 - Notes", 3,217 under
+// "01p - Parameters" alone). Against a vault shaped like the real one,
+// this fails SILENTLY: no error, glob just returns nothing, so a note
+// whose catalogue source drifted is never marked needs_review and stays
+// active. The assertion below checks the note WAS marked, not merely that
+// no error came back -- an unchanged n==0 with e==nil is exactly the
+// invisible-blindness failure this site names, and would pass a test that
+// only checked for an error.
+func TestMarkSourceDriftSeesNestedNoteSubdirs(t *testing.T) {
+	v := t.TempDir()
+	os.MkdirAll(filepath.Join(v, "99 - Meta"), 0700)
+	os.MkdirAll(filepath.Join(v, "01 - Notes/01p - Parameters"), 0700)
+	p := filepath.Join(v, "01 - Notes/01p - Parameters/202609060001.md")
+	raw := "---\ntype: Fact\nstatus: stable\ntitle: Recovery\nsource: catalogue_source=src-example; content_hash=abc\n---\nUse violet recovery.\n"
+	os.WriteFile(p, []byte(raw), 0600)
+	n, e := MarkSourceDrift(v, "src-example")
+	if e != nil {
+		t.Fatal(e)
+	}
+	if n != 1 {
+		t.Fatalf("drift marked %d note(s), want 1 -- a nested note's source drift went unseen: %v", n, e)
+	}
+	b, _ := os.ReadFile(p)
+	if !strings.Contains(string(b), "Use violet recovery.") || field(string(b), "review_state") != "needs_review" {
+		t.Fatalf("nested note was not actually marked needs_review: %s", b)
+	}
+}
+
+// TestPublishAcceptFindsAdoptionHashUnderNestedNoteSubdirs is
+// agent-estate#1283's first named site: publishINMAPS's accept-flow
+// search for an inspected, unmanaged fact by content hash globbed the
+// same flat "01 - Notes/*.md" shape. Against a vault shaped like the real
+// one -- the prior fact one directory deeper, under "01p - Parameters" --
+// the hash search never finds it, and every such adoption fails with
+// "inspected adoption hash not found", the error inmaps.go's own comment
+// names.
+func TestPublishAcceptFindsAdoptionHashUnderNestedNoteSubdirs(t *testing.T) {
+	db := newFixtureDB(t, withOneUnit("p1", "prov1"))
+	if _, err := Derive(db, true); err != nil {
+		t.Fatal(err)
+	}
+	id := query(t, db, "select id from knowledge_candidates where prompt_id='p1'")
+	vault := t.TempDir()
+	os.MkdirAll(filepath.Join(vault, "01 - Notes/01p - Parameters"), 0700)
+	os.MkdirAll(filepath.Join(vault, "99 - Meta"), 0700)
+	os.WriteFile(filepath.Join(vault, "99 - Meta/tags.md"), []byte("`kind/decision`"), 0600)
+	os.WriteFile(filepath.Join(vault, "index.md"), []byte("---\nokf_version: \"0.1\"\n---\n\n# Facts\n\nintro\n"), 0600)
+
+	existingRaw := "---\ntype: Fact\nstatus: stable\ntitle: Prior\n---\n\nPrior nested fact, inspected before this proposal.\n"
+	existingPath := filepath.Join(vault, "01 - Notes/01p - Parameters/202601010000.md")
+	os.WriteFile(existingPath, []byte(existingRaw), 0600)
+
+	p := catalogueProposal("adopt-nested", "memory", "01 - Notes")
+	p.Tags = []string{"kind/decision"}
+	p.Type = "Fact"
+	p.ExistingFactHash = digest(existingRaw)
+	r, err := Propose(db, id, p, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = StageMemory(vault, id, r, true); err != nil {
+		t.Fatal(err)
+	}
+	r, err = Publish(db, vault, id, "accept", true)
+	if err != nil {
+		t.Fatalf("adoption hash not found under a nested note subdir (agent-estate#1283): %v", err)
+	}
+	got, _ := os.ReadFile(existingPath)
+	if field(string(got), "status") != "deprecated" || field(string(got), "superseded_by") != r.NotePath {
+		t.Fatalf("adopted nested fact was not retired in favor of the new note: %s", got)
 	}
 }
 
