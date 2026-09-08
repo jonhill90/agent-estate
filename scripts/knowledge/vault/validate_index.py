@@ -76,7 +76,7 @@ def registered_note_subdirs(vault_dir_path):
 
 def build_link_re(subdirs):
     """A link target is (optionally "../")01 - Notes/<optionally one
-    registered subdir>/(<12-digit-id>|index).md -- built from the
+    registered subdir>/(<12- or 14-digit-id>|index).md -- built from the
     registry, never a second hardcoded list. The leading "../" is
     optional so the same regex validates links written from index.md
     itself (vault root, no "../" needed) and links written one level down
@@ -86,7 +86,7 @@ def build_link_re(subdirs):
         subdir_part = f"(?:(?:{alt})/)?"
     else:
         subdir_part = ""
-    return re.compile(r"(?:\.\./)?01 - Notes/" + subdir_part + r"(?:\d{12}|index)\.md")
+    return re.compile(r"(?:\.\./)?01 - Notes/" + subdir_part + r"(?:\d{12}|\d{14}|index)\.md")
 
 
 def load_frontmatter_keys(path):
@@ -123,12 +123,12 @@ def main():
     subdirs = registered_note_subdirs(vault)
     notes_link_re = build_link_re(subdirs)
 
-    # Fact files: every 01 - Notes/**/<12-digit-id>.md, keyed relative to
+    # Fact files: every 01 - Notes/**/<12- or 14-digit-id>.md, keyed relative to
     # the vault root (root-relative, matching how index.md's own bullets
     # link them -- unlike the pre-A2 scheme, which kept facts/ under
     # agent/ and keyed relative to that).
     paths = [p for p in (Path(vault) / "01 - Notes").rglob("*.md")
-              if re.fullmatch(r"\d{12}", p.stem)]
+              if re.fullmatch(r"\d{12}|\d{14}", p.stem)]
     fact_files = {os.path.relpath(p, vault): p for p in paths}
     aliases = {}
     for key, path in fact_files.items():
@@ -217,6 +217,37 @@ def main():
             text = hub.read_text(encoding="utf-8")
             md_targets, wiki_targets = links_in_text(text, notes_link_re)
             referenced_by_hubs |= resolve(md_targets, wiki_targets)
+
+    # --- check 3a: every Markdown link resolves ---
+    #
+    # This check exists because on 2026-09-07 the vault carried 63 links to
+    # files that did not exist -- hubs pointing at iCloud conflict copies
+    # ("20260805165028 2.md") that were later deleted, and log entries still
+    # naming the retired agent/facts/ layout -- and this tool reported
+    # "Contract holds" throughout. Checks 1-3 only ask whether every NOTE is
+    # reachable; nothing asked whether every LINK arrives somewhere. A reader
+    # following a dead link and a reader finding nothing look identical, which
+    # is the failure this vault's own rules name (it-d43a08d739bf32a8).
+    #
+    # A target containing "<" is a documented placeholder in a contract or a
+    # spec ("01 - Notes/<subdir>/<id>.md"), not a link anyone can follow.
+    for path in sorted(Path(vault).rglob("*.md")):
+        # Any dot-directory is scratch or a backup, not the vault proper --
+        # .obsidian, .trash, and the .p15-fix-backup snapshots a migration left.
+        if any(part.startswith(".") for part in path.parts):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        for m in re.finditer(r"\]\(([^)]+\.md)\)", text):
+            target = unquote(m.group(1))
+            if target.startswith(("http://", "https://")) or "<" in target:
+                continue
+            if not (path.parent / target).exists():
+                hard_violations.append(
+                    f"{path.relative_to(vault)}: link does not resolve -> {target}"
+                )
 
     # --- check 3: orphaned facts ---
     referenced = referenced_by_index | referenced_by_facts | referenced_by_hubs

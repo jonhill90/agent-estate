@@ -55,11 +55,24 @@ class ValidateIndex(unittest.TestCase):
     def test_one_level_down_link_also_valid(self):
         # ../01 - Notes/... still resolves -- the same regex validates
         # links written from a 02 - MOCs/*.md hub or another fact file,
-        # not just from index.md's own root-relative form.
+        # not just from index.md's own root-relative form. Exercised from
+        # an actual hub file (one level below the vault root), not from
+        # index.md itself: index.md sits AT the root, so a "../" link
+        # written there is not just accepted syntax, it is a literal
+        # on-disk path one level above the vault -- check 3a (2026-09-07)
+        # correctly flags that as broken, since a real reader's link
+        # would not resolve either. Caught by check 3a's own mutation
+        # test: this case originally exercised that combination and
+        # check 3a rightly failed it.
         with tempfile.TemporaryDirectory() as d:
             root = pathlib.Path(d)
             self.write_fact(root, "202607120001.md")
-            code, _ = self.run_against(root, "- [Test](../01 - Notes/202607120001.md) — fixture\n")
+            mocs = root / "02 - MOCs"
+            mocs.mkdir()
+            (mocs / "Facts.md").write_text(
+                "# Facts\n\n- [Test](../01 - Notes/202607120001.md)\n"
+            )
+            code, _ = self.run_against(root, "")
             self.assertEqual(code, 0)
 
     def test_registered_subdir_link_valid(self):
@@ -150,6 +163,50 @@ class ValidateIndex(unittest.TestCase):
             code, out = self.run_against(root, "- [Test](01 - Notes/202607120001.md) — fixture\n")
             self.assertEqual(code, 0)
             self.assertIn("missing recommended frontmatter", out)
+
+    def test_14_digit_note_id_valid(self):
+        # Newer notes carry a 14-digit id (full timestamp), not just the
+        # original 12-digit form -- both must resolve.
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            self.write_fact(root, "20260712000130.md")
+            code, _ = self.run_against(root, "- [Test](01 - Notes/20260712000130.md) — fixture\n")
+            self.assertEqual(code, 0)
+
+    def test_hub_link_that_does_not_resolve_is_a_violation(self):
+        # Check 3a (2026-09-07): the vault reported "Contract holds" while
+        # carrying 63 dead links -- hubs pointing at deleted iCloud conflict
+        # copies among them. Checks 1-3 only ask whether every NOTE is
+        # reachable; this is the first check that asks whether every LINK
+        # arrives somewhere.
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            self.write_fact(root, "202607120001.md")
+            mocs = root / "02 - MOCs"
+            mocs.mkdir()
+            (mocs / "Facts.md").write_text(
+                "# Facts\n\n"
+                "- [Test](../01 - Notes/202607120001.md)\n"
+                "- [Gone](../01 - Notes/202607120099.md)\n"
+            )
+            code, out = self.run_against(root, "- [Test](01 - Notes/202607120001.md) — fixture\n")
+            self.assertEqual(code, 1)
+            self.assertIn("link does not resolve", out)
+            self.assertIn("202607120099.md", out)
+
+    def test_placeholder_link_with_angle_bracket_is_not_a_violation(self):
+        # A target containing "<" is a documented placeholder in a contract
+        # or spec ("01 - Notes/<subdir>/<id>.md"), not a link anyone can
+        # follow -- check 3a must not flag it.
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            self.write_fact(root, "202607120001.md")
+            (root / "99 - Meta").mkdir(exist_ok=True)
+            (root / "99 - Meta" / "index-contract.md").write_text(
+                "# Contract\n\nLinks look like [example](01 - Notes/<subdir>/<id>.md).\n"
+            )
+            code, _ = self.run_against(root, "- [Test](01 - Notes/202607120001.md) — fixture\n")
+            self.assertEqual(code, 0)
 
 
 if __name__ == "__main__":
