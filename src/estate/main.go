@@ -1467,14 +1467,75 @@ func indexSourceMtimes(cfg knowledge.Config) []indexSourceMtime {
 		// reads today; stating agent/facts here would report every real
 		// vault edit as a permanently gone source, since that directory
 		// no longer exists to be stat'd at all.
-		statNewest("agent-memory-vault", filepath.Join(cfg.VaultDir, "01 - Notes")),
+		//
+		// statVaultNotes, not statNewest (agent-estate#1283): every note
+		// now lives one directory deeper than "01 - Notes" itself, under
+		// an earned subdir like "01p - Parameters", so statNewest's own
+		// one-level os.ReadDir sees only those subdirectories -- add/remove
+		// of a NOTE moves nothing at that level. Editing an existing note's
+		// content in place, the exact case this check's own comment names,
+		// went uncaught.
+		statVaultNotes("agent-memory-vault", cfg.VaultDir),
 		statFile("corpus-db", cfg.CorpusDBPath),
+		// statNewest, not a recursive stat like statVaultNotes above --
+		// deliberately, not because this directory happens to be flat.
+		// It is NOT flat: it has one subdirectory, "specs/", holding four
+		// real .md files (imported once, 2026-07-27..08-02, never edited
+		// since -- confirmed directly, agent-estate#1299 fix-pass review).
+		// An in-place edit to one of those four would be exactly as
+		// invisible to this check as the vault defect #1283 fixed.
+		//
+		// Left unfixed here on purpose: internal/knowledge/loops.go's
+		// loopsSource is ALSO deliberately non-recursive ("Never
+		// recurses" is its own doc comment) -- specs/'s files are not in
+		// the knowledge index today regardless of this check. Making only
+		// the staleness signal recursive would report "stale, regenerate"
+		// for an edit that regenerating would still never pick up, which
+		// is a worse, actively misleading defect than the silent one
+		// being traded for. Fixing both together is a real product
+		// decision (does specs/ belong in the index at all?), not a
+		// mechanical one -- tracked, not fixed blindly, as agent-estate#1305.
 		statNewest("loops-research", cfg.LoopsResearch),
 		{
 			name:   "github-stars",
 			reason: "read live via `gh api user/starred`, no local cache file to stat",
 		},
 	}
+}
+
+// statVaultNotes stats the vault's note tree recursively, via
+// candidates.WalkNotes (agent-estate#1283), rather than statNewest's one
+// level of os.ReadDir. The INMAPS relayout moved every note out of a flat
+// "01 - Notes/*.md" into earned subdirectories (01f - Facts, 01p -
+// Parameters, ...); reading only the DIRECT entries of "01 - Notes" sees
+// those subdirectories' own mtimes, which move when a note is added or
+// removed inside one but not when an existing note's content is edited in
+// place -- exactly the case statNewest's neighbouring comment says this
+// class of check exists to catch. Reusing candidates.WalkNotes (already
+// correct and tested against this exact shape, #1282) rather than writing
+// a second recursive walk keeps there being exactly one implementation of
+// "what counts as a note" for every caller in the estate to agree with.
+func statVaultNotes(name, vaultDir string) indexSourceMtime {
+	dir := filepath.Join(vaultDir, "01 - Notes")
+	fi, err := os.Stat(dir)
+	if err != nil {
+		return indexSourceMtime{name: name, reason: err.Error(), checkable: true}
+	}
+	newest := fi.ModTime()
+	notes, err := candidates.WalkNotes(vaultDir)
+	if err != nil {
+		return indexSourceMtime{name: name, reason: err.Error(), checkable: true}
+	}
+	for _, p := range notes {
+		info, err := os.Stat(p)
+		if err != nil {
+			continue
+		}
+		if info.ModTime().After(newest) {
+			newest = info.ModTime()
+		}
+	}
+	return indexSourceMtime{name: name, mtime: newest, known: true}
 }
 
 // statFile stats a single file (the corpus database, unlike the vault

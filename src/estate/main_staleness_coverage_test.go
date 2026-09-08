@@ -289,3 +289,61 @@ func TestKnowledgeQueryProseFreshnessNoteUnchanged(t *testing.T) {
 		t.Fatalf("prose output missing the unknown-not-fresh wording:\n%s", text)
 	}
 }
+
+// TestIndexSourceMtimesSeesEditedNestedNote is agent-estate#1283's third
+// named site: indexSourceMtimes' statNewest reads only the DIRECT entries
+// of "01 - Notes" to catch an edit its own comment says it exists for
+// ("editing an existing file in place"). Since the INMAPS relayout every
+// real note lives one directory deeper, under an earned subdir like
+// "01p - Parameters" -- so the direct entries statNewest actually sees
+// today are the subdirectories themselves, and a subdirectory's own mtime
+// moves on add/remove but NOT when a file already inside it is edited in
+// place. This fixture backdates the note, its parent subdir, and
+// "01 - Notes" itself to before generatedAt, then edits the note's
+// content and mtime alone (no directory entry added or removed) to after
+// generatedAt -- exactly the case the comment warns about and the one
+// case add/remove tests cannot exercise.
+func TestIndexSourceMtimesSeesEditedNestedNote(t *testing.T) {
+	root := t.TempDir()
+	notesDir := filepath.Join(root, "01 - Notes")
+	sub := filepath.Join(notesDir, "01p - Parameters")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	note := filepath.Join(sub, "20260101010101.md")
+	created := time.Now().Add(-3 * time.Hour)
+	if err := os.WriteFile(note, []byte("---\nstatus: stable\n---\n\noriginal\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{note, sub, notesDir} {
+		if err := os.Chtimes(p, created, created); err != nil {
+			t.Fatalf("chtimes %s: %v", p, err)
+		}
+	}
+	generatedAt := created.Add(time.Hour)
+	edited := generatedAt.Add(time.Hour)
+
+	// Simulate editing the note's content in place: overwrite the same
+	// path, touch only its own mtime. Neither "01p - Parameters" nor
+	// "01 - Notes" gains or loses an entry, so neither directory's own
+	// mtime moves.
+	if err := os.WriteFile(note, []byte("---\nstatus: stable\n---\n\nedited\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(note, edited, edited); err != nil {
+		t.Fatal(err)
+	}
+
+	var got indexSourceMtime
+	for _, m := range indexSourceMtimes(knowledge.Config{VaultDir: root}) {
+		if m.name == "agent-memory-vault" {
+			got = m
+		}
+	}
+	if !got.known {
+		t.Fatalf("agent-memory-vault mtime not known: %+v", got)
+	}
+	if !got.mtime.After(generatedAt) {
+		t.Fatalf("editing a nested note's content in place was invisible to the staleness check: reported mtime %v, want after generatedAt %v (note actually edited at %v)", got.mtime, generatedAt, edited)
+	}
+}

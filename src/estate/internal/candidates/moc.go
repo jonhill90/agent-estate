@@ -29,7 +29,7 @@ const mocEnd = "<!-- generated-links:end -->"
 // reconstructing an equivalent one.
 var noteFilename = regexp.MustCompile(`^\d{12}(\d{2})?\.md$`)
 
-// walkNotes lists every canonical note under "01 - Notes", at any depth --
+// WalkNotes lists every canonical note under "01 - Notes", at any depth --
 // notes live directly there (the layout MOCProposals/RefreshMOCs were
 // originally tested against) AND nested under earned letter subdirs like
 // "01p - Parameters"/"01f - Facts" (agent-estate#942's note-subdirs
@@ -45,7 +45,21 @@ var noteFilename = regexp.MustCompile(`^\d{12}(\d{2})?\.md$`)
 // -- symlinks excluded too, same as that package -- so this file no
 // longer disagrees with, or merely approximates, the package that reads
 // the same tree correctly.
-func walkNotes(vault string) ([]string, error) {
+//
+// Exported (agent-estate#1283): two more sites in this same package
+// (inmaps.go's ReviewProposal accept/reject flow and MarkSourceDrift) and
+// one in package main (the knowledge-staleness mtime check) independently
+// reinvented the same flat "01 - Notes/*.md" glob this function replaced
+// in #1282 -- moc.go was fixed and this helper written, but nothing
+// routed the OTHER call sites through it, so they kept returning nothing
+// against the real, subdirectory-shaped vault. Exporting this one
+// function, rather than writing a second implementation, is the fix:
+// package main already imports package candidates for other CLI
+// subcommands, so calling candidates.WalkNotes from main.go adds no new
+// dependency edge, and there is now exactly one correct implementation of
+// "what counts as a note" for every caller in the estate to share instead
+// of a shape to remember to reproduce.
+func WalkNotes(vault string) ([]string, error) {
 	var notes []string
 	root := filepath.Join(vault, "01 - Notes")
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
@@ -86,7 +100,7 @@ func walkNotes(vault string) ([]string, error) {
 // here -- it only makes today's skip visible instead of silent.
 func MOCProposals(vault string, apply bool) (proposed []string, skipped []string, err error) {
 	groups := map[string][]string{}
-	notes, e := walkNotes(vault)
+	notes, e := WalkNotes(vault)
 	if e != nil {
 		return nil, nil, e
 	}
@@ -263,7 +277,7 @@ func RefreshMOCs(vault string, apply bool) (int, error) {
 		defer unlock()
 	}
 	hubs, _ := filepath.Glob(filepath.Join(vault, "02 - MOCs", "*.md"))
-	notes, e := walkNotes(vault)
+	notes, e := WalkNotes(vault)
 	if e != nil {
 		return 0, e
 	}
