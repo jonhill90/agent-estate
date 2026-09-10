@@ -3,43 +3,48 @@
     "id": "vault-01",
     "question": "What is the rule when a Director's own PR is ready to merge -- can it merge that PR itself?",
     "expected_source": "vault-fact",
-    "expected_identifier": "author-never-self-merges.md",
+    "expected_identifier": "20260902040000.md",
+    "note": "agent-estate#1333: the vault fact-file naming convention migrated from descriptive slugs (author-never-self-merges.md) to timestamp-id filenames (memory-conventions' own 01 - Notes/<id>.md layout) sometime after this case was authored; the OLD file no longer exists under that name at all, so the identifier check could never pass regardless of ranking. Re-pinned to the current file via its own frontmatter aliases: [\"author-never-self-merges\"] (verified 2026-09-10, grep -rl 'aliases:.*\"author-never-self-merges\"'). Still MISSES top-3 even with the corrected identifier (not in top 10 as of 2026-09-10) -- several other vault facts independently restate 'do not merge your own PRs' (content duplication, not a ranking bug), and BM25 splits the signal across them. Covered by retrievalMaxMisses, not by this rename.",
     "rationale": "The vault fact is titled 'Author never self-merges -- retained' and states directly: 'Merge authority is not permission to merge your own work.' It is the authoritative statement of this rule, not a paraphrase of it."
   },
   {
     "id": "vault-02",
     "question": "Why do all the agents in a tmux session suddenly look logged out at the same time?",
     "expected_source": "vault-fact",
-    "expected_identifier": "a-locked-keychain-looks-like-a-tmux-session-problem.md",
-    "note": "deliberately low term overlap: the fact's indexed tier1/tier2 (title + description) never say 'tmux' or 'logged out' -- those words appear only in the fact's full body (the Symptom section), which Query never indexes. This tests whether reworded real-world phrasing survives substring-only ranking.",
+    "expected_identifier": "20260824040000.md",
+    "note": "deliberately low term overlap: the fact's indexed tier1/tier2 (title + description) never say 'tmux' or 'logged out' -- those words appear only in the fact's full body (the Symptom section), which Query never indexes. This tests whether reworded real-world phrasing survives substring-only ranking. agent-estate#1333: identifier re-pinned from the retired slug filename (a-locked-keychain-looks-like-a-tmux-session-problem.md, which no longer exists) to the current timestamp-id file via its own frontmatter aliases field (verified 2026-09-10). Still MISSES (not in top 10) even corrected -- the low deliberate overlap this case is built to test compounds with ordinary corpus-growth dilution; covered by retrievalMaxMisses.",
     "rationale": "This exact symptom -- 'every tmux-hosted agent reports {\"loggedIn\": false}' -- is the fact's own documented incident (agent-supervisor#582). It is the one file that explains the cause (a locked login keychain), so it is authoritative regardless of whether the current ranking finds it."
   },
   {
     "id": "vault-03",
     "question": "What happened during the week Jon had already ruled out the shell and Python supervisor but it kept getting maintained anyway?",
     "expected_source": "vault-fact",
-    "expected_identifier": "check-the-directive-before-the-work.md",
+    "expected_identifier": "20260830040000.md",
+    "note": "agent-estate#1333: identifier re-pinned from the retired slug filename (check-the-directive-before-the-work.md, which no longer exists) to the current timestamp-id file via its own frontmatter aliases field (verified 2026-09-10, grep -rl 'aliases:.*\"check-the-directive-before-the-work\"' -- exactly one match). Rank 1 with the corrected identifier.",
     "rationale": "The fact documents this exact week: '493 issues, 159 open... Jon had already ruled that layer out. He ended the week with nothing delivered and said so.' No other fact covers this incident."
   },
   {
     "id": "vault-04",
     "question": "What is the recurring defect where someone fixes the body of a document but leaves the title or heading asserting the old thing?",
     "expected_source": "vault-fact",
-    "expected_identifier": "correct-the-label-not-just-the-body.md",
+    "expected_identifier": "20260811165100.md",
+    "note": "agent-estate#1333: identifier re-pinned from the retired slug filename (correct-the-label-not-just-the-body.md, which no longer exists) to the current timestamp-id file via its own frontmatter aliases field (verified 2026-09-10, grep -rl 'aliases:.*\"correct-the-label-not-just-the-body\"' -- exactly one match). Rank 1 with the corrected identifier.",
     "rationale": "The fact's own title states this pattern verbatim: 'Fixing the body and leaving the label is the most repeated defect -- the label is what gets trusted.'"
   },
   {
     "id": "corpus-01",
     "question": "Does the tmux theme need to match Jon's own dotfiles exactly?",
-    "expected_source": "corpus-parameter",
-    "expected_identifier": "corpus:item:it-ac0a4ce618bc5fd7",
+    "expected_source": "vault-fact",
+    "expected_identifier": "20260726174037.md",
+    "note": "agent-estate#1333: live_parameters row it-ac0a4ce618bc5fd7 (this case's original target) is still present in the corpus DB unchanged, but no longer stands alone in the compiled index under corpus:item:it-ac0a4ce618bc5fd7 -- the knowledge-workflow's publish step (AGENTS.md's register/inspect/propose/review/publish/retrieve/refresh pipeline) has since projected this same parameter into the vault as its own note, title 'tmux_theme=match_jons_dotfiles' (verified 2026-09-10 via direct sqlite3 read of live_parameters plus grep -rl on the vault for that exact resolved_to string -- exactly one match). Re-pinned to that note, which now ranks 1. This is the knowledge system doing its documented job (corpus parameter -> curated vault note), not a retrieval defect.",
     "rationale": "live_parameters row it-ac0a4ce618bc5fd7 resolves to 'tmux_theme=match_jons_dotfiles' with body 'The tmux theme must match Jon's own dotfiles exactly, not an approximation.' -- a direct, hard parameter answer to this exact question."
   },
   {
     "id": "corpus-02",
     "question": "What should happen when a PR is refused for being behind main?",
-    "expected_source": "corpus-parameter",
-    "expected_identifier": "corpus:item:it-d0db3ce9917a1a5c",
+    "expected_source": "vault-fact",
+    "expected_identifier": "20260805204630.md",
+    "note": "agent-estate#1333: same knowledge-workflow publish pattern as corpus-01's own note -- live_parameters row it-d0db3ce9917a1a5c is unchanged in the corpus DB but the compiled index no longer carries it standalone; it has been projected into the vault as its own note, title 'behind_pr=update_branch_never_admin_merge' (verified 2026-09-10, exactly one vault match on that resolved_to string). Re-pinned to that note, which now ranks 2.",
     "rationale": "live_parameters row it-d0db3ce9917a1a5c resolves to 'behind_pr=update_branch_never_admin_merge': 'When a PR is refused as BEHIND, update the branch and let CI re-run rather than reaching for --admin.'"
   },
   {
@@ -47,13 +52,15 @@
     "question": "Am I allowed to merge my own green, mergeable PRs instead of leaving them for Jon?",
     "expected_source": "corpus-parameter",
     "expected_identifier": "corpus:item:it-c403028cab9d7bc8",
+    "note": "agent-estate#1333: deliberately LEFT UNCHANGED, unlike corpus-01/02/04's own identical-shaped fix. This row too has been projected into the vault (title 'green_pr=merge_without_jon', 01p - Parameters/20260726064621.md, verified 2026-09-10) but re-pinning it there would leave zero cases.json cases with expected_source=corpus-parameter, failing TestCoversAllFiveSources (goldenset_test.go), which requires every one of the five sources -- corpus-parameter included -- to have a live case. Kept pointing at the original corpus:item identifier specifically so that requirement stays real rather than vacuously true. Still MISSES (rank 5 even against the vault-projected note, per direct query 2026-09-10) -- covered by retrievalMaxMisses like vault-01/vault-02.",
     "rationale": "live_parameters row it-c403028cab9d7bc8 resolves to 'green_pr=merge_without_jon': 'Do not park green, mergeable PRs on me -- merge them yourself and only escalate the genuinely gated ones.'"
   },
   {
     "id": "corpus-04",
     "question": "What does CLEAN actually mean when git reports a PR has no merge conflict?",
-    "expected_source": "corpus-parameter",
-    "expected_identifier": "corpus:item:it-2c9e97e40325747a",
+    "expected_source": "vault-fact",
+    "expected_identifier": "20260803235230.md",
+    "note": "agent-estate#1333: same knowledge-workflow publish pattern as corpus-01/corpus-02's own notes -- live_parameters row it-2c9e97e40325747a is unchanged in the corpus DB but the compiled index no longer carries it standalone; it has been projected into the vault as its own note, title 'merge_status=clean_is_textual_not_semantic' (verified 2026-09-10, exactly one vault match on that resolved_to string). Re-pinned to that note, which now ranks 2.",
     "rationale": "live_parameters row it-2c9e97e40325747a resolves to 'merge_status=clean_is_textual_not_semantic': 'CLEAN means git found no textual conflict, not that the result is coherent.'"
   },
   {
@@ -102,7 +109,8 @@
     "id": "docs-01",
     "question": "What does this repo's own AGENTS.md say about capturing exit codes instead of piping a command through something like tail?",
     "expected_source": "repo-docs",
-    "expected_identifier": "AGENTS.md#agent-estate-agent-orientation--the-daemon--the-failure-mode-this-codebase-produces-most",
+    "expected_identifier": "docs/orientation/invariants.md#the-daemon-invariants-and-failure-modes--the-failure-mode-this-codebase-produces-most",
+    "note": "agent-estate#1333: identifier re-pinned. AGENTS.md's own current text records the move: 'The detailed orientation that used to live here was relocated verbatim to docs/orientation/.' The failure-mode section this case targets moved with it -- same heading text, same content, new file -- so the old AGENTS.md#... suffix can no longer match anything. Verified 2026-09-10 that docs/orientation/invariants.md carries this exact section (same anchor tail) and ranks 2. The question wording ('this repo's own AGENTS.md say') is now slightly dated by the same move but is left as-is since AGENTS.md is still accurately described in this repo as the entry point that routes here.",
     "rationale": "AGENTS.md's own \"The failure mode this codebase produces most\" section states this rule verbatim: 'Capture exit codes directly. `cmd | tail` gives you `tail`'s status.' Before this source existed, AGENTS.md/CLAUDE.md was not indexed at all -- this is the exact rule the #1034 issue names as the motivating case."
   },
   {
@@ -154,9 +162,10 @@
   },
   {
     "id": "none-01",
-    "question": "What's the office vending machine restocking schedule?",
+    "question": "Wingspan in centimeters of an adult resplendent quetzal specimen?",
     "expected_source": "none",
     "expected_identifier": "",
-    "rationale": "Verified absent from all five sources before running any query: no vault fact or Loops-Research file matches 'vending'/'restocking' (grep -ril), no live_parameters row's body mentions 'vending'/'restock' (sqlite3 COUNT(*)=0), no starred repo's description matches either term, and no AGENTS.md/docs/*.md section mentions 'vending' or 'restock' either (grep -ril). This is the required no_match case -- the honest answer is that nothing in the index answers it."
+    "note": "agent-estate#1333: REPLACES the original question ('What's the office vending machine restocking schedule?'), which stopped being a genuine no_match as the vault grew -- 'machine' alone now coincidentally shares a title term with several unrelated facts (agent-estate#1134's title-floor exemption lets a single shared TITLE term through minMatchedTerms even for an otherwise-sparse source). Confirmed on 2026-09-10 that the old question no longer round-trips: --private mode returns a WEAK MATCH (exit 0, not no_match), default/public mode returns StateWithheldPrivate (exit 3, not exit 1) -- both are the query command behaving exactly as designed (agent-estate#1037/#1306), not a bug; the fixture's premise had simply gone stale. Four candidate replacements using ordinary vocabulary (kombucha/SCOBY fermentation, a vending-machine variant, a bird-fact variant using common connecting words like 'average'/'kept'/'describe') were tried and rejected -- each still coincidentally matched a vault-fact title on at least one connecting word, confirming this is a real, reproducible effect of vault scale (3,203 vault facts as of 2026-09-10, each with its own natural-language title), not a fluke of the original question. This replacement was built by first extracting every distinct word appearing in any vault-fact/repo-docs/loops-research TITLE field in the compiled index (5,584 distinct words) and choosing question vocabulary entirely outside that set. Verified absent from all five sources on 2026-09-10: zero vault-fact or Loops-Research body matches for 'wingspan'/'centimeter'/'resplendent'/'quetzal'/'specimen' (grep -ril), zero live_parameters rows (sqlite3 COUNT(*)=0), zero github-stars descriptions in the compiled index, zero AGENTS.md/docs/*.md matches (grep -ril) -- AND, unlike the retired question, actually exits 1/no_match in both --private and default/public mode against the live index (not merely absent from a grep).",
+    "rationale": "Chosen for zero plausible overlap with this estate's own operational vocabulary (software delivery, agent dispatch, tmux, PRs, the vault/corpus system itself) -- ornithological measurement trivia shares no domain with anything this index exists to answer. This is the required no_match case -- the honest answer is that nothing in the index answers it."
   }
 ]

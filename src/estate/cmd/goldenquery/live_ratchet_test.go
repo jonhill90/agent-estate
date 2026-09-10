@@ -199,7 +199,7 @@ func TestLiveRetrievalRatchetWiringCatchesARealRegression(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const want = "retrievalMaxMisses = 1 // floor 16 of 17 pre-#1150, now 21 of 22 -- agent-estate#1152"
+	const want = "retrievalMaxMisses = 5 // agent-estate#1333: RAISED from 1, floor 21 of 22 (agent-estate#1152)"
 	const mutated = "retrievalMaxMisses = -1000 // MUTATED by TestLiveRetrievalRatchetWiringCatchesARealRegression -- impossible floor, proves the wiring"
 	if !strings.Contains(string(raw), want) {
 		t.Fatalf("could not find the exact retrievalMaxMisses line to mutate -- main.go's own text has moved:\nwant substring: %s", want)
