@@ -900,6 +900,9 @@ func usage() {
                                         exit 3 = STALLED, escalated -- may
                                           continue on OTHER work; this
                                           phase item/src head is still stuck
+                                        exit 4 = STALE -- newest entry too
+                                          old to vouch for; neither moving
+                                          nor stalled can be asserted
   estate tick escalate <phase-item> <where>
                                         record that a human was told about
                                         the current stall. Never counts as
@@ -2933,7 +2936,16 @@ func main() {
 			// no way to say "a human was told". CheckWithEscalation layers
 			// that acknowledgment on top without letting it clear the
 			// stall itself -- see its own doc comment.
-			v, err := tick.CheckWithEscalation(path, tick.EscalationPath(), newResolver(defaultHTTPStatus, defaultGHAPI))
+			//
+			// agent-estate#1358: the verdict above is a pure function of
+			// the last Window entries with no reference to their age, so
+			// a log that has stopped being appended to freezes at
+			// whatever it last reported -- a dead loop and a healthy one
+			// produced identical output. CheckWithStaleness gates on the
+			// newest entry's own age, derived from the log's own history,
+			// before any of that window logic runs -- see its own doc
+			// comment.
+			v, err := tick.CheckWithStaleness(path, tick.EscalationPath(), newResolver(defaultHTTPStatus, defaultGHAPI), time.Now())
 			if err != nil {
 				// Could not measure. Never clean.
 				fmt.Fprintln(os.Stderr, "estate:", err)
@@ -2983,6 +2995,19 @@ func main() {
 				default:
 					fmt.Println("last tick's observed spend: no turns finished that window -- excludes the Director's own turn cost either way")
 				}
+			}
+			if v.Stale {
+				// agent-estate#1358: neither "moving" nor "STALLED" is a claim
+				// this check can back once the window it would draw either
+				// verdict from is this old -- the age is the finding, not a
+				// footnote beside a guessed verdict. A different exit code
+				// from every other branch: this is not "the loop is working"
+				// (0), not "the loop is stuck and nobody has been told" (1),
+				// and not "stuck and acknowledged" (3) -- it is "this check
+				// cannot tell", which is its own answer.
+				fmt.Fprintln(os.Stderr, "STALE: "+v.Reason)
+				fmt.Fprintln(os.Stderr, "run 'tick record' to resume recording, or investigate why the loop stopped -- this is not evidence either way on its own")
+				os.Exit(4)
 			}
 			if v.Stalled && v.Escalated {
 				// A different exit code, not a clean one: the phase item and
