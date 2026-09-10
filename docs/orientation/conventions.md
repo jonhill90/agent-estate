@@ -47,6 +47,32 @@
 - One fix pass. If a PR fails a second review, close it and file what
   remains. A fix pass continues the PR's own branch (`estate dispatch fix`),
   never a fresh one.
+- **A closing-keyword line must read `Closes #NNNN` or
+  `Closes jonhill90/agent-estate#NNNN` — never the bare `agent-estate#NNNN`
+  form used everywhere else in this repo** (commit trailers, this file's own
+  citations, PR prose). That form is correct in every other context; it is
+  specifically wrong on a line meant to auto-close an issue, because GitHub's
+  linker recognizes only `#NNNN` (same repo) or `owner/repo#NNNN`
+  (cross-repo) — a bare repo name with no owner matches neither, and the
+  line reads as plain text. Confirmed both directions with a real pair, not
+  assumed: PR #1347's `Closes agent-estate#1337.` and PR #1350's
+  `Closes agent-estate#1017.` both left `closingIssuesReferences` empty
+  (`gh api graphql`, queried from the PR side and the issue's own
+  `closedByPullRequestsReferences`). #1337 closing 3 seconds after its PR
+  merged looked like the linker firing; it was not — it was a manual
+  `gh issue close` run immediately afterward in the same task, not GitHub's
+  parser. A second, distinct failure mode (#1247/#1277) omitted any
+  reference to the issue at all. Either way the issue sits open past its
+  actual fix — #1247 for 3 days; #1017 until the next stale-issue sweep
+  caught it by hand (agent-estate#1353, which has the full evidence trail).
+  `internal/gate` deliberately does not depend on `closingIssuesReferences`
+  for merge eligibility — `agent-estate#940` replaced that join after
+  `#944`/`#937`/`#939` showed it wasn't reliable — so a malformed closing
+  line costs issue hygiene, never a merge decision; there is no safety
+  property here to wire a check into, and `Decision.Reasons` in that
+  security-scoped package means refusal everywhere else it is populated, not
+  a place to add an advisory warning. Get the syntax right when you write
+  the line; nothing downstream catches it for you.
 - Cheaper model tiers for workers and reviewers; reserve the expensive tier for
   judgement.
 - Anything touching tmux behaviour runs against an isolated socket or on a
