@@ -73,7 +73,7 @@ pages as free cannot see a host actively fighting over them, and 176
 uncleaned dispatch worktrees were the visible symptom of a cleanup loop that
 had stopped running, not a memory problem at all.
 
-## Dispatch — `src/estate` (`estate dispatch <issue> <brief-file>`)
+## Dispatch — `src/estate` (`estate dispatch [--harness=NAME] <issue> <brief-file>`)
 
 1. Read the brief. Refuse if unreadable.
 2. Check pressure. **Refuse before creating anything** if the host is loaded —
@@ -114,15 +114,21 @@ disk, and offers only terminal-state or positively-reclaimed corpses to the
 same `Worktree.Remove` refusals dispatch itself would apply — never more
 removals than `Remove` would allow on its own, only fewer.
 
-## Knowledge — `src/estate/internal/{corpus,candidates,knowledge}`, `estate knowledge`
+## Knowledge — `src/estate/internal/{corpus,candidates,knowledge,vaultview,distill}`, `estate knowledge`
 
 Three layers: the corpus (`~/corpus/corpus.sqlite3`) is the immutable record
 of what was said; the memory vault (`$AGENT_MEMORY_VAULT`) holds the rules
 distilled from it, each one verbatim from a corpus item, never composed;
 `estate knowledge` compiles a regenerable index over both for retrieval.
-`estate candidates memory` is the one sanctioned write path into the vault.
-See [`docs/canonical/knowledge.md`](../canonical/knowledge.md) for the full
-design and [`docs/canonical/knowledge-workflow.md`](../canonical/knowledge-workflow.md)
+`estate corpus-audit [n]` reports the hard parameters least supported by
+Jon's own words, and `estate candidates [-db path]` derives quarantined,
+cited CANDIDATE rows from the corpus — `estate candidates memory` is the one
+sanctioned write path into the vault. `internal/vaultview`
+(`estate vault-view [n]`) projects the corpus's hard-item selections into
+the legacy parameter views; `internal/distill` merges corpus items that say
+the same thing into one durable fact, the rest recorded as its evidence.
+See [`docs/canonical/knowledge.md`](../canonical/knowledge.md)
+for the full design and [`docs/canonical/knowledge-workflow.md`](../canonical/knowledge-workflow.md)
 for the register/propose/review/publish/retrieve lifecycle — not restated
 here.
 
