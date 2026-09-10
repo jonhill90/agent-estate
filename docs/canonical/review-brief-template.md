@@ -69,7 +69,7 @@ Every check must pass. **Paste the output.** If anything is red:
    own working checkout, declared the `26d4a45ea2a7` sitting in 24 briefs
    stale, and "corrected" two of those briefs and a handoff. The checkout was
    **50 commits behind origin/main**. `26d4a45ea2a7` was the live value the
-   whole time; `ecf40670309d` is two re-pins old (`a255964bbdcf` ->
+   whole time; `ecf40670309d` is one re-pin old (`a255964bbdcf` ->
    `ecf40670309d` -> `26d4a45ea2a7`, per `standinglaw.go`'s own comment). A
    stale checkout does not announce itself: the file parses, the test passes,
    the value looks authoritative.
