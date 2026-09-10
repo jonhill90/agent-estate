@@ -2377,8 +2377,20 @@ func main() {
 			// lane reads; see knowledge.ResolveWritePath's doc comment for
 			// why this is the chosen fix shape over a heuristic refusal or a
 			// warning.
+			//
+			// Names knowledge.PrivateIndexRemedy explicitly, the same
+			// phrasing agent-estate#1306 already established for every
+			// staleness/freshness message in this file (see that constant's
+			// own doc comment) -- this refusal predates #1306 and was the
+			// one place left still inventing its own wording instead of
+			// pointing at it, exactly the drift #1306's own comment warns
+			// "is how the next one starts." Led with here, before the
+			// override, so the safe path is what a reader sees first; the
+			// override remains the deliberate, operator-only escape hatch,
+			// never weakened or made a second way in.
 			fmt.Fprintf(os.Stderr, "estate: this cwd resolves to the SHARED knowledge index (%s), not a per-turn or explicitly overridden one\n", out)
-			fmt.Fprintln(os.Stderr, "estate: refusing to write it without an explicit acknowledgement -- pass `estate knowledge --allow-shared-write` or set "+knowledge.AllowSharedWriteEnv+"=1 if this is deliberate")
+			fmt.Fprintln(os.Stderr, "estate: refusing to write it without an explicit acknowledgement -- "+knowledge.PrivateIndexRemedy)
+			fmt.Fprintln(os.Stderr, "estate: to write the shared index anyway (the operator's own deliberate regeneration, never an agent's), pass `estate knowledge --allow-shared-write` or set "+knowledge.AllowSharedWriteEnv+"=1")
 			os.Exit(1)
 		}
 		res := knowledge.Generate(cfg, time.Now())
