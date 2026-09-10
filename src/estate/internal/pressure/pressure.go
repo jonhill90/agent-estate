@@ -52,6 +52,32 @@ type Limits struct {
 	// "use the real one" for every other field's zero value in spirit,
 	// and this keeps that reading true for the fifth limit too.
 	ReadQuota func(time.Time) (quota.Reading, error)
+
+	// CountWorktrees overrides how the worktree limit takes its reading --
+	// nil (the zero value, what Default() and every production call site
+	// leaves it) means the real worktreeCount.
+	//
+	// agent-estate#1017: threshold-widening (MaxWorktrees = 1e9, the trick
+	// the comment above describes for the other OS-level reads) neutralises
+	// the CEILING fine, but it cannot help a test that wants to assert the
+	// ceiling is actually WIRED to worktreeCount() rather than to nothing --
+	// the state a mutant that never calls it would leave, per this file's
+	// own "PR #999's review ran three fail-open mutants" section below. That
+	// assertion needs a second, independent value to compare Reading.Worktrees
+	// against, and `git worktree list` is live: on this host, other lanes
+	// create and sweep dispatch worktrees continuously, so two calls to
+	// worktreeCount() a few lines apart can disagree -- not a bug in the
+	// gate, a real worktree appearing or vanishing between them. Comparing
+	// Check's own reading against a SECOND live call was therefore asserting
+	// the host stayed quiet for the duration of one test, not that the
+	// wiring is correct, and it read as flaky for exactly that reason.
+	//
+	// A function seam, same shape as ReadQuota, fixes it the way ReadQuota
+	// fixed the identical class of problem for budget: inject a FIXED count,
+	// then assert Reading.Worktrees against that same fixed value -- both
+	// sides of the comparison now come from the one source the test itself
+	// controls, so there is no live read left for the host to race against.
+	CountWorktrees func() (int, error)
 }
 
 func Default() Limits {
@@ -204,7 +230,11 @@ func Check(l *ledger.Ledger, lim Limits) Verdict {
 	// unbounded loop and it degrades every git operation the estate performs.
 	// This limit exists so a runaway is refused even when the memory gauge is
 	// wrong, which it was.
-	if n, err := worktreeCount(); err != nil {
+	countWorktrees := lim.CountWorktrees
+	if countWorktrees == nil {
+		countWorktrees = worktreeCount
+	}
+	if n, err := countWorktrees(); err != nil {
 		v.OK = false
 		v.Reasons = append(v.Reasons, "could not count worktrees: "+err.Error())
 	} else {
