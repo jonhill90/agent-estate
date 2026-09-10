@@ -1,10 +1,12 @@
 import json
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-SUPERVISOR_DIR = Path(__file__).resolve().parents[2] / "scripts" / "supervisor"
+SUPERVISOR_DIR = Path(__file__).resolve().parents[1] / "scripts" / "supervisor"
 sys.path.insert(0, str(SUPERVISOR_DIR))
 
 import mine_prompts  # noqa: E402
@@ -13,6 +15,63 @@ from core import Ledger  # noqa: E402
 
 def _line(role, text, at="2026-08-16T10:00:00Z"):
     return json.dumps({"timestamp": at, "message": {"role": role, "content": text}}) + "\n"
+
+
+class StateDirDefaultTests(unittest.TestCase):
+    """agent-estate#1357 (part 1's sibling fix): `--state-dir`'s default,
+    with no env override, resolves to the corpus, not the dead
+    ~/.local/state/agent-dotfiles-supervisor directory -- the same defect
+    class prompt_capture_hook.py had, in the script #1357's own text names
+    as responsible for "September 2026 had 994 prompts on disk and 386 in
+    the corpus". Runs the real CLI end to end (`--store` against one
+    synthetic transcript) with a fake $HOME, so this never risks touching
+    the real ~/corpus, and checks WHICH directory the ledger actually got
+    created under -- not merely what a re-derived default string would be."""
+
+    def _run_store(self, env):
+        with tempfile.TemporaryDirectory() as root:
+            # harvest() globs root/*/​*.jsonl -- one level of session
+            # subdirectory between --root and the transcript file itself.
+            session_dir = Path(root) / "fake-session"
+            session_dir.mkdir()
+            (session_dir / "session.jsonl").write_text(
+                _line("user", "a real directive for the state-dir default test")
+            )
+            result = subprocess.run(
+                [sys.executable, str(SUPERVISOR_DIR / "mine_prompts.py"),
+                 "--root", root, "--store"],
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=30,
+            )
+            return result
+
+    def test_default_state_dir_is_the_corpus_not_the_dead_state_dir(self):
+        with tempfile.TemporaryDirectory() as fake_home:
+            result = self._run_store({"PATH": os.environ.get("PATH", ""), "HOME": fake_home})
+            self.assertEqual(0, result.returncode, msg=result.stderr)
+            self.assertIn("stored: 1 written", result.stdout)
+
+            corpus_db = Path(fake_home) / "corpus" / "ledger.sqlite3"
+            dead_db = Path(fake_home) / ".local" / "state" / "agent-dotfiles-supervisor" / "ledger.sqlite3"
+            self.assertTrue(corpus_db.exists(), f"expected the ledger under the corpus dir, at {corpus_db}")
+            self.assertFalse(
+                dead_db.exists(),
+                "mine_prompts.py must never create/touch a ledger under the dead supervisor "
+                "state dir by default (agent-estate#942/#1357)",
+            )
+
+    def test_agent_corpus_dir_env_var_overrides_the_default(self):
+        with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as override_dir:
+            result = self._run_store({
+                "PATH": os.environ.get("PATH", ""),
+                "HOME": fake_home,
+                "AGENT_CORPUS_DIR": override_dir,
+            })
+            self.assertEqual(0, result.returncode, msg=result.stderr)
+            self.assertTrue((Path(override_dir) / "ledger.sqlite3").exists())
+            self.assertFalse((Path(fake_home) / "corpus" / "ledger.sqlite3").exists())
 
 
 class HarvestContextTests(unittest.TestCase):

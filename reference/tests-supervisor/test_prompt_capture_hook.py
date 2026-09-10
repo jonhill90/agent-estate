@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SUPERVISOR_DIR = REPO_ROOT / "scripts" / "supervisor"
+SUPERVISOR_DIR = REPO_ROOT / "reference" / "scripts" / "supervisor"
 sys.path.insert(0, str(SUPERVISOR_DIR))
 
 import prompt_capture_hook  # noqa: E402
@@ -29,6 +29,59 @@ def _hold_ledger_lock(lock_path, hold_seconds, ready):
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         ready.set()
         time.sleep(hold_seconds)
+
+
+class CorpusDirDefaultTests(unittest.TestCase):
+    """agent-estate#1357: the central claim this issue's fix rests on -- with
+    no env var override, the hook's Ledger root resolves to the corpus, not
+    the dead ~/.local/state/agent-dotfiles-supervisor directory. Runs a
+    subprocess with a fake $HOME (never the real one, so this never risks
+    touching the real ~/corpus) and neither AGENT_CORPUS_DIR nor
+    AGENT_SUPERVISOR_STATE_DIR set -- the exact unset-env shape every real
+    Claude Code session hit before this fix, and the shape agent-estate#1357
+    measured 1,873 orphaned prompts under."""
+
+    def _default_corpus_dir(self, home):
+        result = subprocess.run(
+            [sys.executable, "-c", "import prompt_capture_hook; print(prompt_capture_hook.CORPUS_DIR)"],
+            capture_output=True,
+            text=True,
+            env={
+                "PATH": os.environ.get("PATH", ""),
+                "HOME": home,
+                "PYTHONPATH": str(SUPERVISOR_DIR),
+                # Deliberately absent: AGENT_CORPUS_DIR, AGENT_SUPERVISOR_STATE_DIR.
+            },
+            timeout=30,
+        )
+        self.assertEqual(0, result.returncode, msg=result.stderr)
+        return result.stdout.strip()
+
+    def test_default_corpus_dir_is_the_corpus_not_the_dead_state_dir(self):
+        with tempfile.TemporaryDirectory() as fake_home:
+            got = self._default_corpus_dir(fake_home)
+            self.assertEqual(os.path.join(fake_home, "corpus"), got)
+            self.assertNotIn("agent-dotfiles-supervisor", got,
+                              "the default must never resolve into the dead supervisor state dir "
+                              "(agent-estate#942/#1357) -- this is the exact regression this test exists "
+                              "to catch if the default is ever reverted or re-typed wrong")
+
+    def test_agent_corpus_dir_env_var_overrides_the_default(self):
+        with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as override_dir:
+            result = subprocess.run(
+                [sys.executable, "-c", "import prompt_capture_hook; print(prompt_capture_hook.CORPUS_DIR)"],
+                capture_output=True,
+                text=True,
+                env={
+                    "PATH": os.environ.get("PATH", ""),
+                    "HOME": fake_home,
+                    "PYTHONPATH": str(SUPERVISOR_DIR),
+                    "AGENT_CORPUS_DIR": override_dir,
+                },
+                timeout=30,
+            )
+            self.assertEqual(0, result.returncode, msg=result.stderr)
+            self.assertEqual(override_dir, result.stdout.strip())
 
 
 class CaptureUnitTests(unittest.TestCase):
@@ -262,7 +315,18 @@ class MainEndToEndTests(unittest.TestCase):
             input=json.dumps(payload),
             capture_output=True,
             text=True,
-            env={**__import__("os").environ, "AGENT_SUPERVISOR_STATE_DIR": self.tempdir.name},
+            env={
+                **__import__("os").environ,
+                "AGENT_SUPERVISOR_STATE_DIR": self.tempdir.name,
+                # agent-estate#1357: the hook's Ledger root now reads
+                # AGENT_CORPUS_DIR, separately from AGENT_SUPERVISOR_STATE_DIR
+                # (which stays correct for FAILURE_LOG only) -- both must
+                # point at the same tempdir here so this test's own
+                # `Ledger(self.tempdir.name)` reads what the subprocess
+                # actually wrote, instead of silently falling through to the
+                # real ~/corpus.
+                "AGENT_CORPUS_DIR": self.tempdir.name,
+            },
             timeout=30,
         )
 
@@ -277,7 +341,18 @@ class MainEndToEndTests(unittest.TestCase):
             input="not json{{{",
             capture_output=True,
             text=True,
-            env={**__import__("os").environ, "AGENT_SUPERVISOR_STATE_DIR": self.tempdir.name},
+            env={
+                **__import__("os").environ,
+                "AGENT_SUPERVISOR_STATE_DIR": self.tempdir.name,
+                # agent-estate#1357: the hook's Ledger root now reads
+                # AGENT_CORPUS_DIR, separately from AGENT_SUPERVISOR_STATE_DIR
+                # (which stays correct for FAILURE_LOG only) -- both must
+                # point at the same tempdir here so this test's own
+                # `Ledger(self.tempdir.name)` reads what the subprocess
+                # actually wrote, instead of silently falling through to the
+                # real ~/corpus.
+                "AGENT_CORPUS_DIR": self.tempdir.name,
+            },
             timeout=30,
         )
         self.assertEqual(0, result.returncode)
@@ -374,6 +449,11 @@ class RegistrationFailsOpenTests(unittest.TestCase):
                 **os.environ,
                 "CLAUDE_PROJECT_DIR": project_dir,
                 "AGENT_SUPERVISOR_STATE_DIR": state_dir,
+                # agent-estate#1357: see the identical comment in
+                # MainEndToEndTests._run -- both env vars must point at the
+                # same tempdir so this test's own Ledger(state_dir) reads
+                # what the registered command actually wrote.
+                "AGENT_CORPUS_DIR": state_dir,
             },
             timeout=30,
         )

@@ -293,9 +293,16 @@ def main():
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--store", action="store_true",
                     help="write matched rows into the ledger's prompts table (idempotent)")
+    # The corpus is the ONLY correct target. Defaulting this to the supervisor
+    # state dir silently wrote every ingested prompt into
+    # ~/.local/state/agent-dotfiles-supervisor/ledger.sqlite3 -- the dead DB
+    # agent-estate#942 says nothing may use -- while reporting success. That is
+    # why September 2026 had 994 prompts on disk and 386 in the corpus, and why
+    # zero items were ever judged from them. ~/corpus/ledger.sqlite3 is a compat
+    # symlink to corpus.sqlite3, so this resolves to internal/corpus.Path().
     ap.add_argument("--state-dir", default=os.environ.get(
-        "AGENT_SUPERVISOR_STATE_DIR", os.path.expanduser("~/.local/state/agent-dotfiles-supervisor")),
-                    help="ledger directory; same default and env var as cli.py")
+        "AGENT_CORPUS_DIR", os.path.expanduser("~/corpus")),
+                    help="corpus directory; must contain corpus.sqlite3 (ledger.sqlite3 is a compat symlink to it)")
     args = ap.parse_args()
 
     rows = harvest(glob.glob(os.path.join(args.root, "*", "*.jsonl")),

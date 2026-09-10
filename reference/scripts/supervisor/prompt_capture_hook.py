@@ -116,6 +116,20 @@ STATE_DIR = os.environ.get(
 )
 FAILURE_LOG = os.path.join(STATE_DIR, "prompt-capture-hook-failures.log")
 
+# agent-estate#1357: the corpus is the ONLY correct target for the Ledger
+# this hook writes prompts through. Defaulting the Ledger's own root to
+# STATE_DIR (above) silently wrote every prompt submitted, in every
+# session, into ~/.local/state/agent-dotfiles-supervisor/ledger.sqlite3 --
+# the dead DB agent-estate#942 says nothing may use -- while reporting
+# success on every call. STATE_DIR itself stays correct for FAILURE_LOG
+# above (a log file is a legitimate state-dir use); only the database
+# target was wrong. ~/corpus/ledger.sqlite3 is a compat symlink to
+# corpus.sqlite3 (agent-estate#P6), so Ledger(CORPUS_DIR)'s hardcoded
+# `root / "ledger.sqlite3"` resolves to the same file internal/corpus.Path()
+# names -- same pattern as mine_prompts.py's identical fix for its own
+# --state-dir default.
+CORPUS_DIR = os.environ.get("AGENT_CORPUS_DIR", os.path.expanduser("~/corpus"))
+
 # agent-supervisor#693 (fix pass). `Ledger._locked()`'s flock is a blocking
 # call with no timeout by default -- fine for the CLI and the Director loop,
 # fatal here: this hook sits on every prompt submission, so a lock held by
@@ -262,7 +276,7 @@ def main():
     try:
         from core import Ledger
 
-        ledger = Ledger(STATE_DIR, lock_timeout=LOCK_TIMEOUT_SECONDS)
+        ledger = Ledger(CORPUS_DIR, lock_timeout=LOCK_TIMEOUT_SECONDS)
         status = capture(payload, ledger)
     except Exception as exc:  # noqa: BLE001 -- a hook must never block or crash a prompt on any failure shape
         _log_failure(f"capture failed: {type(exc).__name__}: {exc}")
