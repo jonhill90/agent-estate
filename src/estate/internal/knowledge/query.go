@@ -374,6 +374,24 @@ type QueryResult struct {
 	// number. Always present (even 0) so a caller never has to
 	// special-case "count omitted means zero".
 	IndexItemCount int `json:"index_item_count"`
+	// RankingMethod names which mechanism actually produced Matches' own
+	// ORDER -- "bm25" (no reranker was wired, or one was wired but its
+	// result was declined/failed) or "semantic" (a reranker's result was
+	// applied). Set on every state that reaches ranking at all (StateMatched
+	// and its variants); empty on every earlier-returning state, the same
+	// convention RankingBasis already follows. Score on every Match is
+	// always BM25's own score regardless of RankingMethod -- reordering
+	// candidates never invents a different score for them (agent-estate#1255:
+	// "scores remain explicitly identified").
+	RankingMethod string `json:"ranking_method,omitempty"`
+	// RankingFallbackReason is set only when a reranker WAS supplied (a
+	// non-nil RerankFunc passed to QueryWithRanking) but its result was
+	// rejected or it errored -- nil, error, timeout, or a malformed/
+	// incomplete/duplicate ranking all fall back to the exact BM25 order and
+	// count, and this states why, legibly enough to show a caller who asked
+	// for semantic ranking and got BM25 instead (agent-estate#1255: "a caller
+	// must be able to tell which ranking produced the answer").
+	RankingFallbackReason string `json:"ranking_fallback_reason,omitempty"`
 }
 
 // CoverageState is the taxonomy for whether a QueryResult can be trusted
@@ -1223,7 +1241,34 @@ const rankingBasisText = "score = Okapi BM25 (k1=1.2, b=0.75) over stemmed, " +
 // permalink, the item's own Tier1) copied verbatim from the index, never
 // summarised, reworded or generated -- see this package's own doc
 // comment on honest absence and #1019's "no fabrication" requirement.
+//
+// Query is QueryWithRanking with a nil reranker -- BM25 only, exactly the
+// behavior every existing caller of this function had before
+// agent-estate#1255. Every call site outside this package needs no change:
+// see QueryWithRanking's own doc comment for the seam this wraps.
 func Query(indexPath, question string, limit int, includePrivate bool) QueryResult {
+	return QueryWithRanking(indexPath, question, limit, includePrivate, nil)
+}
+
+// QueryWithRanking is Query plus one optional seam: rerank, if non-nil, is
+// given the exact population Query already decided is eligible -- past
+// privacy, tag, and admission filtering, already BM25-scored -- and may
+// reorder it. nil (what Query above always passes) means BM25's own order
+// is final, unchanged from before this seam existed.
+//
+// This mirrors internal/pressure's ReadQuota/CountWorktrees seam
+// (agent-estate#1321/#1323/#1350): nil is the default every production
+// call site keeps; only main.go's CLI wiring ever supplies a real
+// implementation (internal/embedding's cosine reranker), and only when a
+// caller explicitly asked for semantic ranking. A non-nil rerank that
+// errors, times out, or returns anything other than an exact permutation
+// of the given candidate ids is rejected AS A WHOLE -- QueryWithRanking
+// falls back to the identical BM25 order and count Query would have
+// returned, and states why in RankingFallbackReason. There is no partial
+// application: agent-estate#1255's own requirement is that a caller can
+// always tell which ranking produced the answer, and a half-applied
+// reorder would make that undecidable.
+func QueryWithRanking(indexPath, question string, limit int, includePrivate bool, rerank RerankFunc) QueryResult {
 	if limit <= 0 {
 		limit = QueryLimit
 	}
@@ -1293,11 +1338,6 @@ func Query(indexPath, question string, limit int, includePrivate bool) QueryResu
 			strings.Join(tagFilters, ", "))
 	}
 
-	type scored struct {
-		item    Item
-		score   float64
-		matched []string
-	}
 	// Built over res.Items -- the whole index, unfiltered by tag or
 	// privacy -- so a term's idf never shifts between a default-mode and
 	// a --private call against the same index (see NewBM25Scorer's own
@@ -1474,6 +1514,25 @@ func Query(indexPath, question string, limit int, includePrivate bool) QueryResu
 	tieGroupSize := map[float64]int{}
 	for _, s := range all {
 		tieGroupSize[s.score]++
+	}
+
+	// Reranking happens here: AFTER every admission/privacy/tag filter
+	// above has already run and AFTER BM25 has scored and sorted the full
+	// eligible population, but BEFORE the display limit below. The
+	// reranker never sees a candidate Query itself would have excluded,
+	// and it can only reorder the population it was given -- it cannot
+	// admit a new one (agent-estate#1255: "it reorders; it must not
+	// admit" -- enforced by applyRerank's own exact-permutation check, not
+	// by convention).
+	out.RankingMethod = "bm25"
+	if rerank != nil {
+		reordered, rerr := applyRerank(rerank, question, all)
+		if rerr != nil {
+			out.RankingFallbackReason = rerr.Error()
+		} else {
+			all = reordered
+			out.RankingMethod = "semantic"
+		}
 	}
 
 	n := len(all)
