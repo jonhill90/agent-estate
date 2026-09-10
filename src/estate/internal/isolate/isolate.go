@@ -26,6 +26,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1007,6 +1008,98 @@ func gitDirFor(path string) (string, error) {
 // checkout, and Remove uses the answer to decide whether a local branch ref
 // remains to delete. A recorded flag could be stale; `symbolic-ref` cannot.
 //
+// HollowCorpse reports whether path is a worktree directory that still
+// exists on disk but has had every regular file removed from it -- .git
+// specifically confirmed absent (os.IsNotExist, never merely unreadable)
+// and zero regular files found anywhere in a full recursive walk, only
+// directories and/or symlinks surviving. agent-estate#1337: this is the
+// exact shape found on the real dispatch root, all seven of them -- not
+// a worktree removed by hand (that leaves nothing at path, not an empty
+// directory tree with a symlink still standing in it) and not a
+// permission error or an unmounted network path (those fail the initial
+// stat, before any tree walk can even start) -- consistent instead with
+// macOS's own per-user $TMPDIR file reaper, which removes files unused
+// for several days but leaves directory structure (and, empirically,
+// symlinks -- find's own -type f does not match them, and neither does
+// this walk) behind, taking .git down with everything else in the same
+// pass.
+//
+// The zero-file requirement is the entire safety property this function
+// provides: a worktree whose .git vanished while real, uncommitted
+// source content remains is a DIFFERENT and far more dangerous shape --
+// content that might still need collecting -- and must never match this.
+// Any ambiguity (a stat error on .git that is not confirmed ENOENT, a
+// walk that fails partway through) returns ok=false: this refuses to
+// claim hollow rather than guess, the same posture every other refusal
+// in this package already takes.
+func HollowCorpse(path string) (ok bool, fileCount int, err error) {
+	st, statErr := os.Stat(path)
+	if statErr != nil || !st.IsDir() {
+		return false, 0, nil
+	}
+	if _, gerr := os.Lstat(filepath.Join(path, ".git")); gerr == nil {
+		return false, 0, nil // .git present -- whatever failed, it wasn't this
+	} else if !os.IsNotExist(gerr) {
+		return false, 0, gerr // cannot positively confirm .git is ENOENT (permission?) -- refuse to guess
+	}
+	n := 0
+	walkErr := filepath.WalkDir(path, func(p string, d fs.DirEntry, werr error) error {
+		if werr != nil {
+			return werr
+		}
+		if d.Type().IsRegular() {
+			n++
+		}
+		return nil
+	})
+	if walkErr != nil {
+		return false, 0, walkErr
+	}
+	return n == 0, n, nil
+}
+
+// ErrHollowCorpse is returned by ReattachAt in place of the generic "not a
+// git worktree" error when HollowCorpse positively confirms the shape
+// above. Callers use errors.As to give this its own report category
+// (agent-estate#1301's own precedent: distinct shapes get distinct
+// categories, never lumped into one "refused" bucket, agent-estate#1337)
+// rather than reporting it identically to a worktree that merely could
+// not be verified for some other reason.
+type ErrHollowCorpse struct {
+	Path      string
+	FileCount int
+}
+
+func (e *ErrHollowCorpse) Error() string {
+	return fmt.Sprintf("isolate: %s no longer has a .git and holds no file content anywhere in its tree (%d regular file(s) found) -- its directory skeleton (and any symlinks) survive, but every file is gone; most likely the OS's own per-user temp-file cleanup, not a live worktree merely unreadable -- the record should be reconciled, not counted as an unresolved corpse", e.Path, e.FileCount)
+}
+
+// ReconcileHollowCorpse removes path's empty directory shell after
+// re-confirming, immediately before acting, that HollowCorpse's own
+// zero-file requirement still holds -- never trusting a judgement made
+// even moments earlier before a destructive call (agent-estate#1337, the
+// same discipline `it-83575286b075761` states generally: read before
+// deleting -- here there is nothing left TO read, which is exactly what
+// gets re-verified rather than assumed).
+//
+// Deliberately does NOT touch the parent repository's own stale worktree
+// registration -- `git worktree prune`, run from the checkout that
+// created this worktree, is what clears that. sweep-worktrees has no
+// general way to know which checkout owns an arbitrary dispatch-root
+// path, especially against a named foreign root (agent-estate#1330); a
+// prune call belongs to whoever runs it from the owning checkout, a
+// separate, explicit decision rather than a side effect bundled in here.
+func ReconcileHollowCorpse(path string) error {
+	ok, n, err := HollowCorpse(path)
+	if err != nil {
+		return fmt.Errorf("isolate: cannot reconfirm %s is still hollow, refusing to touch it: %w", path, err)
+	}
+	if !ok {
+		return fmt.Errorf("isolate: %s no longer matches the hollow-corpse shape (now %d file(s)) -- refusing to remove it; something changed since it was judged, and only a fresh judgement can say what", path, n)
+	}
+	return os.RemoveAll(path)
+}
+
 // Reattach itself is a thin wrapper over ReattachAt (below), which does the
 // actual work against an ALREADY-COMPUTED root -- see ReattachAt's own doc
 // comment for why a caller needs that split.
@@ -1046,6 +1139,9 @@ func ReattachAt(root, path, branch, base string) (*Worktree, error) {
 		return nil, fmt.Errorf("isolate: refusing to reattach to %s: it is not a directory", path)
 	}
 	if _, err := git(path, "rev-parse", "--git-dir"); err != nil {
+		if hollow, n, herr := HollowCorpse(path); herr == nil && hollow {
+			return nil, &ErrHollowCorpse{Path: path, FileCount: n}
+		}
 		return nil, fmt.Errorf("isolate: refusing to reattach to %s: it is not a git worktree: %w", path, err)
 	}
 	// `symbolic-ref -q HEAD` exits non-zero, quietly, exactly when HEAD is
