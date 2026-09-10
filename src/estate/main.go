@@ -27,6 +27,7 @@ import (
 	"github.com/jonhill90/agent-estate/estate/internal/candidates"
 	"github.com/jonhill90/agent-estate/estate/internal/corpus"
 	"github.com/jonhill90/agent-estate/estate/internal/dispatchid"
+	"github.com/jonhill90/agent-estate/estate/internal/embedding"
 	"github.com/jonhill90/agent-estate/estate/internal/features"
 	"github.com/jonhill90/agent-estate/estate/internal/gate"
 	"github.com/jonhill90/agent-estate/estate/internal/harness"
@@ -841,7 +842,7 @@ func usage() {
                                          ok=true to ok=false relative to it
                                          (agent-estate#1123) -- pass --allow-coverage-loss
                                          to write the degraded index anyway
-  estate knowledge query [--private] [--json] <question>
+  estate knowledge query [--private] [--json] [--semantic] <question>
                                          small, ranked, cited pointers into the compiled
                                          index -- never bodies; publishable-only by
                                          default (agent-estate#1033), --private lifts
@@ -852,7 +853,15 @@ func usage() {
                                          full QueryResult, Coverage included, as JSON on
                                          stdout instead of prose (agent-estate#1068); an
                                          unrecognised flag is refused, never folded into
-                                         the question
+                                         the question; --semantic reorders the same
+                                         eligible candidates by local cosine similarity
+                                         (agent-estate#1255) instead of BM25 order alone
+                                         -- requires estate knowledge embeddings to
+                                         have run first, falls back to exact BM25
+                                         order/count on any problem (no cache, stale
+                                         cache, unreachable model), and always states
+                                         which ranking actually produced the answer
+                                         (ranking_method/ranking_fallback_reason)
   estate knowledge get [--private] [--json] <id>
                                          the one item Tier1/Tier2/Tier3 body a query
                                          match pointed at -- the second half of
@@ -860,6 +869,14 @@ func usage() {
                                          without --private (agent-estate#1033); --json
                                          emits {ok, reason, item} on stdout instead of
                                          prose (agent-estate#1068)
+  estate knowledge embeddings           prepares agent-estate#1255's local semantic
+                                         reranker cache explicitly -- embeds every item
+                                         in the compiled index once, against a local
+                                         model only (installs nothing, never a remote
+                                         endpoint), and writes a versioned sidecar next
+                                         to the index. The index itself is only read;
+                                         knowledge query --semantic never embeds the
+                                         corpus itself, only ever the question
   estate tasks                          latest state of every task
   estate inflight                       tasks still occupying a slot
   estate reclaim [--apply]              report in-flight turns and whether their
@@ -1102,6 +1119,19 @@ func printKnowledgeQuery(qr knowledge.QueryResult) {
 			m.ID, m.Source, m.Score, strings.Join(m.MatchedTerms, ", "), tieNote, tier1, m.Permalink)
 	}
 	fmt.Println("ranking: " + qr.RankingBasis)
+	// agent-estate#1255: which mechanism actually produced the ORDER above
+	// -- printed unconditionally on every state that reaches this point,
+	// same discipline as RankingBasis just above, never only when
+	// semantic ranking was requested. A caller who ran --semantic and got
+	// BM25 anyway (missing/stale cache, unreachable model, a rejected
+	// rerank) sees why here, not just in a machine-readable field nobody
+	// reading prose output would check.
+	if qr.RankingMethod != "" {
+		fmt.Println("ranking method: " + qr.RankingMethod)
+	}
+	if qr.RankingFallbackReason != "" {
+		fmt.Println("ranking fallback (BM25 used instead): " + qr.RankingFallbackReason)
+	}
 	fmt.Println("ask `estate knowledge get <id>` for one item's full tier2/tier3")
 	printRepoDocsRootIfAny(matchSources(qr.Matches))
 }
@@ -1457,12 +1487,26 @@ func runCandidatesDecide(args []string) {
 // must check unknown and refuse before running any query -- see
 // `case "knowledge":` in main.
 func parseKnowledgeArgs(args []string) (includePrivate, asJSON bool, rest []string, unknown string) {
+	includePrivate, asJSON, _, rest, unknown = parseKnowledgeQueryArgs(args)
+	return includePrivate, asJSON, rest, unknown
+}
+
+// parseKnowledgeQueryArgs is parseKnowledgeArgs plus --semantic
+// (agent-estate#1255) -- kept as a separate function, rather than adding a
+// fifth return value to parseKnowledgeArgs itself, because `get` has no
+// ranking concept at all: passing --semantic to `estate knowledge get`
+// must still read as an unrecognised flag for that subcommand, which is
+// exactly what calling the narrower parseKnowledgeArgs there continues to
+// give it.
+func parseKnowledgeQueryArgs(args []string) (includePrivate, asJSON, semantic bool, rest []string, unknown string) {
 	for _, a := range args {
 		switch {
 		case a == "--private":
 			includePrivate = true
 		case a == "--json":
 			asJSON = true
+		case a == "--semantic":
+			semantic = true
 		case strings.HasPrefix(a, "--"):
 			if unknown == "" {
 				unknown = a
@@ -1471,7 +1515,61 @@ func parseKnowledgeArgs(args []string) (includePrivate, asJSON bool, rest []stri
 			rest = append(rest, a)
 		}
 	}
-	return includePrivate, asJSON, rest, unknown
+	return includePrivate, asJSON, semantic, rest, unknown
+}
+
+// semanticQueryTimeout bounds the ONE network call --semantic adds to a
+// query: embedding the question text. Deliberately short -- everything
+// corpus-sized already happened offline, via `estate knowledge
+// embeddings` -- so a stalled local server costs a query at most this
+// long before falling back to BM25, never an indefinite hang.
+const semanticQueryTimeout = 10 * time.Second
+
+// semanticEmbeddingConfig reads the same ESTATE_EMBEDDING_ENDPOINT/
+// ESTATE_EMBEDDING_MODEL env vars the opt-in
+// TestSemanticCeilingExperiment measurement uses (internal/knowledge),
+// so a private index prepared for that measurement and one prepared for
+// real --semantic queries name the same server and model without a
+// caller having to remember two different variable names for the same
+// concept.
+func semanticEmbeddingConfig() embedding.Config {
+	cfg := embedding.NewConfig()
+	if v := os.Getenv("ESTATE_EMBEDDING_ENDPOINT"); v != "" {
+		cfg.Endpoint = strings.TrimSuffix(v, "/")
+	}
+	if v := os.Getenv("ESTATE_EMBEDDING_MODEL"); v != "" {
+		cfg.Model = v
+	}
+	return cfg
+}
+
+// buildSemanticReranker is the CLI's only bridge between --semantic and
+// internal/embedding. It never fails the query itself: any problem
+// (missing cache, stale cache, model mismatch, unreachable server) is
+// returned as a plain string reason and a nil RerankFunc, which
+// QueryWithRanking treats exactly like Query -- BM25, unchanged -- and the
+// caller above folds the reason into RankingFallbackReason for disclosure.
+func buildSemanticReranker(indexPath string) (knowledge.RerankFunc, string) {
+	cfg := semanticEmbeddingConfig()
+	client, err := embedding.NewClient(cfg)
+	if err != nil {
+		return nil, "could not build embedding client: " + err.Error()
+	}
+	cache, err := embedding.LoadOrNil(embedding.CachePath(indexPath), indexPath, cfg.Model)
+	if err != nil {
+		return nil, err.Error()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), semanticQueryTimeout)
+	rerank := embedding.NewReranker(ctx, cache, client)
+	// cancel releases the timer the instant the one rerank call this
+	// query will ever make has returned -- wrapping rather than deferring
+	// here, since this function returns before that call happens; a bare
+	// defer in buildSemanticReranker itself would cancel the context
+	// before the returned RerankFunc ever got to use it.
+	return func(question string, candidates []knowledge.RerankCandidate) ([]string, error) {
+		defer cancel()
+		return rerank(question, candidates)
+	}, ""
 }
 
 // printKnowledgeQueryJSON renders a knowledge.QueryResult as JSON on
@@ -2238,13 +2336,13 @@ func main() {
 
 	case "knowledge":
 		if len(os.Args) > 2 && os.Args[2] == "query" {
-			includePrivate, asJSON, rest, unknown := parseKnowledgeArgs(os.Args[3:])
+			includePrivate, asJSON, semantic, rest, unknown := parseKnowledgeQueryArgs(os.Args[3:])
 			if unknown != "" {
-				fmt.Fprintf(os.Stderr, "estate: unrecognised flag %q for knowledge query -- valid: --private, --json\n", unknown)
+				fmt.Fprintf(os.Stderr, "estate: unrecognised flag %q for knowledge query -- valid: --private, --json, --semantic\n", unknown)
 				os.Exit(2)
 			}
 			if len(rest) == 0 {
-				fmt.Fprintln(os.Stderr, "usage: estate knowledge query [--private] [--json] <question>")
+				fmt.Fprintln(os.Stderr, "usage: estate knowledge query [--private] [--json] [--semantic] <question>")
 				os.Exit(2)
 			}
 			out, err := knowledge.DefaultOutputPath()
@@ -2253,7 +2351,25 @@ func main() {
 				os.Exit(2)
 			}
 			question := strings.Join(rest, " ")
-			qr := knowledge.Query(out, question, 0, includePrivate)
+			var qr knowledge.QueryResult
+			if semantic {
+				// agent-estate#1255: --semantic is the only thing that ever
+				// wires a non-nil reranker. Absent it, this is byte-identical
+				// to the plain knowledge.Query call below -- BM25 only. A
+				// reranker that cannot be built at all (no cache, wrong
+				// model, unreachable server) is reported the same way a
+				// reranker that ran and was rejected is: RankingFallbackReason
+				// set, RankingMethod left "bm25", never a hard failure of the
+				// query itself -- semantic ranking is additive, never a new
+				// way for a query to fail outright.
+				rerank, buildErr := buildSemanticReranker(out)
+				qr = knowledge.QueryWithRanking(out, question, 0, includePrivate, rerank)
+				if buildErr != "" && qr.RankingFallbackReason == "" {
+					qr.RankingFallbackReason = buildErr
+				}
+			} else {
+				qr = knowledge.Query(out, question, 0, includePrivate)
+			}
 			// agent-estate#1080: fold #1047's staleness comparison into
 			// Coverage itself, not just the prose printIndexFreshness
 			// prints below -- a machine caller reading only Coverage must
@@ -2358,6 +2474,39 @@ func main() {
 			return
 		}
 
+		if len(os.Args) > 2 && os.Args[2] == "embeddings" {
+			// agent-estate#1255: prepares the local semantic reranker's own
+			// cache EXPLICITLY, never as a side effect of a query. Reads the
+			// compiled index (never writes it -- PrepareCache only writes
+			// the sidecar at embedding.CachePath), embeds every item once
+			// against the configured local model, and writes a versioned
+			// cache next to it. `knowledge query --semantic` then reads that
+			// cache; it never embeds the corpus itself.
+			out, err := knowledge.DefaultOutputPath()
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "estate:", err)
+				os.Exit(2)
+			}
+			cfg := semanticEmbeddingConfig()
+			fmt.Printf("embedding items in %s against %s (model %s)...\n", out, cfg.Endpoint, cfg.Model)
+			// Generous relative to semanticQueryTimeout on purpose: this is
+			// an explicit, one-time bulk preparation step over potentially
+			// thousands of items, not a query-time bound -- #1344's own
+			// measurement took ~2.5 minutes over ~7,700 items on this
+			// model; 30 minutes leaves headroom for a slower host or a
+			// larger corpus without inventing a number nobody asked for.
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+			defer cancel()
+			n, err := embedding.PrepareCache(ctx, out, cfg)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "estate:", err)
+				os.Exit(1)
+			}
+			fmt.Printf("%d item(s) embedded -- cache written to %s\n", n, embedding.CachePath(out))
+			fmt.Println("the compiled index itself was only read, never written -- this added a sidecar file, nothing else")
+			return
+		}
+
 		// agent-estate#1061 Finding 3: any other os.Args[2] is a typo, not a
 		// request to regenerate. A bare `estate knowledge` (os.Args[2]
 		// absent) still falls through to generation below -- that is the
@@ -2388,7 +2537,7 @@ func main() {
 			case "--allow-shared-write":
 				allowSharedWrite = true
 			default:
-				fmt.Fprintf(os.Stderr, "estate: unrecognised knowledge subcommand %q -- valid: query, get, --allow-coverage-loss, --allow-shared-write, or no subcommand to regenerate\n", a)
+				fmt.Fprintf(os.Stderr, "estate: unrecognised knowledge subcommand %q -- valid: query, get, embeddings, --allow-coverage-loss, --allow-shared-write, or no subcommand to regenerate\n", a)
 				os.Exit(2)
 			}
 		}
