@@ -60,4 +60,25 @@ Every check must pass. **Paste the output.** If anything is red:
 - The constraints block: sources read-only including `touch`; never regenerate
   the shared knowledge index; do not run `estate vault-view` unless the task is
   a vault write; `standinglaw.go` carries the #1286 dispatch-fatal pin.
+4. **Never copy a hash, count, or SHA from another brief -- and never read one
+   out of a checkout you have not confirmed is current.** Read it from the file
+   it lives in, on `origin/main`, and paste the command you ran.
+
+   The worked example is the Director getting this exactly backwards on
+   2026-09-10. It read the standing-law `HashPrefix` as `ecf40670309d` from its
+   own working checkout, declared the `26d4a45ea2a7` sitting in 24 briefs
+   stale, and "corrected" two of those briefs and a handoff. The checkout was
+   **50 commits behind origin/main**. `26d4a45ea2a7` was the live value the
+   whole time; `ecf40670309d` is two re-pins old (`a255964bbdcf` ->
+   `ecf40670309d` -> `26d4a45ea2a7`, per `standinglaw.go`'s own comment). A
+   stale checkout does not announce itself: the file parses, the test passes,
+   the value looks authoritative.
+
+       git fetch origin && git rev-list --count HEAD..origin/main   # must be 0
+       git show origin/main:src/estate/internal/corpus/standinglaw.go | grep 'HashPrefix:'
+
+   Grepping `HashPrefix` across a tree also returns a test fixture
+   (`deadbeefdead`) first, and the file's comments name three historical
+   values. Only the single `HashPrefix:` assignment on `origin/main` is live,
+   and getting it wrong hands a lane a dispatch-fatal false premise.
 - `go build ./src/estate/...` — **not** `./...`.
