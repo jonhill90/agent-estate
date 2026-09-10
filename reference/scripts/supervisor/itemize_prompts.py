@@ -273,6 +273,58 @@ NOISE_PATTERNS = (
      "project-instructions injection block (AGENTS.md/CLAUDE.md/skill-router turn opener), not typed"),
     (re.compile(r"^⏺"),
      "agent tool-output prefix (Claude Code's own assistant-turn bullet, U+23FA), captured verbatim, not typed"),
+    # agent-estate#1351: #1349's own review read all 19 unanchored `⏺`
+    # occurrences by hand and found up to 8 of them are themselves capture
+    # artifacts that happen to start with a DIFFERENT marker than `⏺` --
+    # the same class `^⏺` exists to catch, just not the same glyph. Three
+    # more anchored/near-anchored shapes, each re-measured directly against
+    # the live 4,542-prompt unjudged backlog before being added (2026-09-10):
+    #
+    #   - Bash( -- a captured tool-call transcript, Claude Code's own
+    #     terminal rendering of a Bash tool invocation, always as the very
+    #     first thing in a captured block. 2 of the unjudged 19 start this
+    #     way (e.g. "Bash(gh pr create --title ...)"). Anchored at position
+    #     0 for the identical reason `^⏺` is: unanchored, this would also
+    #     match a human prompt that pastes a `Bash(...)` line mid-message
+    #     while asking a real question about it -- see the anchor-regression
+    #     test below for the exact corpus row (id 3500e830...) that proves
+    #     the anchor is load-bearing here, not decorative.
+    #   - Conversation compacted -- Claude Code's own auto-compact banner,
+    #     captured verbatim in place of anything Jon typed. It ships in two
+    #     literal forms found in the corpus ("Conversation compacted · ctrl+o
+    #     for history" and "✻ Conversation compacted (ctrl+o for history)"),
+    #     hence the optional leading "✻" -- both are fixed harness chrome,
+    #     never something a real prompt says in either wording. 2 of the
+    #     unjudged 19 start this way. The human-authored row that also
+    #     CONTAINS the "✻ Conversation compacted (ctrl+o..." string
+    #     mid-message (after genuine framing) is confirmed to stay
+    #     unmatched by the anchor -- match count holds at 2, not 3.
+    #   - Background command "<name>" completed (exit code -- the harness's
+    #     own background-task-completion notice (the same shape
+    #     <task-notification>'s <summary> tag already carries when a
+    #     backgrounded command finishes). Deliberately left UNANCHORED, same
+    #     reasoning as the existing <task-notification> NOISE_MARKERS entry
+    #     above: it is fixed harness-emitted phrasing that shows up
+    #     mid-transcript (after other agent output, e.g. inside one of the
+    #     "report document" endings #1349's reviewer found), never as
+    #     something a human types about their OWN background command in
+    #     this exact templated wording. 11 of the unjudged backlog match
+    #     (3 of #1349's original 19, plus 8 more the wider corpus sweep
+    #     turned up outside that sample); 8 further whole-corpus matches are
+    #     <task-notification> rows already dropped by the marker above, so
+    #     they cost nothing new either way.
+    #
+    # False-positive check for all three (agent-estate#1351's own
+    # requirement): zero matches against the 2,197 prompts already carrying
+    # a real (weight=hard or weight=preference) item, and zero against every
+    # prompt carrying any non-dropped item -- checked directly against the
+    # live corpus, not assumed.
+    (re.compile(r"^\s*Bash\("),
+     "captured Bash tool-call transcript (Claude Code's own rendering), not typed"),
+    (re.compile(r"^\s*✻?\s*Conversation compacted"),
+     "Claude Code auto-compact banner, captured verbatim, not typed"),
+    (re.compile(r"Background command \"[^\"]*\" completed \(exit code"),
+     "harness background-command-completion notice, not typed"),
 )
 
 

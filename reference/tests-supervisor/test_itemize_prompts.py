@@ -731,5 +731,101 @@ class SecondTailNoisePatternsTests(unittest.TestCase):
         self.assertEqual(item["weight"], "retracted")
 
 
+class AgentOutputCaptureArtifactTests(unittest.TestCase):
+    """agent-estate#1351: #1349's own reviewer read all 19 unanchored `⏺`
+    occurrences the 138-match `^⏺` anchor left behind and found up to 8 are
+    themselves capture artifacts, just starting with a different marker.
+    Three more shapes, each re-measured directly against the live
+    4,542-prompt unjudged backlog before being added (2026-09-10): `Bash(`
+    (2 unjudged matches), `Conversation compacted` (2, covering both literal
+    forms the corpus carries), and the unanchored `Background command "..."
+    completed (exit code` harness notice (11). Zero of the 2,197 prompts
+    already carrying a real (weight=hard or weight=preference) item match
+    any of the three -- the false-positive check this issue's brief says is
+    the one that matters. Same two-directional discipline as every class
+    above: a match case and a plain-language non-match case per pattern."""
+
+    def test_bash_tool_call_transcript_is_caught(self):
+        text = 'Bash(gh pr create --title "fix: replace curl with container-native readiness check")\n  ⎿  done'
+        self.assertIsNotNone(itemize_prompts.noise_reason(text))
+
+    def test_a_real_question_about_a_bash_command_is_not_caught(self):
+        text = "Can you run Bash(ls -la) for me and tell me what's in that directory?"
+        self.assertIsNone(itemize_prompts.noise_reason(text))
+
+    def test_anchor_regression_bash_paste_mid_message_agent_estate_1351(self):
+        # The exact corpus row (id 3500e830...) #1351's own investigation
+        # found: genuine human framing, THEN a pasted `Bash(...)` transcript
+        # line mid-message. Unanchored, this would match; the anchor is what
+        # keeps it None, same shape as the `^⏺` anchor regression above.
+        text = (
+            "help me fix this for good claude said this but i want it fixed "
+            "not a tmp dir workaround\n\n⏺ Bash(gh pr create --title x)\n  ⎿  done"
+        )
+        self.assertIsNone(itemize_prompts.noise_reason(text))
+
+    def test_conversation_compacted_banner_is_caught(self):
+        text = "Conversation compacted · ctrl+o for history\n═══════════════════════"
+        self.assertIsNotNone(itemize_prompts.noise_reason(text))
+
+    def test_conversation_compacted_banner_alternate_form_is_caught(self):
+        # The corpus carries a second literal form with a leading "✻" and a
+        # parenthetical rather than a middle-dot -- both are fixed harness
+        # chrome, never a real prompt's own wording.
+        text = "✻ Conversation compacted (ctrl+o for history)\n\n  ⎿  Read src/foo.ts"
+        self.assertIsNotNone(itemize_prompts.noise_reason(text))
+
+    def test_a_real_message_about_compaction_is_not_caught(self):
+        text = "i am very mad at claude code. why did it compact our conversation without asking"
+        self.assertIsNone(itemize_prompts.noise_reason(text))
+
+    def test_anchor_regression_compacted_banner_mid_message_is_not_caught(self):
+        # A human row the corpus carries: genuine framing, THEN the banner
+        # text quoted mid-message -- must stay None, proving the anchor
+        # (not just the literal) is what does the work.
+        text = (
+            "i am very made at claude code. Tell it why its fucking stupid\n\n\n"
+            "✻ Conversation compacted (ctrl+o for history)\n\n  ⎿  some transcript"
+        )
+        self.assertIsNone(itemize_prompts.noise_reason(text))
+
+    def test_background_command_completion_notice_is_caught(self):
+        text = (
+            "VPS Runtime Verification Evidence — V1 through V8\n  ┌─────┬──────┐\n"
+            "...\n⏺ Background command \"Wait for full test suite\" completed (exit code 0)"
+        )
+        self.assertIsNotNone(itemize_prompts.noise_reason(text))
+
+    def test_background_command_completion_notice_is_caught_regardless_of_command_name(self):
+        text = 'Background command "npm run dev" completed (exit code 0)'
+        self.assertIsNotNone(itemize_prompts.noise_reason(text))
+
+    def test_a_real_message_about_a_background_command_is_not_caught(self):
+        # Plausible hand-typed text discussing the same topic in plain
+        # language, without the harness's own fixed quote-and-exit-code
+        # template -- must stay None.
+        text = "My background command finished with exit code 1, any idea why it failed?"
+        self.assertIsNone(itemize_prompts.noise_reason(text))
+
+    def test_drop_noise_on_each_agent_output_capture_shape_is_idempotent(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        ledger = Ledger(tmp.name, clock=lambda: 1_000)
+        text = 'Bash(cd /repo && npm run dev 2>&1)\n  ⎿  done'
+        ledger.record_prompt("p1", at=1_000, context="ctx", text_raw=text)
+
+        first = itemize_prompts.drop_noise(ledger)
+        second = itemize_prompts.drop_noise(ledger)
+        self.assertEqual((1, 0, 0), first)
+        self.assertEqual((0, 0, 0), second)
+
+        item = ledger.get_item(itemize_prompts._item_id(
+            "p1", 0, f"noise:{itemize_prompts.noise_reason(text)}"))
+        self.assertIsNotNone(item)
+        self.assertEqual(item["status"], "dropped")
+        self.assertEqual(item["kind"], "thought")
+        self.assertEqual(item["weight"], "retracted")
+
+
 if __name__ == "__main__":
     unittest.main()
