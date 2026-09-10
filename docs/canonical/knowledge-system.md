@@ -331,6 +331,29 @@ existing one.
 `coverage.reasons` always names which source (if any) and why, whenever
 `coverage.state` is not `complete`.
 
+**Measured (agent-estate#1171): `coverage.state` barely varies per question,
+and that is a property of this estate's data, not a bug.** Run against a
+fresh private index, all 59 golden-set questions, public and `--private`:
+`state` took exactly two values — `mixed` (58/59 public) and `unknown` (1/59
+public, 59/59 private, private-mode's only value that day). Three of the
+nine causes above are the same for every question asked against one index
+snapshot: `unknown` (github-stars, standingly — no local file ever exists to
+check), and, once the index has aged at all, `stale`/`binary_mismatch`
+(properties of *when* the index was built and by which commit, re-evaluated
+identically on every query until the index is rebuilt). Only `limited`
+(private material withheld) is a fact about *this specific question* — and
+it duplicates, exactly (verified 59/59 on this measurement, and 12/12
+independently on agent-estate#1170), the always-present, exact integer
+`withheld_private` already on every `QueryResult`. **If you want to know
+whether THIS question's answer is complete, check `withheld_private` (>0
+means rerun with `--private`) — do not expect `coverage.state`/`reasons` to
+discriminate between questions; expect them to discriminate between index
+snapshots.** Each state is still individually correct and still worth
+reading once per index build (a genuinely `degraded` or `source_missing`
+finding is real and does not show up in `withheld_private` at all) — the
+finding is about per-*question* variation specifically, not about whether
+the field is honest.
+
 ## What does the `contradictions` field mean, and what should I do about it?
 
 `QueryResult` carries a `contradictions` field **beside** `coverage`, never
