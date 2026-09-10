@@ -192,6 +192,17 @@ NOISE_MARKERS = (
     # (see the pi_transport/adapter task-notification renderer), so it
     # belongs here as a plain substring rather than in NOISE_PATTERNS below.
     ("<task-notification>", "harness task-notification block (backgrounded tool-call result), not typed"),
+    # agent-estate#705, second pass: three more literal harness/system tags,
+    # measured against the live 4,542-prompt unjudged backlog (issue
+    # comment 2026-09-10) and confirmed here, independently, before adding
+    # them -- each appears ONLY at position 0 of every matching text_raw
+    # row (never mid-message), so an unanchored substring is exactly as
+    # safe as the existing <task-notification> entry above, and zero of
+    # the 4,093 prompts already carrying a real (hard/preference) item
+    # match any of the three.
+    ("<turn_aborted>", "harness turn-aborted notice (interrupted-turn boilerplate), not typed"),
+    ("<environment_context>", "harness environment-context block (cwd/sandbox/approval-policy report), not typed"),
+    ("<recommended_plugins>", "harness recommended-plugins block (unused-plugin suggestion list), not typed"),
 )
 
 
@@ -231,6 +242,37 @@ NOISE_PATTERNS = (
      "dispatcher CI-poll check (director-loop.sh gh-pr-checks template, PR number varies)"),
     (re.compile(r"^\s*Read /private/tmp/\S+ and decide\."),
      "director-tick brief pointer to a /private/tmp/ scratch file (filename varies)"),
+    # agent-estate#705, second pass, patterns 4 and 5 of 5 -- these two
+    # need a regex, not a NOISE_MARKERS literal, because the fixed part of
+    # each shape is not a single unvarying string:
+    #
+    #   - Project-instructions injection: a markdown "# <file> instructions
+    #     [for <path>]" header line, a blank line, then the literal
+    #     <INSTRUCTIONS> tag. The header's file name and path both vary
+    #     (AGENTS.md/CLAUDE.md, and every project's own path); measured
+    #     against all 334 unjudged prompts carrying the <INSTRUCTIONS> tag,
+    #     this exact shape -- "^#[^\n]*\n\n<INSTRUCTIONS>" -- matches every
+    #     one of them, including the header-less "# AGENTS.md instructions"
+    #     variant some projects' skill routers emit. Anchored at the very
+    #     start: this is always how the harness opens a fresh session's
+    #     project-instructions turn, never something a real prompt merely
+    #     mentions partway through.
+    #   - Agent tool-output prefix ("⏺", U+23FA): Claude Code's own
+    #     terminal renders assistant tool-call/output blocks with this
+    #     bullet. Measured directly: it appears 157 times anywhere in the
+    #     unjudged backlog, but only 138 of those are AT THE START of
+    #     text_raw -- the other 19 are a real, human-authored prompt that
+    #     happens to paste or quote terminal output containing the glyph
+    #     mid-message (e.g. "how come claude did this... ❯ transcribe this
+    #     video..."), which must NOT be dropped. Anchoring to position 0 is
+    #     what separates "this whole prompt IS captured agent output" from
+    #     "a human quoted some agent output as part of a real question" --
+    #     the exact false-positive shape this issue's own brief warns
+    #     about, confirmed here by direct measurement, not assumed.
+    (re.compile(r"^#[^\n]*\n\n<INSTRUCTIONS>"),
+     "project-instructions injection block (AGENTS.md/CLAUDE.md/skill-router turn opener), not typed"),
+    (re.compile(r"^⏺"),
+     "agent tool-output prefix (Claude Code's own assistant-turn bullet, U+23FA), captured verbatim, not typed"),
 )
 
 
