@@ -222,10 +222,41 @@ type Verdict struct {
 	// escalated once and is now waiting; this is that difference. Zero when
 	// Escalated is false.
 	EscalationCount int
+	// Stale is true when the newest entry is older than the log's own
+	// derived cadence allows -- see CheckWithStaleness. When Stale is true,
+	// Stalled is always false and Reason explains the age, never a window
+	// judgement: agent-estate#1358 measured that Check's verdict is a pure
+	// function of the last Window entries with no reference to their age,
+	// so a log that has stopped being appended to freezes at whatever it
+	// last reported -- a dead loop and a healthy one produced identical
+	// output. This is the same typed-third-state move Unverifiable already
+	// makes for one artifact CheckWithResolver could not resolve
+	// (agent-estate#931: "could not tell" must never collapse into
+	// "clean"), applied here to the window's age instead: it must also
+	// never collapse into "definitely stalled" -- both "moving" and
+	// "stalled" are claims about a window this check can no longer vouch
+	// for once it is this old, and it says so instead of guessing either
+	// way.
+	Stale bool
 }
 
 // Window is how many consecutive entries the stop condition looks at.
 const Window = 3
+
+// StaleMargin is how many times the largest gap the log has ever recorded
+// AND recovered from (another entry followed it) a fresh gap must exceed
+// before the record is too old for CheckWithStaleness to vouch for. See
+// that function's doc comment for the reasoning and the live data --
+// docs/tick-log.jsonl's own recorded gap_seconds, not a number picked in
+// advance -- that chose 2 rather than something else.
+const StaleMargin = 2
+
+// MinStaleThreshold floors the derived staleness threshold at the loop's own
+// documented normal interval (docs/canonical/director-loop.md's "Interval" table:
+// 3 minutes while advancing a phase item) -- see staleThreshold's own doc
+// comment for why StaleMargin times the largest recorded gap is not, by
+// itself, a safe threshold when that gap is small.
+const MinStaleThreshold = 3 * time.Minute
 
 // Resolution is the answer resolving one artifact token gives.
 //
@@ -878,6 +909,191 @@ func CheckWithEscalation(tickPath, escalationPath string, resolve Resolve) (Verd
 		v.Reason = fmt.Sprintf("%s -- escalated to %s at %s", v.Reason, freshWho, freshest.UTC().Format(time.RFC3339))
 	}
 	return v, nil
+}
+
+// tickHistory is what CheckWithStaleness needs from the whole log, not just
+// its newest line: every recorded Entry.GapSeconds (to derive the loop's own
+// normal cadence) and the newest entry's own timestamp (to measure how old
+// it is against now).
+type tickHistory struct {
+	newestAt time.Time
+	gaps     []int64
+}
+
+// readTickHistory reads path once and returns its gap history and newest
+// timestamp. ok is false when the log has no entries at all -- the same
+// "not a stall, a loop that has not ticked" shape checkImpl already takes
+// for a missing or empty log, not an error -- and also false (never an
+// error) when the newest entry's own `at` is missing or unparsable:
+// checkImpl's window logic has never depended on `at` being readable, so a
+// garbage timestamp on one entry must not stop CheckWithStaleness from
+// deferring to it, only stop staleness specifically from being assessed.
+func readTickHistory(path string) (tickHistory, bool, error) {
+	f, err := os.Open(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return tickHistory{}, false, nil
+	}
+	if err != nil {
+		return tickHistory{}, false, fmt.Errorf("tick: open %s: %w", path, err)
+	}
+	defer f.Close()
+
+	var (
+		hist         tickHistory
+		newestAtText string
+		found        bool
+	)
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for n := 1; sc.Scan(); n++ {
+		text := strings.TrimSpace(sc.Text())
+		if text == "" {
+			continue
+		}
+		var e struct {
+			At         string `json:"at"`
+			GapSeconds *int64 `json:"gap_seconds"`
+		}
+		if err := json.Unmarshal([]byte(text), &e); err != nil {
+			return tickHistory{}, false, fmt.Errorf("tick: %s line %d is not readable: %w", path, n, err)
+		}
+		if e.GapSeconds != nil {
+			hist.gaps = append(hist.gaps, *e.GapSeconds)
+		}
+		newestAtText = e.At
+		found = true
+	}
+	if err := sc.Err(); err != nil {
+		return tickHistory{}, false, fmt.Errorf("tick: read %s: %w", path, err)
+	}
+	if !found {
+		return tickHistory{}, false, nil
+	}
+	if newestAtText == "" {
+		// checkImpl's own parsed struct never reads `at` at all -- the
+		// window's moving/stalled verdict has never depended on it being
+		// present or parseable. Staleness specifically cannot be assessed
+		// without it, but that must not become a harder failure than the
+		// window logic itself has ever had: fall through with ok=false
+		// (no error) so CheckWithStaleness defers to CheckWithEscalation,
+		// which the existing "newest entry age: unknown" disclosure in
+		// `tick check` already surfaces honestly on its own.
+		return tickHistory{}, false, nil
+	}
+	at, perr := time.Parse(time.RFC3339, newestAtText)
+	if perr != nil {
+		// Same reasoning: an unparsable timestamp on the newest entry
+		// means "cannot assess staleness", not "cannot check the log at
+		// all". agent-estate#1358 must not regress the pre-existing
+		// TestTickCheckNewestEntryAgeHonestWhenUnparsable guarantee that
+		// `tick check` still produces a verdict (and its own honest
+		// "unknown" age disclosure) when one entry's `at` is garbage.
+		return tickHistory{}, false, nil
+	}
+	hist.newestAt = at
+	return hist, true, nil
+}
+
+// staleThreshold derives how old the newest entry may be before the log can
+// no longer vouch for its own verdict, from gaps the log has ALREADY
+// recorded and recovered from -- never a constant picked in advance.
+//
+// WHY THE MAX GAP, NOT THE MEDIAN. docs/tick-log.jsonl's own recovered
+// history (measured 2026-09-10, 10 entries carry gap_seconds): eight tight
+// ticks of 64-341s (a ~3-minute loop, matching docs/canonical/director-loop.md's
+// stated cadence) and two much longer gaps, 71783s (~19.9h) and 112931s
+// (~31.4h) -- both real, both followed by more entries, i.e. the loop
+// deliberately widened its own interval (docs/canonical/director-loop.md's own
+// "blocked on operator review... widen" state) and then resumed. A
+// median-based threshold (~182s) would flag both of those genuine, already-
+// survived widenings as stale; the largest gap the log has actually
+// recovered from is the honest boundary of "cadence this log has already
+// proven normal for itself." StaleMargin doubles that boundary as a safety
+// margin against a single widening slightly longer than any seen before, and
+// still catches #1358's own measured failure (188+ hours) with a wide
+// margin: 2x112931s is ~62.8h, and the measured gap was 188h -- three times
+// past the threshold, not a near miss.
+//
+// ok is false when gaps is empty: a log with no recorded gap_seconds at all
+// (predates agent-estate#982, or has ticked fewer than twice) has no
+// historical cadence to derive a threshold from, and CheckWithStaleness
+// falls through to CheckWithEscalation unchanged rather than asserting a
+// claim the data cannot support -- the same "not enough history" shape
+// checkImpl's own len(entries) < Window branch already takes.
+//
+// FLOORED AT MinStaleThreshold. StaleMargin times the largest gap degenerates
+// toward zero when that gap itself is near-zero -- two entries written
+// within the same wall-clock second (this package's own tests do this
+// constantly; a real log could too, e.g. right after a migration) record
+// gap_seconds: 0, and 2*0 is a threshold that treats ANY elapsed time at all
+// as staleness. That is not evidence of anything; it is silence shorter than
+// the check's own dispatch overhead. Floored at docs/canonical/director-loop.md's
+// own documented normal interval (3 minutes) -- below that is not a claim
+// this log's history can make either way, since the loop is not documented
+// to tick faster than that regardless of what one gap happened to measure.
+func staleThreshold(gaps []int64) (threshold time.Duration, maxGapSeconds int64, ok bool) {
+	if len(gaps) == 0 {
+		return 0, 0, false
+	}
+	max := gaps[0]
+	for _, g := range gaps[1:] {
+		if g > max {
+			max = g
+		}
+	}
+	threshold = time.Duration(max) * time.Second * StaleMargin
+	if threshold < MinStaleThreshold {
+		threshold = MinStaleThreshold
+	}
+	return threshold, max, true
+}
+
+// CheckWithStaleness is CheckWithEscalation, plus a staleness gate ahead of
+// it: agent-estate#1358 measured that Check's verdict is a pure function of
+// the last Window entries with no reference to their age, so once the log
+// stops being appended to, the verdict freezes at whatever it last was -- a
+// dead loop and a healthy one produce identical output.
+//
+// now is the reference time staleness is measured against, a parameter
+// rather than time.Now() read inside this function, so a test can pin it
+// deterministically instead of racing the real clock.
+//
+// When the newest entry is older than staleThreshold allows, the verdict is
+// Stale and this returns without ever calling checkImpl: neither Stalled
+// nor "moving" (Stalled==false) may be asserted from a window this old --
+// see Verdict.Stale's own doc comment for why this is the same fail-closed
+// move Unverifiable already makes, applied to the window's age instead of
+// one artifact's resolution. When staleness cannot be derived (no recorded
+// gaps) or the newest entry is within threshold, this is exactly
+// CheckWithEscalation -- no behaviour change for a log this check can
+// vouch for.
+//
+// AN OPEN QUESTION, DELIBERATELY NOT RESOLVED HERE: a loop that is
+// deliberately paused (docs/canonical/director-loop.md's "blocked on operator
+// review... widen") is indistinguishable, by age alone, from one that is
+// simply dead. Once the pause outlasts StaleMargin times anything this log
+// has seen before, this reports Stale where it used to report "moving" --
+// see this change's own PR body for the argument that this is the correct
+// behaviour, not a regression, and why.
+func CheckWithStaleness(tickPath, escalationPath string, resolve Resolve, now time.Time) (Verdict, error) {
+	hist, ok, err := readTickHistory(tickPath)
+	if err != nil {
+		return Verdict{}, err
+	}
+	if ok {
+		if threshold, maxGapSeconds, derivable := staleThreshold(hist.gaps); derivable {
+			age := now.Sub(hist.newestAt)
+			if age > threshold {
+				return Verdict{
+					Stale: true,
+					Reason: fmt.Sprintf(
+						"newest entry recorded %s ago (%s), more than %dx the largest gap this log has ever recorded and recovered from (%ds) -- neither moving nor stalled can be asserted from a window this old",
+						age.Round(time.Second), hist.newestAt.UTC().Format(time.RFC3339), StaleMargin, maxGapSeconds),
+				}, nil
+			}
+		}
+	}
+	return CheckWithEscalation(tickPath, escalationPath, resolve)
 }
 
 // lastTickEntry returns the most recently recorded tick's own timestamp,
