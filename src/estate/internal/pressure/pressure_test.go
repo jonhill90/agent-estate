@@ -283,21 +283,29 @@ func TestSwapLimitAloneRefusesWithItsOwnReason(t *testing.T) {
 
 // Arms the worktree ceiling alone. Kills the "ceiling never refuses" mutant --
 // the state in which the limit is defined, documented, and calls nothing.
+//
+// agent-estate#1017: this used to take a live worktreeCount() reading, then
+// assert a SECOND, independent live reading taken inside Check() equalled
+// it. Both readings are real host state, and other lanes create and sweep
+// dispatch worktrees on this host continuously -- the two calls a few lines
+// apart can legitimately disagree, which read as a flaky test asserting the
+// wiring was broken when the actual cause was one worktree appearing or
+// vanishing between them. Injecting a fixed count through CountWorktrees
+// (added for this) makes both sides of the comparison come from the same
+// value the test itself controls -- Check can no longer read anything but
+// what was injected, so there is no live host state left to race against,
+// and the assertion is unchanged in kind: Reading.Worktrees must still equal
+// what the ceiling actually counted, proving the wiring exactly as before.
 func TestWorktreeCeilingAloneRefusesWithItsOwnReason(t *testing.T) {
-	n, err := worktreeCount()
-	if err != nil {
-		t.Skipf("cannot count worktrees on this host (%v); Check turns that error into a refusal, which TestNeitherNewLimitRefusesWhenNotArmed would not mask", err)
-	}
-	if n < 1 {
-		t.Fatalf("git worktree list reported %d worktrees while running inside a checkout; the instrument is wrong", n)
-	}
+	const injected = 7 // arbitrary and unambiguous -- not 0, not 1, not a real host count
 
 	lim := neutralised()
-	lim.MaxWorktrees = 0 // the repo running this test has at least one
+	lim.MaxWorktrees = 0 // any count at all is at or above this
+	lim.CountWorktrees = func() (int, error) { return injected, nil }
 	v := Check(emptyLedger(t), lim)
 
 	if v.OK {
-		t.Fatalf("Check() allowed dispatch with %d worktrees against a ceiling of 0; the ceiling is not wired. reading=%+v", n, v.Reading)
+		t.Fatalf("Check() allowed dispatch with the worktree ceiling at 0; the ceiling is not wired. reading=%+v", v.Reading)
 	}
 	joined := strings.Join(v.Reasons, " ")
 	if !strings.Contains(joined, worktreeReason) {
@@ -306,8 +314,25 @@ func TestWorktreeCeilingAloneRefusesWithItsOwnReason(t *testing.T) {
 	if strings.Contains(joined, swapReason) {
 		t.Errorf("the ceiling's refusal is contaminated by the paging limit; the two are not independent: %v", v.Reasons)
 	}
-	if v.Reading.Worktrees != n {
-		t.Errorf("Check reported %d worktrees, worktreeCount() reports %d", v.Reading.Worktrees, n)
+	if v.Reading.Worktrees != injected {
+		t.Errorf("Check reported %d worktrees, want the injected %d -- Reading is not wired to CountWorktrees", v.Reading.Worktrees, injected)
+	}
+}
+
+// The real worktreeCount() -- CountWorktrees' nil default, exercised by
+// every production call site -- still gets a live, non-flaky check of its
+// own: it must return a real, non-negative count against this actual
+// checkout, or a clear error, never silently substitute a fixture value.
+// agent-estate#1017's fix moved the flaky EQUALITY assertion onto the
+// injected seam above; it must not also remove real coverage of the
+// default path that seam replaces in tests.
+func TestRealWorktreeCountReflectsThisCheckout(t *testing.T) {
+	n, err := worktreeCount()
+	if err != nil {
+		t.Skipf("cannot count worktrees on this host (%v); the fail-closed path is asserted by TestNeitherNewLimitRefusesWhenNotArmed", err)
+	}
+	if n < 1 {
+		t.Fatalf("git worktree list reported %d worktrees while running inside a checkout; the instrument is wrong", n)
 	}
 }
 
