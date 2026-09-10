@@ -633,3 +633,42 @@ func TestCategoriesSeparateWhatReasonMerges(t *testing.T) {
 		}
 	}
 }
+
+// TestHollowCorpseGetsItsOwnCategoryNotLumpedWithGenuineRefusals is
+// agent-estate#1337's own acceptance test: a record whose worktree has
+// been emptied out (isolate.ErrHollowCorpse -- the real dispatch root's
+// exact shape, all seven of them) must land in its own category, never
+// CategoryRefused -- and a record with a genuine refusal (real,
+// unrecoverable uncommitted content) must still land in CategoryRefused,
+// completely unaffected. FAILS before this fix: reportJudged's error
+// branch mapped every RemovalCheck error, ErrHollowCorpse included, to
+// CategoryRefused with no distinction at all -- confirmed by reverting
+// just the errors.As branch this fix adds and re-running this exact
+// test, which then reports "hollow: got category \"refused\", want
+// \"hollow corpse...\"".
+func TestHollowCorpseGetsItsOwnCategoryNotLumpedWithGenuineRefusals(t *testing.T) {
+	w := world{
+		"hollow": {err: &isolate.ErrHollowCorpse{Path: filepath.Join(root, "hollow"), FileCount: 0}},
+		"dirty":  {state: isolate.DirtyStateUnique, err: errors.New("isolate: .../dirty holds uncommitted work not present, byte-for-byte, in origin/main (real.go); refusing to remove it -- collect or commit it first")},
+	}
+	records := []ledger.Record{
+		rec("hollow", ledger.Complete),
+		rec("dirty", ledger.Complete),
+	}
+	results := Run(records, reportCfg(alive, w))
+
+	hollow := find(t, results, "hollow")
+	if hollow.Category != CategoryHollow {
+		t.Errorf("hollow: got category %q, want %q (reason: %s)", hollow.Category, CategoryHollow, hollow.Reason)
+	}
+	dirty := find(t, results, "dirty")
+	if dirty.Category != CategoryRefused {
+		t.Errorf("dirty: got category %q, want %q -- a genuine refusal must not be reclassified", dirty.Category, CategoryRefused)
+	}
+	if hollow.Category == dirty.Category {
+		t.Fatal("hollow corpse and genuine refusal collapsed into the same category")
+	}
+	if hollow.Removed || dirty.Removed {
+		t.Fatal("report mode must never set Removed -- it mutates nothing")
+	}
+}

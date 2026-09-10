@@ -564,6 +564,19 @@ func sweepConfig(root string, landed isolate.Landed, apply bool) sweep.Config {
 	cfg.Remove = func(rec ledger.Record) error {
 		corpse, rerr := isolate.ReattachAt(root, rec.Worktree, rec.Branch, rec.Base)
 		if rerr != nil {
+			// agent-estate#1337: a hollow corpse -- .git and every other
+			// file already gone, isolate.HollowCorpse's own zero-file
+			// requirement confirmed it -- has nothing left to protect.
+			// ReconcileHollowCorpse re-verifies immediately before acting
+			// (never trusting ReattachAt's judgement moments earlier) and
+			// removes the empty directory shell; it does not touch the
+			// parent repository's own stale worktree registration -- see
+			// that function's own doc comment for why that is a separate,
+			// explicit decision, not a side effect bundled in here.
+			var hollow *isolate.ErrHollowCorpse
+			if errors.As(rerr, &hollow) {
+				return isolate.ReconcileHollowCorpse(rec.Worktree)
+			}
 			return rerr
 		}
 		corpse.Landed = landed
@@ -589,6 +602,13 @@ type sweepSummary struct {
 	boundReached   int
 	refused        int
 	removed        int
+	// hollow: agent-estate#1337. Counted separately from refused for the
+	// same reason noWorktreePath already gets its own line rather than
+	// being folded into worktreeBearing by accident -- a category with no
+	// case here would silently vanish from every total below, the exact
+	// "a silent no is as unhelpful as a silent yes" defect agent-estate#1294
+	// already fixed once for the other three shapes.
+	hollow int
 }
 
 func summarizeSweep(results []sweep.Result) sweepSummary {
@@ -609,6 +629,8 @@ func summarizeSweep(results []sweep.Result) sweepSummary {
 			s.refused++
 		case sweep.CategoryRemoved:
 			s.removed++
+		case sweep.CategoryHollow:
+			s.hollow++
 		}
 	}
 	return s
@@ -625,7 +647,7 @@ func (s sweepSummary) report(apply bool) []string {
 	if !apply {
 		verb = "removable"
 	}
-	worktreeBearing := s.outsideRoot + s.alreadyGone + s.keptByPolicy + s.boundReached + s.refused + s.removed
+	worktreeBearing := s.outsideRoot + s.alreadyGone + s.keptByPolicy + s.boundReached + s.refused + s.removed + s.hollow
 	lines := []string{
 		// "the swept dispatch root", not "this checkout's own" --
 		// agent-estate#1294's --root can name a different one, and this
@@ -636,6 +658,21 @@ func (s sweepSummary) report(apply bool) []string {
 			"%d worktree-bearing record(s): %d %s, %d refused, %d bound-reached, %d kept by policy, %d outside the swept dispatch root, %d already gone",
 			worktreeBearing, s.removed, verb, s.refused, s.boundReached, s.keptByPolicy, s.outsideRoot, s.alreadyGone,
 		),
+	}
+	if s.hollow > 0 {
+		// agent-estate#1337: its own line, named for what it actually is
+		// -- content already gone, .git missing -- rather than silently
+		// merged into "refused" (which would read as real, unresolved
+		// uncommitted work) or "removed" (which would read as this run
+		// discarding something, when nothing survived to discard).
+		hverb := "would reconcile"
+		if apply {
+			hverb = "reconciled"
+		}
+		lines = append(lines, fmt.Sprintf(
+			"%d hollow corpse(s) %s -- content already gone (no .git, zero file(s)), only the record needed reconciling",
+			s.hollow, hverb,
+		))
 	}
 	if s.noWorktreePath > 0 {
 		lines = append(lines, fmt.Sprintf(

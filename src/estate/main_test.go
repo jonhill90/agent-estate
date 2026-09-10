@@ -216,11 +216,15 @@ func TestSweepSummarySeparatesCategories(t *testing.T) {
 		{Record: ledger.Record{ID: "bound"}, Category: sweep.CategoryBoundReached, Reason: "bound reached"},
 		{Record: ledger.Record{ID: "refused"}, Category: sweep.CategoryRefused, Reason: "kept: refused"},
 		{Record: ledger.Record{ID: "removed"}, Category: sweep.CategoryRemoved, Removed: true, Reason: "removed: ..."},
+		// agent-estate#1337: a fifth shape, added to the same fixture this
+		// test already carries one of every OTHER shape in -- the same
+		// "nothing folds together" property must hold for this one too.
+		{Record: ledger.Record{ID: "hollow"}, Category: sweep.CategoryHollow, Reason: "would reconcile: content already gone"},
 	}
 
 	s := summarizeSweep(results)
 	if s.noWorktreePath != 1 || s.outsideRoot != 1 || s.alreadyGone != 1 || s.keptByPolicy != 1 ||
-		s.boundReached != 1 || s.refused != 1 || s.removed != 1 {
+		s.boundReached != 1 || s.refused != 1 || s.removed != 1 || s.hollow != 1 {
 		t.Fatalf("categories were not separated into their own counts: %+v", s)
 	}
 
@@ -232,6 +236,7 @@ func TestSweepSummarySeparatesCategories(t *testing.T) {
 		"1 kept by policy",
 		"1 outside the swept dispatch root",
 		"1 already gone",
+		"1 hollow corpse(s) reconciled",
 		"1 ledger record(s) have no worktree recorded",
 	} {
 		if !strings.Contains(joined, want) {

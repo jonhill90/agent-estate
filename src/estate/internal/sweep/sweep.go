@@ -50,6 +50,7 @@
 package sweep
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -183,6 +184,17 @@ const (
 	// RemovalCheck is not wired at all -- reported "would remove"
 	// unconditionally, the same as it always has).
 	CategoryRemoved
+	// CategoryHollow: the worktree directory still exists but has been
+	// emptied of every file, .git included -- isolate.HollowCorpse's own
+	// positive confirmation (agent-estate#1337). Distinct from
+	// CategoryRefused on purpose: nothing here needs collecting, because
+	// nothing here still exists to collect. Lumping it in with a genuine
+	// refusal is exactly the defect this category closes -- it reads
+	// identically to real uncommitted work, and unlike a genuine refusal
+	// (which can resolve once the turn commits, or origin gains the
+	// content), this shape never resolves on its own, so it would sit in
+	// CategoryRefused's bucket forever.
+	CategoryHollow
 )
 
 func (c Category) String() string {
@@ -201,6 +213,8 @@ func (c Category) String() string {
 		return "refused"
 	case CategoryRemoved:
 		return "removed"
+	case CategoryHollow:
+		return "hollow corpse -- content already gone, .git missing"
 	default:
 		return "unknown category"
 	}
@@ -354,6 +368,21 @@ func reportJudged(r Result, rec ledger.Record, cfg Config) Result {
 	}
 	state, err := cfg.RemovalCheck(rec)
 	if err != nil {
+		// agent-estate#1337: a hollow corpse is not a genuine refusal --
+		// isolate.HollowCorpse already positively confirmed nothing here
+		// needs collecting, so this must not read the same as "cannot
+		// tell" or "real content, not yet safe". CategoryHollow keeps it
+		// distinct rather than lumping it into the same bucket, which is
+		// exactly the miscategorization this issue is about: this shape
+		// never resolves the way a genuine refusal can (the turn
+		// committing, origin gaining the content), so it would sit in
+		// CategoryRefused forever otherwise.
+		var hollow *isolate.ErrHollowCorpse
+		if errors.As(err, &hollow) {
+			r.Category = CategoryHollow
+			r.Reason = fmt.Sprintf("would reconcile: %s -- %s", r.Reason, err)
+			return r
+		}
 		// CheckRemovable's error text already names the specific refusal
 		// -- it has several distinct shapes now (uncommitted-unique
 		// content, committed-but-not-on-origin-and-not-landed, cannot
