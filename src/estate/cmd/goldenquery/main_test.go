@@ -472,9 +472,9 @@ func TestBuildRatchetsMaxMissesArePinned(t *testing.T) {
 	none := &result{c: goldenset.Case{ID: "none-01", ExpectedSource: goldenset.SourceNone}, pass: true, exitCode: 1}
 	rs := buildRatchets(4, 12, 4, 12, 16, 17, 5, 5, 7, 7, 8, none)
 	want := map[string]int{
-		"natural-language stratum top-3, unscoped":                        8,
-		"natural-language stratum top-3, private scoped source:repo-docs": 8,
-		"retrieval score (private)":                                       1,
+		"natural-language stratum top-3, unscoped":                        12, // agent-estate#1333, was 8
+		"natural-language stratum top-3, private scoped source:repo-docs": 12, // agent-estate#1333, was 8
+		"retrieval score (private)":                                       5,  // agent-estate#1333, was 1
 		"publishable-reachable score":                                     0,
 		"github-stars stratum top-3":                                      1,
 		"github-stars stratum top-10":                                     1,
@@ -518,12 +518,17 @@ func TestBuildRatchetsNoneResultMustBeHitToPass(t *testing.T) {
 }
 
 func TestRatchetFailuresDetectsRegressionBelowFloor(t *testing.T) {
-	// natural-language top-3 drops from the recorded (post-agent-estate#1140)
-	// floor of 4/12 to 3/12 -- a genuine regression, not the known top-10
+	// natural-language top-3 drops from the recorded (post-agent-estate#1333)
+	// floor of 17/29 to 16/29 -- a genuine regression, not the known top-10
 	// drift this ratchet deliberately excludes, and not the one-time,
-	// already-accepted drop from 6 to 4 that #1140 itself produced.
+	// already-accepted drop that #1140 (and later #1333) themselves
+	// produced. Uses the current 29-case total (12 -- this test's value
+	// before #1333 -- can no longer demonstrate a failure at all now that
+	// nlTop3MaxMisses is 12: total-got<=12 holds even at got=0 when
+	// total=12, so a synthetic total this small can never cross the floor;
+	// see #1333's own PR body for why the total grew).
 	none := &result{c: goldenset.Case{ID: "none-01", ExpectedSource: goldenset.SourceNone}, pass: true, exitCode: 1}
-	rs := buildRatchets(3, 12, 4, 12, 16, 17, 5, 5, 7, 7, 8, none)
+	rs := buildRatchets(16, 29, 17, 29, 16, 17, 5, 5, 7, 7, 8, none)
 	failed := ratchetFailures(rs)
 	if len(failed) != 1 || failed[0].name != "natural-language stratum top-3, unscoped" {
 		t.Fatalf("ratchetFailures() = %+v, want exactly the unscoped top-3 ratchet failing", failed)
