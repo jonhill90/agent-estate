@@ -31,6 +31,7 @@ import (
 	"github.com/jonhill90/agent-estate/estate/internal/features"
 	"github.com/jonhill90/agent-estate/estate/internal/gate"
 	"github.com/jonhill90/agent-estate/estate/internal/harness"
+	"github.com/jonhill90/agent-estate/estate/internal/hookstatus"
 	"github.com/jonhill90/agent-estate/estate/internal/isolate"
 	"github.com/jonhill90/agent-estate/estate/internal/knowledge"
 	"github.com/jonhill90/agent-estate/estate/internal/ledger"
@@ -840,6 +841,23 @@ func usage() {
                                         agent-estate#1348 -- call this before every merge
                                         decision even while #1348 makes merge itself
                                         refuse everything (agent-estate#1379)
+  estate hook-status [checkout-dir] [--json]
+                                        agent-dotfiles#356: classifies every file under
+                                        a deployed hooks/ checkout (default
+                                        ~/source/repos/Personal/agent-dotfiles, override
+                                        ESTATE_HOOK_CHECKOUT) as current/stale/drifted/
+                                        absent against origin/main, and reports whether
+                                        each is wired in the live Claude settings.json
+                                        (default ~/.claude/settings.json, override
+                                        ESTATE_HOOK_SETTINGS) versus origin/main's own
+                                        settings fragment -- #357's shape (a file merged
+                                        upstream, never deployed, never wired) needs
+                                        both halves to be caught. DETECTION ONLY: never
+                                        fetches, pulls, tidies, or writes to the checkout
+                                        it inspects. Exit 0 = every file current and
+                                        correctly wired; exit 1 = something is stale,
+                                        drifted, absent, or mis-wired (see the printed
+                                        table); exit 2 = could not evaluate at all
   estate corpus-audit [n]               hard parameters least supported by your words
   estate provenance-review [--offset N] [--limit N] [--private] [--json]
                                         every live parameter next to the prompt it was
@@ -2738,6 +2756,75 @@ func main() {
 		}
 		fmt.Println(note)
 		if refuse {
+			os.Exit(1)
+		}
+
+	case "hook-status":
+		// agent-dotfiles#356: "nothing reports it." DETECTION ONLY --
+		// reads the deployed hook checkout and origin/main, classifies
+		// every file under hooks/, and reports. Never fetches, pulls,
+		// tidies, or writes to the checkout (internal/hookstatus's own
+		// doc comment states the same contract); deployment is a decision
+		// for Jon, not this command.
+		asJSON := false
+		checkoutDir := ""
+		for _, a := range os.Args[2:] {
+			switch {
+			case a == "--json":
+				asJSON = true
+			case strings.HasPrefix(a, "--"):
+				fmt.Fprintln(os.Stderr, "estate hook-status: unrecognised flag", a)
+				os.Exit(2)
+			default:
+				checkoutDir = a
+			}
+		}
+		if checkoutDir == "" {
+			checkoutDir, err = hookstatus.DefaultCheckoutDir()
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "estate:", err)
+				os.Exit(2)
+			}
+		}
+		settingsPath, err := hookstatus.DefaultSettingsPath()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "estate:", err)
+			os.Exit(2)
+		}
+		rep, err := hookstatus.Compute(checkoutDir, settingsPath, hookstatus.GH{})
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "estate: could not compute hook deployment status:", err)
+			os.Exit(2)
+		}
+		if asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			if err := enc.Encode(rep); err != nil {
+				fmt.Fprintln(os.Stderr, "estate:", err)
+				os.Exit(2)
+			}
+			break
+		}
+		clean := true
+		headShort := rep.HeadSHA
+		if len(headShort) > 12 {
+			headShort = headShort[:12]
+		}
+		fmt.Printf("%s @ %s (HEAD %s, pushed=%v)\n", rep.Repo, checkoutDir, headShort, rep.HeadPushed)
+		if rep.AheadByKnown {
+			fmt.Printf("origin/main is %d commit(s) ahead of HEAD\n", rep.AheadBy)
+		} else {
+			fmt.Println("commits-ahead: unknown --", rep.AheadByNote)
+		}
+		fmt.Println()
+		fmt.Printf("%-9s %-6s %-11s %s\n", "STATE", "WIRED", "SHOULD_WIRE", "PATH")
+		for _, f := range rep.Files {
+			if f.State != hookstatus.Current || f.Wired != f.ShouldWire {
+				clean = false
+			}
+			fmt.Printf("%-9s %-6v %-11v %s\n", f.State, f.Wired, f.ShouldWire, f.Path)
+		}
+		if !clean {
 			os.Exit(1)
 		}
 
