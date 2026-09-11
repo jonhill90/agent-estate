@@ -84,6 +84,30 @@ func TestVerifyCatchesWordSubstitution(t *testing.T) {
 	}
 }
 
+// PR #1405's own review found this: the fuzzy edit-distance fallback in
+// wordSurvives asked whether SOME word anywhere in the clean text sat
+// close enough to a given raw word, not whether it was a variant of THAT
+// specific word -- so two short, unrelated real words a couple of edits
+// apart passed as "the same word, spelling-corrected". "ship"/"skip" is
+// not an edge case: it is a genuine, meaning-INVERTING substitution that
+// the gate's own doc comment claims to catch ("a word... substituted for a
+// different one") and did not. Fails against the code this fix pass
+// starts from; must pass after it, and stay pinned so the gap cannot
+// silently reopen if the fuzzy fallback (or anything shaped like it) is
+// ever reintroduced.
+func TestVerifyCatchesShipSkipMeaningInversion(t *testing.T) {
+	for _, c := range []struct{ raw, clean, label string }{
+		{"ship the release tonight", "skip the release tonight", "ship/skip -- opposite instructions"},
+		{"that lets the process finish", "that lots the process finish", "lets/lots -- nonsense substitution"},
+	} {
+		v := VerifyMeaningPreserved(c.raw, c.clean)
+		if v.OK {
+			t.Fatalf("%s: VerifyMeaningPreserved(%q, %q) returned OK -- a real word substituted for a different, unrelated real word must be refused", c.label, c.raw, c.clean)
+		}
+		t.Logf("%s: correctly refused: %s", c.label, v.Reason)
+	}
+}
+
 // Regression: running this tool against the live corpus (read-only) found
 // that the FIRST cut of wordSurvives refused every one of its own
 // dictionary's short transposition fixes -- "teh"->"the", "adn"->"and",
@@ -165,15 +189,27 @@ func TestProposeCleanIsIdempotent(t *testing.T) {
 	}
 }
 
-func TestLevenshteinBasics(t *testing.T) {
-	if levenshtein("consistantly", "consistently") > 3 {
-		t.Error("consistantly/consistently should be a small edit distance")
+// knownVariant is built from allFixes directly (see its own doc comment):
+// every from/to pair the generator can produce must be recognised as a
+// legitimate variant, and nothing else should be -- this is the load-bearing
+// property the old, removed levenshtein-based fuzzy fallback could not
+// guarantee (see TestVerifyCatchesShipSkipMeaningInversion).
+func TestKnownVariantCoversEveryWhitelistEntryAndNothingElse(t *testing.T) {
+	for _, s := range allFixes {
+		variant, ok := knownVariant[s.from]
+		if !ok {
+			t.Errorf("knownVariant missing an entry for whitelisted word %q", s.from)
+			continue
+		}
+		want := tokenize(s.to)
+		if len(variant) != len(want) {
+			t.Errorf("knownVariant[%q] = %v, want %v", s.from, variant, want)
+		}
 	}
-	if levenshtein("delete", "remove") <= levenshtein("delete", "delete")+2 {
-		// sanity: unrelated words should not look like a close spelling fix
-	}
-	if got := levenshtein("delete", "remove"); got < 4 {
-		t.Errorf("delete/remove should NOT look like a close spelling variant, got distance %d", got)
+	for _, w := range []string{"ship", "lets", "delete", "garbage"} {
+		if _, ok := knownVariant[w]; ok {
+			t.Errorf("knownVariant unexpectedly recognises %q -- it is not in any whitelist table", w)
+		}
 	}
 }
 

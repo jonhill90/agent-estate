@@ -239,85 +239,57 @@ func negationCount(s string) int {
 	return n
 }
 
-// levenshtein is a plain edit-distance, used only to recognise "the same
-// word, spelling-corrected" (small distance relative to length) versus "a
-// different word" (large distance) -- never to permit an edit on its own.
-func levenshtein(a, b string) int {
-	if a == b {
-		return 0
+// knownVariant maps a raw word this file KNOWS how to correct (the `from`
+// side of an entry in `allFixes`, lowercase) to its own vetted replacement,
+// tokenized. Built from `allFixes` directly -- the SAME table
+// `applyFixes` reads -- so this can never drift out of sync with the
+// generator: widening the whitelist (adding an entry to `contractionFixes`/
+// `typoFixes`/`productNameFixes`) widens what the verifier recognises as a
+// legitimate word-level variant in the exact same commit, automatically.
+// This is the fix for PR #1405's own review finding (agent-estate#1394's
+// PR): "ship"->"skip" and "lets"->"lots" both passed the OLD wordSurvives,
+// which asked whether ANY word anywhere in the clean text sat within a
+// generic edit-distance band of the raw word -- close enough in shape to
+// pass, with no notion of whether it was actually the word `w` was supposed
+// to become. Levenshtein distance cannot tell "teh"/"the" (a real typo of a
+// real word) apart from "ship"/"skip" (two different real words that
+// happen to be one substitution apart) -- geometrically they are the same
+// shape. The only thing that CAN tell them apart is knowing, specifically,
+// which corrections are actually vetted; `knownVariant` is exactly that
+// knowledge, not a distance threshold.
+var knownVariant = func() map[string][]string {
+	m := map[string][]string{}
+	for _, s := range allFixes {
+		m[s.from] = tokenize(s.to)
 	}
-	la, lb := len(a), len(b)
-	if la == 0 {
-		return lb
-	}
-	if lb == 0 {
-		return la
-	}
-	prev := make([]int, lb+1)
-	cur := make([]int, lb+1)
-	for j := 0; j <= lb; j++ {
-		prev[j] = j
-	}
-	for i := 1; i <= la; i++ {
-		cur[0] = i
-		for j := 1; j <= lb; j++ {
-			cost := 1
-			if a[i-1] == b[j-1] {
-				cost = 0
-			}
-			del := prev[j] + 1
-			ins := cur[j-1] + 1
-			sub := prev[j-1] + cost
-			m := del
-			if ins < m {
-				m = ins
-			}
-			if sub < m {
-				m = sub
-			}
-			cur[j] = m
-		}
-		prev, cur = cur, prev
-	}
-	return prev[lb]
-}
+	return m
+}()
 
 // wordSurvives reports whether raw content word w has a recognisable match
-// in the clean token set: itself verbatim, or a small edit-distance variant
-// of itself (a spelling fix of the SAME word) -- never a different word,
-// however close in meaning. Distance threshold scales with word length:
-// 1-2 letter words require an exact match (nothing that short is safely
-// fuzzy-matchable); 3-5 letters tolerate up to 2 edits, specifically so a
-// TRANSPOSITION typo -- "teh"/"the", "adn"/"and", "htat"/"taht" vs "that",
-// all real, all in this file's own typoFixes table -- verifies correctly:
-// plain (non-Damerau) Levenshtein scores a two-letter swap as distance 2,
-// not 1, and the original `len(w)/4` formula floored to 0 for any word
-// under 4 letters, which refused every one of these real, intended,
-// dictionary-listed fixes outright (found by running this tool against the
-// live corpus read-only, not asserted -- see the PR body). Longer words get
-// proportionally more room.
-func wordSurvives(w string, cleanTokens map[string]bool, cleanList []string) bool {
+// in the clean token set: itself verbatim (case-insensitive; also covers
+// `productNameFixes`'s pure-capitalisation entries, since tokenize()
+// lowercases both sides), or the specific, vetted replacement `allFixes`
+// names for w (see knownVariant) -- never a merely-nearby word, however
+// close in edit-distance shape. No generic fuzzy fallback: alignment to a
+// SPECIFIC, known-safe correction, not set-membership against the whole
+// clean text. A raw word this file has no vetted correction for, and which
+// does not appear verbatim in clean, does not survive -- refused, not
+// guessed, exactly the same "unknown means not offered" posture as every
+// other unresolved case in this file.
+func wordSurvives(w string, cleanTokens map[string]bool) bool {
 	if cleanTokens[w] {
 		return true
 	}
-	var maxDist int
-	switch {
-	case len(w) <= 2:
-		maxDist = 0
-	case len(w) <= 5:
-		maxDist = 2
-	default:
-		maxDist = len(w) / 3
-	}
-	if maxDist < 1 {
+	variant, known := knownVariant[w]
+	if !known {
 		return false
 	}
-	for _, c := range cleanList {
-		if levenshtein(w, c) <= maxDist {
-			return true
+	for _, part := range variant {
+		if !cleanTokens[part] {
+			return false
 		}
 	}
-	return false
+	return true
 }
 
 // VerifyResult is the outcome of checking one proposed (raw, clean) pair.
@@ -332,11 +304,22 @@ type VerifyResult struct {
 // construction. Three checks, any one failing refuses the whole row:
 //
 //  1. Every content word (non-stopword) in raw survives in clean, verbatim
-//     or as a small edit-distance variant of ITSELF (see wordSurvives) --
-//     catches a word dropped or substituted for a different one, which is
-//     exactly the "garbage" -> "something broken" shape found live in this
-//     corpus's own existing text_clean population (see this file's own
-//     header comment).
+//     or as the SPECIFIC, vetted replacement this file's own whitelist
+//     names for it (see wordSurvives/knownVariant) -- catches a word
+//     dropped or substituted for a different one. PR #1405's own review
+//     found the first cut of this check used a generic edit-distance
+//     fallback instead of an anchored lookup, and "ship the release
+//     tonight" -> "skip the release tonight" (a meaning-INVERTING
+//     substitution) passed it, because "skip" merely sat close enough to
+//     "ship" in edit-distance space to SOME word in the clean text -- not
+//     because it was the word "ship" was supposed to become. Levenshtein
+//     distance alone cannot distinguish "teh"/"the" (a real typo of a real
+//     word) from "ship"/"skip" (two different real words one edit apart);
+//     only knowing which corrections are actually vetted can. This check
+//     also catches the "garbage" -> "something broken" shape found live in
+//     this corpus's own existing text_clean population (see this file's
+//     own header comment) -- a word dropped or replaced with something not
+//     in the whitelist is refused either way.
 //  2. Negation count is unchanged -- a dropped or added "not"/"never"/-n't
 //     inverts meaning outright and must never pass silently.
 //  3. Length stays within a generous band (0.6x-1.6x by character count) --
@@ -354,7 +337,7 @@ func VerifyMeaningPreserved(raw, clean string) VerifyResult {
 		if stopwords[w] || len(w) == 0 {
 			continue
 		}
-		if !wordSurvives(w, cleanSet, cleanList) {
+		if !wordSurvives(w, cleanSet) {
 			missing = append(missing, w)
 		}
 	}
