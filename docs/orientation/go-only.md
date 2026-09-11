@@ -7,9 +7,27 @@ any size, for any reason, including "just this one script" and "only for
 delivery".
 
 `reference/` holds the deleted shell and Python supervisor, kept so an agent can
-read how a rule was once encoded. It is **reference material, not a codebase**:
-nothing there is maintained, run, tested, or fixed. Recovering a rule from it
-means reimplementing that rule in Go, not calling the script.
+read how a rule was once encoded. Most of it is **reference material, not a
+codebase**: the tmux/dispatch-orchestration supervisor (`recycle.py`,
+`sensor.py`, `github_source.py`, `ci_gate.py`, the `reconcile_*.py`/`cli*.py`/
+`transport*.py` family and the rest of `reference/scripts/supervisor/`, ~40
+files) has had no commit since the 2026-08-30 archive move — confirmed by `git
+log`, checked directly, not assumed. Recovering a rule from that retired
+majority means reimplementing it in Go, not calling the script.
+
+**One 17-file subset under `reference/scripts/supervisor/` is not inert
+(agent-estate#1380).** `core.py`'s `Ledger` class and the 11 `core_ledger_*.py`
+files it composes via mixin, plus `itemize_prompts.py`, `mine_prompts.py`,
+`prompt_capture_hook.py`, `migrate_dead_capture_1357.py` and
+`migrate_dead_items_1362.py` (five entry points that each construct a real
+`Ledger(...)`), were touched by real, reviewed, tested PRs as recently as
+2026-09-10, and most carry a dedicated file under `reference/tests-supervisor/`.
+`prompt_capture_hook.py` is genuinely **run**, not just importable: it is
+registered as a live Claude Code hook in `.claude/settings.json`. This subset
+is still outside the Go-only rule's scope above — the app is `src/estate`,
+and this is corpus/capture tooling, not the app — but it is maintained,
+tested, and fixed, so treat it accordingly rather than as dead material to be
+reimplemented rather than read.
 
 This is guidance, not a gate. A CI blocker on new shell or Python was tried and
 removed on 2026-09-02: it was an over-extreme reading of the operator's intent,
