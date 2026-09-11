@@ -51,15 +51,16 @@ set -g @laneview-impl 'text'
 ## Together and apart
 
 - **Apart:** `rm -rf` this directory. `grep -rl laneview-plugin-tmux` from
-  the repo root returns 3 hits, not 1 (corrected 2026-09-11,
-  agent-estate#1397) -- this file, `reference/tests-supervisor/
-  test_laneview_tmux_plugin.sh`, and `../laneview/README.md`'s own
-  cross-reference to this directory. Neither of the other two is a
-  dependency: the test's own first check is `[ ! -d ... ] && SKIP exit 0`
-  -- it degrades, not fails, when this directory is gone, the same
-  pattern `../laneview/README.md` documents for its own suite -- and the
-  `laneview/README.md` mention is prose, not code that reads this
-  directory. So the practical claim still holds -- no key is bound, no
+  the repo root returns 2 hits, not 1 (re-counted 2026-09-11,
+  agent-estate#1412 -- was 3, corrected 2026-09-11, agent-estate#1397: the
+  third, `reference/tests-supervisor/test_laneview_tmux_plugin.sh`, is GONE,
+  `reference/tests-supervisor/` having been deleted the same day) -- this
+  file, and `../laneview/README.md`'s own cross-reference to this directory.
+  The remaining other hit is not a dependency: it is prose, not code that
+  reads this directory (the deleted test's own first check was
+  `[ ! -d ... ] && SKIP exit 0` -- it degraded, not failed, when this
+  directory was gone, the same pattern `../laneview/README.md` documents for
+  its own suite). So the practical claim still holds -- no key is bound, no
   popup exists, and the headless supervisor (`dispatch.sh`, `watchdog.sh`,
   `notify.sh`) never had a dependency on it to lose -- only the specific
   "returns only this directory's own files" sentence was wrong, and is

@@ -25,7 +25,9 @@ files it composes via mixin, plus `itemize_prompts.py`, `mine_prompts.py`,
 `prompt_capture_hook.py`, `migrate_dead_capture_1357.py` and
 `migrate_dead_items_1362.py` (five entry points that each construct a real
 `Ledger(...)`), were touched by real, reviewed, tested PRs as recently as
-2026-09-10, and most carry a dedicated file under `reference/tests-supervisor/`.
+2026-09-10, and most carry a dedicated file under
+`reference/scripts/supervisor/tests/` (agent-estate#1412: moved there from
+`reference/tests-supervisor/`, which no longer exists, on 2026-09-11).
 `prompt_capture_hook.py` is genuinely **run**, not just importable: it is
 registered as a live Claude Code hook in `.claude/settings.json`. This subset
 is still outside the Go-only rule's scope above — the app is `src/estate`,
