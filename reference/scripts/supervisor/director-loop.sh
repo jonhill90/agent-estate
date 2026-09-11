@@ -564,6 +564,16 @@ Twice on 2026-08-19 a "no surface" conclusion was wrong on inspection: agent-tui
 
 Report as a TABLE -- what you dispatched, to which lane, what you concluded. No narration of reasoning.'
 
+# agent-estate#1395/#1394 (wire-author-registration fix pass): register
+# BEFORE the physical send, same ordering as every other wired site --
+# nothing after this point trusts the send to have landed before this fact
+# is durable. This is the Director's OWN recurring tick, mechanically
+# assembled and injected by this loop script, never Jon -- 'supervisor',
+# not 'director': the text is not the Director composing something to send
+# TO a lane, it is automation feeding the Director its own boilerplate.
+if ! printf '%s' "$TICK" | python3 "$HERE/cli.py" register-pending-author --author supervisor >/dev/null; then
+  echo "director-loop: register-pending-author failed -- sending anyway (author stays unknown, safe, never wrong)" >&2
+fi
 tmux send-keys -t "=$TARGET" C-u 2>/dev/null
 sleep 1
 tmux send-keys -t "=$TARGET" -l "$TICK" 2>/dev/null

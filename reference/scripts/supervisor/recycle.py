@@ -227,13 +227,22 @@ def decide_recycle(
     )
 
 
-def respawn_supervisor(transport, *, target, tick_prompt: str) -> None:
+def respawn_supervisor(transport, *, target, tick_prompt: str, ledger) -> None:
     """Replace the supervisor pane's session with a fresh one.
 
     Thin actuator: all protocol knowledge stays inside `transport`. This
     respawns the pane and seeds it with the tick prompt -- nothing here
     decides *whether* to recycle, that is `decide_recycle`'s job. Never
     exercised against a live pane in tests; see `tests/supervisor/`.
-    """
+
+    `ledger` (agent-estate#1395/#1394, wire-author-registration): registered
+    against BEFORE `send_literal`, same reasoning and ordering as every
+    adapter.py call site -- the tick prompt seeded into a freshly respawned
+    supervisor pane is never Jon typing directly. A required keyword, not a
+    default of `None`, so a caller cannot silently skip registration by
+    omission -- the same "the smallest coherent change" spirit as this
+    function's existing thin-actuator shape, just extended to cover the one
+    thing `transport` alone cannot know (who this text is from)."""
     transport.respawn_pane(target)
+    ledger.register_pending_author(tick_prompt, author="supervisor")
     transport.send_literal(target, tick_prompt)

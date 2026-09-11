@@ -129,6 +129,17 @@ class AdapterTest(unittest.TestCase):
         codex = self.adapter.assign_task(lane="architecture", task_id="codex-task", summary="Review one artifact")
         self.assertEqual("/repo/hill90", codex["worktree_path"])
 
+    def test_assign_task_registers_the_prompt_as_supervisor_before_sending(self):
+        """agent-estate#1395/#1394 (wire-author-registration). MUTATION-CHECK,
+        FIRST DIRECTION: a prompt injected through a wired call site must land
+        with its real author. Drop `register_pending_author` from
+        `TmuxAdapter.assign_task` and this goes red -- `consume_pending_author`
+        returns `None` instead of `'supervisor'`."""
+        self.seed_source("codex-task", "Review one artifact")
+        self.adapter.assign_task(lane="architecture", task_id="codex-task", summary="Review one artifact")
+        prompt = self.transport.sends[-1][1]
+        self.assertEqual("supervisor", self.ledger.consume_pending_author(prompt))
+
     def test_notify_supervisor_prompt_points_at_a_command_that_exists(self):
         """agent-supervisor#362, found by the independent review of #381.
 
@@ -153,6 +164,15 @@ class AdapterTest(unittest.TestCase):
             f"notify prompts point at {adapter_module.SUPERVISOR_CLI}, which does not exist",
         )
         self.assertNotIn("hill90-supervisor ack", prompt)
+
+    def test_notify_supervisor_registers_the_prompt_as_supervisor_before_sending(self):
+        self.seed_source("ack-task", "Review")
+        self.adapter.assign_task(lane="infra-claude", task_id="ack-task", summary="Review")
+        self.ledger.consume_pending_author(self.transport.sends[-1][1])  # consume assign_task's own registration
+        self.ledger.complete("ack-task", b"# Result\n\nNo findings.\n", pane_nonce="nonce-8")
+        self.adapter.notify_supervisor(lane="architecture", retry_after=900)
+        prompt = self.transport.sends[-1][1]
+        self.assertEqual("supervisor", self.ledger.consume_pending_author(prompt))
 
     def test_blocked_lane_gets_no_assignment_input(self):
         self.transport.panes["%8"]["capture"] = "You've hit your weekly limit\n❯ \n"
@@ -365,6 +385,18 @@ class ACPAdapterTest(unittest.TestCase):
         task = self.adapter.assign_task(lane="copilot-worker", task_id="acp-task", summary="Review one artifact")
         self.assertEqual("/repo/hill90", task["worktree_path"])
 
+    def test_assign_task_registers_the_prompt_as_supervisor_before_sending(self):
+        """agent-estate#1395/#1394: see the matching test on `AdapterTest`
+        (TmuxAdapter). Mutation-check: drop `register_pending_author` from
+        `ACPAdapter.assign_task` and `consume_pending_author` returns `None`."""
+        self.adapter.register_lane(
+            lane="copilot-worker", target=None, harness="copilot-acp", repo="/repo/hill90", nonce="nonce-acp"
+        )
+        self.seed_source("acp-task", "Review one artifact")
+        self.adapter.assign_task(lane="copilot-worker", task_id="acp-task", summary="Review one artifact")
+        prompt = FakeACPTransport.instances[-1].prompts[0][1]
+        self.assertEqual("supervisor", self.ledger.consume_pending_author(prompt))
+
     def test_observe_lane_is_a_no_op_because_prompts_are_synchronous(self):
         self.adapter.register_lane(
             lane="copilot-worker", target=None, harness="copilot-acp", repo="/repo/hill90", nonce="nonce-acp"
@@ -491,6 +523,18 @@ class PiRPCAdapterTest(unittest.TestCase):
         self.seed_source("pi-task", "Review one artifact")
         task = self.adapter.assign_task(lane="pi-worker", task_id="pi-task", summary="Review one artifact")
         self.assertEqual("/repo/hill90", task["worktree_path"])
+
+    def test_assign_task_registers_the_prompt_as_supervisor_before_sending(self):
+        """agent-estate#1395/#1394: see the matching test on `AdapterTest`
+        (TmuxAdapter). Mutation-check: drop `register_pending_author` from
+        `PiRPCAdapter.assign_task` and `consume_pending_author` returns `None`."""
+        self.adapter.register_lane(
+            lane="pi-worker", target=None, harness="pi", repo="/repo/hill90", nonce="nonce-pi"
+        )
+        self.seed_source("pi-task", "Review one artifact")
+        self.adapter.assign_task(lane="pi-worker", task_id="pi-task", summary="Review one artifact")
+        prompt = FakePiRPCTransport.instances[-1].prompts[0][1]
+        self.assertEqual("supervisor", self.ledger.consume_pending_author(prompt))
 
     def test_assign_task_does_not_mark_delivered_when_the_transport_reports_a_dropped_stream(self):
         """agent-supervisor#61: `send_literal` on a stream that closed before
@@ -750,6 +794,21 @@ class ClaudePrintAdapterTest(unittest.TestCase):
         )
         self.assertNotIn("hill90-supervisor accept", prompt)
         self.assertNotIn("hill90-supervisor complete", prompt)
+
+    def test_assign_task_registers_the_prompt_as_supervisor_before_sending(self):
+        """agent-estate#1395/#1394: `run_detached` is this adapter's own
+        send, not named `send_literal` but the same act -- see the matching
+        test on `AdapterTest` (TmuxAdapter). Mutation-check: drop
+        `register_pending_author` before `run_detached` in
+        `ClaudePrintAdapter.assign_task` and `consume_pending_author`
+        returns `None`."""
+        self.adapter.register_lane(
+            lane="claude-print-worker", target=None, harness="claude", repo="/repo/hill90", nonce="nonce-cp"
+        )
+        self.seed_source("cp-task", "Review one artifact")
+        self.adapter.assign_task(lane="claude-print-worker", task_id="cp-task", summary="Review one artifact")
+        prompt = FakeClaudePrintTransport.instances[-1].prompts[0][1]
+        self.assertEqual("supervisor", self.ledger.consume_pending_author(prompt))
 
     def test_assign_task_to_unregistered_lane_raises(self):
         with self.assertRaisesRegex(RuntimeError, "unknown lane"):

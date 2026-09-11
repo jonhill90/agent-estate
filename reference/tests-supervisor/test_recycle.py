@@ -8,6 +8,7 @@ from pathlib import Path
 SUPERVISOR_DIR = Path(__file__).resolve().parents[2] / "scripts" / "supervisor"
 sys.path.insert(0, str(SUPERVISOR_DIR))
 
+from core import Ledger  # noqa: E402
 from recycle import (  # noqa: E402
     ArmedChannel,
     ChannelsSectionMissing,
@@ -231,13 +232,26 @@ class ParseArmedChannelsTest(unittest.TestCase):
 
 
 class RespawnSupervisorTest(unittest.TestCase):
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.ledger = Ledger(self.tempdir.name, clock=lambda: 1_000)
+
     def test_respawns_pane_then_seeds_the_tick_prompt(self):
         transport = FakeTransport()
-        respawn_supervisor(transport, target="%19", tick_prompt="tick")
+        respawn_supervisor(transport, target="%19", tick_prompt="tick", ledger=self.ledger)
         self.assertEqual(
             [("respawn_pane", "%19"), ("send_literal", "%19", "tick")],
             transport.calls,
         )
+
+    def test_registers_the_tick_prompt_as_supervisor_before_sending(self):
+        # agent-estate#1395/#1394: the mutation check that matters -- the
+        # tick prompt must be REGISTERED (so prompt_capture_hook.capture
+        # can later consume it) before send_literal fires, not after.
+        transport = FakeTransport()
+        respawn_supervisor(transport, target="%19", tick_prompt="tick", ledger=self.ledger)
+        self.assertEqual("supervisor", self.ledger.consume_pending_author("tick"))
 
 
 if __name__ == "__main__":

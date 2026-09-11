@@ -14,6 +14,7 @@ SUPERVISOR_DIR = REPO_ROOT / "reference" / "scripts" / "supervisor"
 sys.path.insert(0, str(SUPERVISOR_DIR))
 
 import prompt_capture_hook  # noqa: E402
+from adapter import TmuxAdapter  # noqa: E402
 from core import Ledger  # noqa: E402
 from mine_prompts import CONTEXT_UNDETERMINED  # noqa: E402
 
@@ -354,6 +355,81 @@ class CaptureWritesAuthorColumnTests(unittest.TestCase):
         by_session = {row["session"]: row["author"] for row in rows}
         self.assertEqual("supervisor", by_session["s1"])
         self.assertEqual("unknown", by_session["s2"])
+
+    def _all_prompts(self):
+        import sqlite3
+        connection = sqlite3.connect(Path(self.tempdir.name) / "ledger.sqlite3")
+        connection.row_factory = sqlite3.Row
+        try:
+            return [dict(row) for row in connection.execute("SELECT * FROM prompts ORDER BY at").fetchall()]
+        finally:
+            connection.close()
+
+
+class WiredInjectionSiteEndToEndTests(unittest.TestCase):
+    """agent-estate#1395/#1394 (wire-author-registration): the full path,
+    real `TmuxAdapter.assign_task` through to `prompt_capture_hook.capture`,
+    no shortcuts. This is the task brief's own required check, pasted as
+    both outcomes:
+
+    - A prompt injected through a wired call site (`TmuxAdapter.assign_task`,
+      via `adapter.py`'s own `register_pending_author` call) lands with its
+      real author when the pane's harness later re-submits that exact text
+      as a `UserPromptSubmit` event -- simulated here the same way a real
+      lane's own capture hook would see it.
+    - A DIFFERENT prompt, submitted in the same ledger around the same time
+      but never registered by anything (Jon typing directly into his own
+      session), lands `unknown` -- never `supervisor`/`director`, even
+      though a real registration exists concurrently for other text."""
+
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.ledger = Ledger(self.tempdir.name, clock=lambda: 1_000)
+        import test_adapter  # noqa: E402 -- sibling test module, same sys.path entry
+
+        self.transport = test_adapter.FakeTransport()
+        self.adapter = TmuxAdapter(self.ledger, self.transport, clock=lambda: 1_000)
+        self.adapter.register_lane(
+            lane="architecture", target="%19", harness="codex", repo="/repo/hill90", nonce="nonce-19"
+        )
+        self.ledger.reconstruct_task(
+            task_id="codex-task",
+            source_kind="issue",
+            source_url="https://github.com/jonhill90/Hill90/issues/9001",
+            source_ref="a" * 40,
+            summary="Review one artifact",
+            source_state="OPEN",
+            status="created",
+            evidence=[],
+            status_marker=None,
+        )
+
+    def test_wired_call_site_prompt_lands_with_its_real_author(self):
+        self.adapter.assign_task(lane="architecture", task_id="codex-task", summary="Review one artifact")
+        injected_text = self.transport.sends[-1][1]
+
+        # What the lane's own harness process would do next: the injected
+        # text becomes that pane's next `UserPromptSubmit` event, captured
+        # by the same hook every prompt goes through.
+        prompt_capture_hook.capture({"session_id": "lane-session", "prompt": injected_text}, self.ledger)
+
+        rows = [row for row in self._all_prompts() if row["session"] == "lane-session"]
+        self.assertEqual(1, len(rows))
+        self.assertEqual("supervisor", rows[0]["author"])
+
+    def test_an_unrelated_prompt_with_nothing_registered_stays_unknown(self):
+        self.adapter.assign_task(lane="architecture", task_id="codex-task", summary="Review one artifact")
+        # A registration now genuinely exists in the ledger for the injected
+        # text above -- proves the negative case isn't merely "nothing was
+        # ever registered", it's "this specific, different text was not".
+        jons_own_text = "actually, hold off on that -- do the tui work instead"
+        prompt_capture_hook.capture({"session_id": "jons-real-session", "prompt": jons_own_text}, self.ledger)
+
+        rows = [row for row in self._all_prompts() if row["session"] == "jons-real-session"]
+        self.assertEqual(1, len(rows))
+        self.assertEqual("unknown", rows[0]["author"])
+        self.assertNotIn(rows[0]["author"], ("supervisor", "director"))
 
     def _all_prompts(self):
         import sqlite3

@@ -113,6 +113,20 @@ def parser():
     # `pi`'s default, `send-keys` -- `pi-rpc` is never silently assumed.
     register.add_argument("--transport", choices=("send-keys", "acp", "pi-rpc", "claude-print"), default=None)
 
+    # agent-estate#1395/#1394 (wire-author-registration fix pass): the bash
+    # side of `register_pending_author`. Text comes from stdin, never an
+    # argv, so a caller never has to worry about a multi-line brief or a
+    # message containing shell-special characters surviving an argv hop --
+    # the exact hazard `send.sh`'s own `--literal`/`-l` discipline exists to
+    # avoid one layer down. A non-zero exit (register_pending_author's own
+    # ValueError on an invalid --author, caught at cli.py's process boundary
+    # the same way every other refusal here is) means "did not register" --
+    # a caller that checks `$?` before its own send gets the same
+    # register-before-send-and-refuse-on-failure ordering the Python call
+    # sites already have, for free.
+    register_pending_author_parser = sub.add_parser("register-pending-author")
+    register_pending_author_parser.add_argument("--author", choices=("supervisor", "director"), required=True)
+
     assign = sub.add_parser("assign")
     assign.add_argument("--lane", required=True)
     assign.add_argument("--task", required=True)

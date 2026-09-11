@@ -66,15 +66,73 @@ class LedgerCorpusMixin:
     #
     # `register_pending_author`/`consume_pending_author` are the durable,
     # hash-keyed handoff between an injecting caller (a supervisor/Director
-    # tool that is ABOUT to type text into a lane's pane, e.g. via
-    # `TmuxTransport.send_literal`) and `prompt_capture_hook.py`, which
-    # captures whatever the pane submits without itself knowing who sent
-    # it. Nothing in this repo wires an injection call site to
-    # `register_pending_author` yet -- that is deliberately proposed, not
-    # landed, in this same change (see the PR body: which call sites, and
-    # why auditing every transport's coverage is separate follow-up work).
-    # Landing the primitive now means the schema and the consuming half
-    # (the hook) never have to migrate twice.
+    # tool that is ABOUT to type text into a lane's pane) and
+    # `prompt_capture_hook.py`, which captures whatever the pane submits
+    # without itself knowing who sent it.
+    #
+    # HOW THE FULL SET WAS FOUND (wire-author-registration's own fix pass,
+    # after a reviewer caught the first pass's "3 bash-side call sites
+    # found" undercounting by at least 4): every `send-keys` occurrence in
+    # the tree, not just files already known to matter (`grep -rn
+    # "send-keys" --include="*.sh" --include="*.py" --include="*.go" .`,
+    # every hit read, not pattern-matched); every caller of `send.sh`'s
+    # `verified_type`/`verified_submit`/`verified_send`/`blind_send`
+    # primitives across the whole repo, not just `reference/scripts/
+    # supervisor`; a separate check for `tmux paste-buffer`/`load-buffer`
+    # (a second way to inject text that never says `send-keys` at all --
+    # none found outside the Go-side ban tests); and the Go side confirmed
+    # clean structurally, not just unaudited (`mirror_wiring_test.go`/
+    # `mirror_test.go` assert send-keys/paste-buffer/respawn-pane never
+    # appear anywhere in `src/estate`'s own tmux-adjacent code).
+    #
+    # WIRED -- 12 call sites, all registering `author="supervisor"`
+    # immediately before their own send:
+    #   Python (7, unchanged from the first pass): `TmuxAdapter.assign_task`/
+    #   `notify_supervisor`, `ACPAdapter.assign_task`, `PiRPCAdapter.
+    #   assign_task`, `ClaudePrintAdapter.assign_task` (`run_detached`, not
+    #   `send_literal` by name, same act), `recycle.respawn_supervisor`.
+    #   `dispatch-claude-print.sh`/`dispatch-pi-rpc.sh` deliver through the
+    #   claude-print/pi-rpc adapters above via `cli.py assign` -- covered
+    #   transitively, not separate sites.
+    #   Bash (5, new in this pass, via a new `cli.py register-pending-author`
+    #   subcommand -- text on stdin, never an argv, so a multi-line brief or
+    #   shell-special characters never have to survive an argv hop):
+    #   `director-loop.sh` (the Director's own recurring tick -- the
+    #   highest-volume site in the tree, and the one a reviewer had to name
+    #   before it was found), `heartbeat.sh` (stall nudge), `quota-watch.sh`
+    #   (wind-down/resume messages), `director-route.sh` (idle-nudge),
+    #   `watchdog.sh` (`blind_send` restart nudge). All five log and send
+    #   anyway on a registration failure -- these are unattended, operationally
+    #   load-bearing loops with no reconciliation path for a blocked send;
+    #   an attribution write is advisory and must fail open, never block the
+    #   send it's attached to (the opposite ordering from the Python sites'
+    #   own transaction, and deliberately so -- see each site's own comment).
+    #
+    # NOT WIRED, DELIBERATELY, EACH FOR A DIFFERENT REASON:
+    #   `dispatch-send.sh` (dispatch.sh's own brief-to-a-new-lane send) --
+    #   the most heavily-scrutinized, correctness-critical path in this tree
+    #   (#178/#186/#446's own history), and its own "point of no return"
+    #   sequence. The CLI bridge the 5 bash sites above now use makes wiring
+    #   this mechanically easier than it was, but touching that specific
+    #   sequence is still its own, separately-reviewed change, not bundled
+    #   into a fix pass already covering five other files.
+    #   `inbox-route.sh` (relays a Telegram reply into a lane) -- the text is
+    #   genuinely Jon's own words, not a script's. `register_pending_author`
+    #   correctly refuses `author="jon"` (registration is proof of NON-Jon
+    #   authorship; no injection site can prove itself to BE Jon). Registering
+    #   `"supervisor"` here would be a NEW misattribution in the opposite
+    #   direction from the one this whole feature exists to fix. Correctly
+    #   `unknown` -- this is the one case where that is not absence of
+    #   effort, it is the honest answer.
+    #   `reference/scripts/estate-loop/check.sh` -- a different subtree
+    #   (`estate-loop`, not `supervisor`) whose own header states its design
+    #   explicitly: "No supervisor, no ledger, no lease." Reaching across
+    #   that stated boundary to depend on `supervisor/cli.py` for a
+    #   secondary concern (author labeling) crosses an architectural line
+    #   its own author drew on purpose -- not this fix pass's call to cross.
+    #
+    # Landing the primitive first (PR #1398) meant the schema and the
+    # consuming half (the hook) never had to migrate twice.
 
     # How long an unconsumed registration survives before it is treated as
     # abandoned (a `send_literal` that raised before the text ever reached

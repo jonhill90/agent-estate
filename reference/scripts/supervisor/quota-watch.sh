@@ -272,6 +272,15 @@ resolve_target() {
 send_message() {
   local msg="$1"
   resolve_target || return 1
+  # agent-estate#1395/#1394 (wire-author-registration fix pass): register
+  # BEFORE the physical send, same reasoning as every other wired site.
+  # Failure logs and falls through -- a quota escalation reaching the
+  # supervisor's pane is load-bearing; an attribution write must never
+  # block it. Worst case: the row reads 'unknown', the pre-existing safe
+  # default.
+  if ! printf '%s' "$msg" | "$LEDGER_PYTHON" "$LEDGER_CLI" register-pending-author --author supervisor >/dev/null; then
+    log "register-pending-author failed -- sending anyway (author stays unknown, safe, never wrong)"
+  fi
   tmux send-keys -t "=$TARGET" C-u 2>/dev/null || return 1
   sleep 1
   tmux send-keys -t "=$TARGET" -l "$msg" 2>/dev/null || return 1

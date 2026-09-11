@@ -263,6 +263,18 @@ def main(argv=None):
             repo=args.repo,
             nonce=args.nonce or secrets.token_hex(16),
         )
+    elif args.command == "register-pending-author":
+        # agent-estate#1395/#1394: text on stdin, never an argv -- see
+        # cli_parser.py's own comment on this subcommand for why. An empty
+        # stdin is a caller error (nothing to register), not silently
+        # accepted as a no-op -- the same "fail loudly rather than pretend
+        # it worked" discipline `register_pending_author` itself already
+        # applies to a bad --author.
+        text = sys.stdin.read()
+        if not text:
+            raise ValueError("register-pending-author: stdin was empty -- nothing to register")
+        ledger.register_pending_author(text, author=args.author)
+        value = {"registered": True, "author": args.author, "bytes": len(text.encode("utf-8"))}
     elif args.command == "assign":
         value = adapter_for_lane(args.lane).assign_task(lane=args.lane, task_id=args.task, summary=args.summary)
     elif args.command == "record-dispatch":
