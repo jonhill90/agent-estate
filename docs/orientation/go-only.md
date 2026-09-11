@@ -8,12 +8,16 @@ delivery".
 
 `reference/` holds the deleted shell and Python supervisor, kept so an agent can
 read how a rule was once encoded. Most of it is **reference material, not a
-codebase**: the tmux/dispatch-orchestration supervisor (`recycle.py`,
-`sensor.py`, `github_source.py`, `ci_gate.py`, the `reconcile_*.py`/`cli*.py`/
-`transport*.py` family and the rest of `reference/scripts/supervisor/`, ~40
-files) has had no commit since the 2026-08-30 archive move — confirmed by `git
-log`, checked directly, not assumed. Recovering a rule from that retired
-majority means reimplementing it in Go, not calling the script.
+codebase**: 50 of the 57 `.py` files directly under
+`reference/scripts/supervisor/` — the tmux/dispatch-orchestration supervisor
+(`recycle.py`, `sensor.py`, `github_source.py`, `ci_gate.py`, the
+`reconcile_*.py`/`cli*.py`/`transport*.py` family and the rest) — have had no
+commit since the 2026-08-30 archive move, confirmed by `git log` on every one
+of the 57 files individually, not assumed. Ten of those 50 are still part of
+the live subset below, composed via mixin import rather than individually
+edited since; the other 40 are neither touched nor reachable from anything
+live. Recovering a rule from that fully-retired 40 means reimplementing it in
+Go, not calling the script.
 
 **One 17-file subset under `reference/scripts/supervisor/` is not inert
 (agent-estate#1380).** `core.py`'s `Ledger` class and the 11 `core_ledger_*.py`
