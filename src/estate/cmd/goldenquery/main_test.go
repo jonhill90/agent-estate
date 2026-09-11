@@ -472,8 +472,8 @@ func TestBuildRatchetsMaxMissesArePinned(t *testing.T) {
 	none := &result{c: goldenset.Case{ID: "none-01", ExpectedSource: goldenset.SourceNone}, pass: true, exitCode: 1}
 	rs := buildRatchets(4, 12, 4, 12, 16, 17, 5, 5, 7, 7, 8, none)
 	want := map[string]int{
-		"natural-language stratum top-3, unscoped":                        13, // docs/decisions ADR PR (2026-09-11), was 12 (agent-estate#1333, was 8)
-		"natural-language stratum top-3, private scoped source:repo-docs": 13, // docs/decisions ADR PR (2026-09-11), was 12 (agent-estate#1333, was 8)
+		"natural-language stratum top-3, unscoped":                        14, // agent-estate#1412's go-only-rule ADR (2026-09-11), was 13 (second docs/decisions ADR PR, was 12, was 8 -- agent-estate#1333)
+		"natural-language stratum top-3, private scoped source:repo-docs": 14, // agent-estate#1412's go-only-rule ADR (2026-09-11), was 13 (second docs/decisions ADR PR, was 12, was 8 -- agent-estate#1333)
 		"retrieval score (private)":                                       5,  // agent-estate#1333, was 1
 		"publishable-reachable score":                                     0,
 		"github-stars stratum top-3":                                      1,
@@ -519,17 +519,18 @@ func TestBuildRatchetsNoneResultMustBeHitToPass(t *testing.T) {
 
 func TestRatchetFailuresDetectsRegressionBelowFloor(t *testing.T) {
 	// natural-language top-3 drops from the recorded (post-agent-estate#1333)
-	// floor of 17/29 to 15/29 -- a genuine regression, not the known top-10
+	// floor of 17/29 to 14/29 -- a genuine regression, not the known top-10
 	// drift this ratchet deliberately excludes, and not the one-time,
-	// already-accepted drop that #1140 (and later #1333, and the
-	// docs/decisions ADR PR) themselves produced. Uses the current 29-case
-	// total (12 -- this test's value before #1333 -- can no longer
-	// demonstrate a failure at all now that nlTop3MaxMisses is 12: even 16
-	// stopped demonstrating one once the budget was raised to 13, so this
-	// dropped one further; see #1333's and this PR's own bodies for why the
-	// budget grew).
+	// already-accepted drop that #1140 (and later #1333, the docs/decisions
+	// ADR PRs, and agent-estate#1412's go-only-rule ADR) themselves produced.
+	// Uses the current 29-case total (12 -- this test's value before #1333 --
+	// can no longer demonstrate a failure at all now that nlTop3MaxMisses is
+	// 14: 16 stopped demonstrating one once the budget first reached 13, and
+	// 15 stopped once #1412 raised it again to 14, so this dropped one
+	// further still; see #1333's and #1412's own bodies for why the budget
+	// grew).
 	none := &result{c: goldenset.Case{ID: "none-01", ExpectedSource: goldenset.SourceNone}, pass: true, exitCode: 1}
-	rs := buildRatchets(15, 29, 17, 29, 16, 17, 5, 5, 7, 7, 8, none)
+	rs := buildRatchets(14, 29, 17, 29, 16, 17, 5, 5, 7, 7, 8, none)
 	failed := ratchetFailures(rs)
 	if len(failed) != 1 || failed[0].name != "natural-language stratum top-3, unscoped" {
 		t.Fatalf("ratchetFailures() = %+v, want exactly the unscoped top-3 ratchet failing", failed)
