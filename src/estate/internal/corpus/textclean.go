@@ -84,6 +84,38 @@ package corpus
 // join-by-space comparison failing. Keeping them alongside would be
 // unreachable dead weight, not defence in depth -- see VerifyEdits's own
 // doc comment for the argument this file settled before writing the check.
+//
+// # Round five: the replay itself compared TOKENS, not the BYTES the design named
+//
+// Round four's design was right -- position from the generator's own
+// record, not a search -- but "reproduce clean's own tokenization exactly"
+// is not what the Director's design says. The design says "replaying
+// exactly those edits on text_raw reproduces text_clean byte-for-byte."
+// tokenize() runs on both sides of round four's final comparison, and
+// tokenize keeps only [A-Za-z']+ runs, lowercased. Case, punctuation,
+// digits, symbols, whitespace and every non-ASCII byte were invisible to
+// that comparison: "do NOT merge this" vs "do not merge this", "is it
+// done?" vs "is it done.", "wait 10 minutes" vs "wait 100 minutes", all
+// verified OK, because none of those differences survives tokenize(). The
+// same held for an edit's own To field -- checked against the whitelist
+// only after tokenize(To), so To="don't 100" or To="DON'T!!!" verified for
+// a vetted "don't", smuggled bytes a token-level check cannot see.
+//
+// The fix is not a new alignment strategy, a threshold, or a search --
+// round four's actual design (position from the record, nothing inferred)
+// was already correct; only the two comparisons inside it were checking
+// the wrong representation. Fixed by making both of them exact over BYTES:
+// an edit's To must equal, byte for byte, matchCase(this position's own
+// original-case raw token, this fix's vetted replacement) -- the identical
+// computation applyFixes performs at generation time, recomputed here
+// independently rather than trusted; and the final replay walks raw's own
+// wordRE matches (the same walk applyFixes performs, same order, same
+// counter) substituting each edit's exact To text and leaving every other
+// byte of raw -- including all the punctuation, digits, case and
+// whitespace tokenize discarded -- untouched, then compares the result to
+// clean with plain string equality. No tokenize() runs anywhere in either
+// comparison now. See VerifyEdits's own doc comment for why this makes the
+// "does the verifier still earn its place" argument stronger, not weaker.
 
 import (
 	"fmt"
@@ -303,6 +335,21 @@ var knownVariant = func() map[string][]string {
 	return m
 }()
 
+// fixByFrom maps a whitelisted raw word to its own substitution entry --
+// same table, same single source as knownVariant and applyFixes's own
+// per-call byFrom, built once here so VerifyEdits can recompute the exact
+// case-adapted replacement text a position should hold (round five,
+// agent-estate#1405: knownVariant alone only proves the replacement's
+// WORDS are vetted, tokenized; it cannot check the exact BYTES a To field
+// claims, which is what the byte-level check below needs).
+var fixByFrom = func() map[string]substitution {
+	m := map[string]substitution{}
+	for _, s := range allFixes {
+		m[s.from] = s
+	}
+	return m
+}()
+
 // VerifyResult is the outcome of checking one proposed (raw, edits, clean)
 // triple.
 type VerifyResult struct {
@@ -311,65 +358,82 @@ type VerifyResult struct {
 }
 
 // VerifyEdits is the independent gate every proposed clean must pass before
-// it is ever written -- round four of agent-estate#1405, after three rounds
-// of a search-based check (fuzzy distance, then set membership, then a
-// positional walk that could still be tricked by a stopword-reachable
-// decoy) each failed the same way one level further in. See this file's own
-// header comment for the three-round history and why the design changed
-// rather than being patched a fourth time.
+// it is ever written -- round five of agent-estate#1405. Rounds one through
+// three each failed the same way, one level further in (fuzzy distance,
+// then set membership, then a positional walk still trickable by a
+// stopword-reachable decoy); round four fixed all three by moving position
+// off of clean-side search entirely, onto the generator's own record -- the
+// right design, confirmed by round five holding it unchanged -- but its two
+// checks compared TOKENS (tokenize(), [A-Za-z']+ only, lowercased) where
+// the design names BYTES. Round five did not change what is being checked,
+// only the representation the checking happens in. See this file's own
+// header comment for the full round-by-round history.
 //
 // Two checks, both TOTAL -- no distance, no set, no bounded search, no
-// "close enough" -- either refuses the whole row:
+// tokenize(), no "close enough" -- either refuses the whole row:
 //
-//  1. Every edit must be a genuine, currently-whitelisted allFixes entry:
-//     the raw token it names must match what's actually at that position in
-//     raw, and its recorded replacement must equal knownVariant's own
-//     vetted text for that word, exactly. An edit naming anything else --
-//     an unvetted substitution, or a claim about a token that isn't
-//     actually there -- is refused outright, whatever the rest of the pair
-//     looks like. This is what keeps the whitelist the sole authority: an
-//     edit list is not a side channel around it.
-//  2. Replaying every edit against raw's own tokenization, at the exact
-//     position it names, must reproduce clean's own tokenization EXACTLY --
-//     token for token, in order. A raw token no edit names must survive
-//     verbatim, at its own position; a named token must have become exactly
-//     its recorded replacement. There is no scan of clean for something
+//  1. Every edit must be a genuine, currently-whitelisted allFixes entry,
+//     BYTE-exact: the raw token it names must match what's actually at that
+//     position in raw, and its recorded replacement must equal, byte for
+//     byte, matchCase(this position's own original-case raw token, this
+//     fix's vetted text) -- the exact computation applyFixes performs when
+//     it generates a real edit, independently recomputed here rather than
+//     trusted. An edit naming anything else -- an unvetted substitution, a
+//     claim about a token that isn't actually there, or a To field carrying
+//     even one extra or different byte the whitelist never vetted (a
+//     smuggled digit, an extra punctuation mark, different case) -- is
+//     refused outright, whatever the rest of the pair looks like. This is
+//     what keeps the whitelist the sole authority over every byte written,
+//     not just its letters: an edit list is not a side channel around it.
+//  2. Replaying every edit against raw's own bytes, at the exact position
+//     it names, must reproduce clean EXACTLY, byte for byte -- no
+//     tokenize() on either side of this comparison. A raw byte-run no edit
+//     names must survive verbatim, including its own case, punctuation and
+//     surrounding whitespace; a named token must have become exactly its
+//     recorded replacement. There is no scan of clean for something
 //     acceptable: position comes entirely from the edit list the generator
 //     already recorded, so nothing elsewhere in the sentence -- a
-//     coincidental decoy, a stopword run, an unrelated real word -- can
-//     vouch for a mismatch at the position that actually matters. Either
-//     clean holds what the edits say happened, or it does not.
+//     coincidental decoy, a stopword run, an unrelated real word, a
+//     de-shouted ALL-CAPS run, a changed digit, a flipped punctuation mark
+//     -- can vouch for a mismatch at the position that actually matters.
+//     Either clean holds what the edits say happened, byte for byte, or it
+//     does not.
 //
 // Does the verifier still earn its place, now that the generator hands it
-// the very edits it made? Yes, and it is not a tautology, as long as (and
-// this file keeps it true) applyFixes's own STRING construction and this
-// function's TOKEN-level replay are two different computations over two
-// different representations of the same event, not one function calling
-// itself twice: applyFixes builds `clean` by byte-level regex substitution
-// over the raw string; VerifyEdits independently re-tokenizes the resulting
-// `clean` string and compares it, token by token, against what the edit
-// list alone predicts. A bug in how applyFixes joins a replacement back
-// into the string -- wrong case-adaptation applied at the string-join step
-// but not reflected in the Edit it recorded, an off-by-one in which
-// occurrence a regex match touched, a stray extra byte -- changes the
-// STRING without changing the RECORD, and replay catches exactly that
-// divergence. What it does NOT catch, and cannot: a generator that
-// correctly records and correctly applies an edit that was never the right
-// decision to make in the first place (check 1 bounds that instead, via the
-// whitelist) -- and a hand-authored (raw, edits, clean) triple that lies
-// about all three consistently, which no verifier operating on the
-// generator's own output can ever detect, because at that point it is not
-// checking generated output at all. Both are named, not hidden: this gate
-// verifies EXECUTION against RECORD and RECORD against WHITELIST; it was
-// never, in any of its four versions, capable of verifying DECISION against
-// intent that lives only in Jon's head.
+// the very edits it made? Yes, and with byte-level replay the argument gets
+// STRONGER, not weaker: the check becomes "the edit list alone reconstructs
+// clean from raw", which catches a generator writing anything it did not
+// record. Not tautological either way, because applyFixes and VerifyEdits
+// share the edit list but not the string: applyFixes builds `clean` in one
+// pass, substituting as it walks; VerifyEdits takes only the resulting Edit
+// list plus raw and independently reconstructs what clean must be, then
+// compares that reconstruction to the actual `clean` string with `==`. A
+// bug in how applyFixes joins a replacement back into the string -- wrong
+// case-adaptation applied at the string-join step but not reflected in the
+// Edit it recorded, an off-by-one in which occurrence a regex match
+// touched, a stray extra byte -- changes the STRING without changing the
+// RECORD, and byte-level replay catches exactly that divergence, more
+// completely than token-level replay could (nothing non-alphabetic was ever
+// invisible to it in the first place). What it does NOT catch, and cannot:
+// a generator that correctly records and correctly applies an edit that was
+// never the right decision to make in the first place (check 1 bounds that
+// instead, via the whitelist) -- and a hand-authored (raw, edits, clean)
+// triple that lies about all three consistently, which no verifier
+// operating on the generator's own output can ever detect, because at that
+// point it is not checking generated output at all. Both are named, not
+// hidden: this gate verifies EXECUTION against RECORD and RECORD against
+// WHITELIST; it was never, in any of its five versions, capable of
+// verifying DECISION against intent that lives only in Jon's head.
 //
 // Retired from this check, argued in this file's own header comment: the
-// old negation-count and length-ratio backstops. Exact positional replay
-// subsumes both -- there is no way for a token to vanish, invert, or appear
-// from nowhere without the token-sequence comparison failing first.
+// old negation-count and length-ratio backstops. Exact byte-level replay
+// subsumes both, more completely than round four's token-level version did
+// -- there is no way for a token to vanish, invert, or appear from nowhere,
+// and no way for a byte outside [A-Za-z'] to change unnoticed either,
+// without the string-equality comparison failing first.
 func VerifyEdits(raw string, edits []Edit, clean string) VerifyResult {
-	rawTokens := tokenize(raw)
+	rawTokens := tokenize(raw)                         // lowercased, for From-matching (unchanged)
+	rawTokensOriginal := wordRE.FindAllString(raw, -1) // SAME matches, ORIGINAL case -- positionally identical to rawTokens, see this file's own Edit doc comment
 	byIndex := make(map[int]Edit, len(edits))
 	for _, e := range edits {
 		if e.TokenIndex < 0 || e.TokenIndex >= len(rawTokens) {
@@ -381,27 +445,49 @@ func VerifyEdits(raw string, edits []Edit, clean string) VerifyResult {
 		if rawTokens[e.TokenIndex] != e.From {
 			return VerifyResult{false, fmt.Sprintf("edit at index %d claims raw token %q, but raw actually has %q there", e.TokenIndex, e.From, rawTokens[e.TokenIndex])}
 		}
-		variant, ok := knownVariant[e.From]
+		sub, ok := fixByFrom[e.From]
 		if !ok {
 			return VerifyResult{false, fmt.Sprintf("edit %q -> %q is not a whitelisted allFixes entry", e.From, e.To)}
 		}
-		if got := tokenize(e.To); strings.Join(got, " ") != strings.Join(variant, " ") {
-			return VerifyResult{false, fmt.Sprintf("edit %q -> %q does not match allFixes's own vetted replacement %q", e.From, e.To, strings.Join(variant, " "))}
+		// BYTE-exact, not token-exact: the whitelist's authority is over
+		// every byte of the replacement text actually written, not just its
+		// letters. tokenize(e.To) == tokenize(vetted) (the old check) strips
+		// digits, punctuation and everything non-[A-Za-z'] BEFORE comparing,
+		// so an edit could claim To="don't 100" or To="DON'T!!!" for a
+		// vetted "don't" and pass -- smuggled bytes that never went near the
+		// whitelist. Recomputing the exact case-adapted string this word's
+		// own position should have produced, and requiring To to equal it
+		// exactly, closes that: nothing can ride into clean on an edit's To
+		// field that matchCase(this raw token, this fix's vetted text) did
+		// not itself produce.
+		expected := matchCase(rawTokensOriginal[e.TokenIndex], sub.to)
+		if e.To != expected {
+			return VerifyResult{false, fmt.Sprintf("edit %q -> %q does not match allFixes's own case-adapted replacement %q for this position's casing", e.From, e.To, expected)}
 		}
 		byIndex[e.TokenIndex] = e
 	}
 
-	want := make([]string, 0, len(rawTokens))
-	for i, rt := range rawTokens {
-		if e, ok := byIndex[i]; ok {
-			want = append(want, tokenize(e.To)...)
-		} else {
-			want = append(want, rt)
+	// BYTE-level replay: walk raw's own wordRE matches in the SAME order
+	// applyFixes walks them at generation time (wordRE.ReplaceAllStringFunc,
+	// one counter increment per match -- the exact correspondence this
+	// file's Edit doc comment establishes), substituting each recorded
+	// edit's exact To bytes at its recorded index and leaving every other
+	// token exactly as raw wrote it. Every non-word byte -- whitespace,
+	// punctuation, digits, symbols, non-ASCII -- is never touched by
+	// ReplaceAllStringFunc outside a match, so it round-trips automatically;
+	// there is no tokenize() anywhere in this comparison, so nothing outside
+	// [A-Za-z'] can be invisible to it the way it was through round four's
+	// token-sequence comparison.
+	idx := -1
+	want := wordRE.ReplaceAllStringFunc(raw, func(tok string) string {
+		idx++
+		if e, ok := byIndex[idx]; ok {
+			return e.To
 		}
-	}
-	got := tokenize(clean)
-	if strings.Join(want, " ") != strings.Join(got, " ") {
-		return VerifyResult{false, fmt.Sprintf("replaying %d edit(s) against raw yields %q, but clean is %q -- clean does not match what the recorded edits explain", len(edits), strings.Join(want, " "), strings.Join(got, " "))}
+		return tok
+	})
+	if want != clean {
+		return VerifyResult{false, fmt.Sprintf("replaying %d edit(s) against raw's own bytes yields %q, but clean is %q -- clean does not match what the recorded edits explain", len(edits), want, clean)}
 	}
 	return VerifyResult{true, ""}
 }

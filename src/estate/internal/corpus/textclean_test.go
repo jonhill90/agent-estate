@@ -464,3 +464,49 @@ func TestApplyTextCleanNeverTouchesRowsWithExistingClean(t *testing.T) {
 		t.Fatal("must not overwrite a row that already has text_clean")
 	}
 }
+
+// Round five's own finding (agent-estate#1405): round four's replay
+// compared tokenize() sequences -- [A-Za-z']+ only, lowercased -- where the
+// design says "byte-for-byte". Case, punctuation, digits, symbols,
+// whitespace and non-ASCII were invisible to that comparison. These are
+// Fable's own constructed pairs from its round-four review, taken verbatim,
+// each a zero-edit claim (no whitelisted word differs) that must be
+// refused because clean differs from raw in bytes tokenize() cannot see.
+func TestVerifyCatchesByteOnlyDivergence(t *testing.T) {
+	for _, c := range []struct{ raw, clean, label string }{
+		{"do NOT merge this", "do not merge this", "de-shouting"},
+		{"we can't. skip the tests", "we can't skip the tests", "punctuation inversion"},
+		{"is it done?", "is it done.", "question to statement"},
+		{"wait 10 minutes then retry", "wait 100 minutes then retry", "number changed"},
+		{"fixes #1394 only", "fixes #1395 only", "issue number changed"},
+		{"use >= 3 lanes", "use <= 3 lanes", "comparison flipped"},
+		{"rm -rf ./build first", "rm -rf /build first", "path changed"},
+		{"assert x != y", "assert x == y", "negation symbol"},
+		{"the café is naïve", "the caf is na ve", "accented word"},
+	} {
+		v := VerifyEdits(c.raw, nil, c.clean)
+		if v.OK {
+			t.Fatalf("%s: VerifyEdits(%q, nil, %q) returned OK -- a zero-edit claim differing only in bytes tokenize() discards must be refused", c.label, c.raw, c.clean)
+		}
+		t.Logf("%s: correctly refused: %s", c.label, v.Reason)
+	}
+}
+
+// Round five's second finding: an edit's own To field was checked against
+// the whitelist only after tokenize(To), so extra bytes riding along with a
+// vetted word's letters were invisible to check 1. Both pairs are Fable's
+// own, verbatim.
+func TestVerifyEditsRefusesSmuggledBytesInTo(t *testing.T) {
+	for _, c := range []struct {
+		raw, to, clean, label string
+	}{
+		{"dont merge", "don't 100", "don't 100 merge", "digits smuggled into To"},
+		{"dont merge", "DON'T!!!", "DON'T!!! merge", "caps and punctuation smuggled into To"},
+	} {
+		v := VerifyEdits(c.raw, []Edit{{TokenIndex: 0, From: "dont", To: c.to}}, c.clean)
+		if v.OK {
+			t.Fatalf("%s: VerifyEdits accepted To=%q for a vetted dont->don't edit -- smuggled bytes must be refused", c.label, c.to)
+		}
+		t.Logf("%s: correctly refused: %s", c.label, v.Reason)
+	}
+}
