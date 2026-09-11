@@ -14,8 +14,8 @@ func TestLoadNaturalParsesEmbeddedCases(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadNatural() error: %v", err)
 	}
-	if len(cases) != 30 {
-		t.Fatalf("len(cases) = %d, want 30 -- #1073's original twelve-case set, agent-estate#1169's nine per-file cases (nl-13..nl-21), agent-estate#1162's three discriminating scoping cases (nl-22..nl-24), the AGENTS.md progressive-disclosure split's per-file case for docs/orientation/conventions.md (nl-25), the knowledge-architecture run's per-file cases for its two new repo-docs files, docs/knowledge-workflow.md and docs/decisions/2026-09-06-knowledge-architecture-merge-exception.md (nl-26, nl-27), P12's docs/plan/ repo-docs exclusion's one required case for its named exception, docs/plan/PLAN.md (nl-28), agent-estate#1314's per-file case for its new docs/decisions/2026-09-08-index-coverage-1314.md (nl-29), and agent-estate#1324's per-file case for its new docs/canonical/review-brief-template.md (nl-30)", len(cases))
+	if len(cases) != 32 {
+		t.Fatalf("len(cases) = %d, want 32 -- #1073's original twelve-case set, agent-estate#1169's nine per-file cases (nl-13..nl-21), agent-estate#1162's three discriminating scoping cases (nl-22..nl-24), the AGENTS.md progressive-disclosure split's per-file case for docs/orientation/conventions.md (nl-25), the knowledge-architecture run's per-file cases for its two new repo-docs files, docs/knowledge-workflow.md and docs/decisions/2026-09-06-knowledge-architecture-merge-exception.md (nl-26, nl-27), P12's docs/plan/ repo-docs exclusion's one required case for its named exception, docs/plan/PLAN.md (nl-28), agent-estate#1314's per-file case for its new docs/decisions/2026-09-08-index-coverage-1314.md (nl-29), agent-estate#1324's per-file case for its new docs/canonical/review-brief-template.md (nl-30), and the docs/decisions ADR PR's own per-file cases for its two new files, docs/decisions/2026-09-11-guard-fail-direction-when-the-check-cannot-be-read.md and docs/decisions/2026-09-11-measured-decision-not-to-build.md (nl-31, nl-32)", len(cases))
 	}
 }
 
