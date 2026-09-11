@@ -504,3 +504,87 @@ func TestAutoWatermarkExcludesNothing(t *testing.T) {
 		t.Fatalf("FilesIncluded = %d, FilesTotal = %d, want equal under auto watermark", m.FilesIncluded, m.FilesTotal)
 	}
 }
+
+// TestTokenUsageRecordParsesAndYieldsTurns is agent-estate#1392's own
+// mutation-check direction 1: a file carrying a token_usage_record --
+// Codex 0.154.0's real shape, minified from the live example this fix was
+// read against -- must now parse, and the genuine operator turn on either
+// side of it must still be extracted. Before this fix, one such line
+// anywhere in the file discarded the whole thing (files_parsed: 0,
+// entries: null), including every operator turn below it.
+func TestTokenUsageRecordParsesAndYieldsTurns(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFixture(t, dir, "token-usage.jsonl", []string{
+		`{"timestamp":"2026-01-01T00:00:00.000Z","type":"session_meta","payload":{"id":"fixture-session"}}`,
+		`{"timestamp":"2026-01-01T00:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"fixture: turn before the token_usage_record"}]}}`,
+		`{"timestamp":"2026-01-01T00:00:02.000Z","type":"token_usage_record","payload":{"thread_id":"fixture-thread","turn_id":"fixture-turn","session_id":"fixture-session","usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110}}}`,
+		`{"timestamp":"2026-01-01T00:00:03.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"fixture: turn after the token_usage_record"}]}}`,
+	})
+
+	m, err := buildManifest(dir)
+	if err != nil {
+		t.Fatalf("buildManifest: %v", err)
+	}
+	if len(m.FilesUnparseable) != 0 {
+		t.Fatalf("FilesUnparseable = %v, want none -- token_usage_record must not refuse the file", m.FilesUnparseable)
+	}
+	if m.FilesParsed != 1 {
+		t.Fatalf("FilesParsed = %d, want 1", m.FilesParsed)
+	}
+	if len(m.Entries) != 2 {
+		t.Fatalf("Entries = %d, want 2 -- both operator turns, one on each side of the token_usage_record", len(m.Entries))
+	}
+	byHash := map[string]bool{}
+	for _, e := range m.Entries {
+		if e.File != path {
+			t.Errorf("entry File = %q, want %q", e.File, path)
+		}
+		byHash[e.TextSHA256] = true
+	}
+	if !byHash[hashOf("fixture: turn before the token_usage_record")] || !byHash[hashOf("fixture: turn after the token_usage_record")] {
+		t.Fatalf("both operator turns must survive; got hashes %v", byHash)
+	}
+	if got := m.RecordTypeCounts["token_usage_record"]; got != 1 {
+		t.Fatalf("RecordTypeCounts[token_usage_record] = %d, want 1 -- a recognised-but-not-extracted type must still leave a visible trace", got)
+	}
+
+	var buf bytes.Buffer
+	PrintSummary(&buf, m, m.Dedup.CompactedUserTurnsDistinctTotal, m.Dedup.DroppedAsDuplicateOfResponseItem, m.Dedup.RecoveredOnlyInCompacted)
+	if !strings.Contains(buf.String(), "token_usage_record") {
+		t.Fatalf("PrintSummary output = %q, want the record type count to surface in the printed summary", buf.String())
+	}
+}
+
+// TestUnknownRecordTypeStillRejectedAlongsideTokenUsageRecord is agent-estate#1392's
+// own mutation-check direction 2, and the counter-case the brief asks for:
+// recognising token_usage_record must not become a general softening. A
+// file carrying BOTH a token_usage_record (now known) and a genuinely
+// unrecognised type must still be refused for the unrecognised one -- a
+// parser that accepts everything has no more integrity than one that
+// accepts nothing.
+func TestUnknownRecordTypeStillRejectedAlongsideTokenUsageRecord(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFixture(t, dir, "mixed.jsonl", []string{
+		`{"timestamp":"2026-01-01T00:00:00.000Z","type":"session_meta","payload":{"id":"fixture-session"}}`,
+		`{"timestamp":"2026-01-01T00:00:01.000Z","type":"token_usage_record","payload":{"thread_id":"fixture-thread","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`,
+		`{"timestamp":"2026-01-01T00:00:02.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"fixture: a turn that must NOT be extracted"}]}}`,
+		`{"timestamp":"2026-01-01T00:00:03.000Z","type":"a_shape_this_codebase_has_never_seen","payload":{}}`,
+	})
+
+	m, err := buildManifest(dir)
+	if err != nil {
+		t.Fatalf("buildManifest: %v", err)
+	}
+	if len(m.FilesUnparseable) != 1 || m.FilesUnparseable[0].Path != path {
+		t.Fatalf("FilesUnparseable = %v, want exactly [%s] -- the genuinely unknown type must still refuse the whole file", m.FilesUnparseable, path)
+	}
+	if !strings.Contains(m.FilesUnparseable[0].Reason, "a_shape_this_codebase_has_never_seen") {
+		t.Fatalf("FilesUnparseable reason = %q, want it to name the unknown type", m.FilesUnparseable[0].Reason)
+	}
+	if m.FilesParsed != 0 {
+		t.Fatalf("FilesParsed = %d, want 0 -- recognising token_usage_record must not let an unrelated unknown type through", m.FilesParsed)
+	}
+	if len(m.Entries) != 0 {
+		t.Fatalf("Entries = %d, want 0 -- nothing from a refused file, including the turn that precedes the unknown type", len(m.Entries))
+	}
+}

@@ -87,6 +87,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"time"
 
 	"github.com/jonhill90/agent-estate/estate/internal/rollout"
@@ -94,11 +95,30 @@ import (
 
 // knownRecordTypes is every top-level rollout record "type" this codebase
 // recognises: the three internal/rollout.AnalyzeFile extracts turns from
-// (session_meta, response_item, compacted) plus the four it deliberately
+// (session_meta, response_item, compacted) plus the five it deliberately
 // extracts nothing from but still recognises as legitimate rollout shapes
 // (event_msg, turn_context, world_state,
-// inter_agent_communication_metadata). Anything else is refused loudly by
-// validateKnownRecordTypes rather than silently ignored.
+// inter_agent_communication_metadata, token_usage_record). Anything else is
+// refused loudly by validateKnownRecordTypes rather than silently ignored.
+//
+// agent-estate#1392: token_usage_record added after reading its payload,
+// not assuming it. A live example (Codex 0.154.0, 2026-09-10):
+// {"thread_id","turn_id","session_id","root_turn_id","response_id",
+// "usage"/"turn_token_usage"/"thread_token_usage": each {input_tokens,
+// cached_input_tokens, cache_write_input_tokens, output_tokens,
+// reasoning_output_tokens, total_tokens}}. Pure token-accounting telemetry,
+// keyed by ids this package never reads -- no operator text, no assistant
+// text, nothing a turn's own meaning depends on. The same kind of record as
+// event_msg/turn_context already on this list, not a new kind of risk: one
+// unrecognised type that refused an entire file (including two genuine
+// operator turns further down) turned out to be exactly case 1 of the two
+// this package's own reviewer had to tell apart -- "a record this
+// extractor does not model but does not need" -- never case 2, "a record
+// that changes what the file means." The whitelist discipline itself is
+// unchanged: a record type NOT on this list still refuses its whole file,
+// on purpose (see this file's own package doc comment) -- this is one more
+// entry earned by reading its payload, not a policy change to accept
+// unknown shapes.
 var knownRecordTypes = map[string]bool{
 	"session_meta":                       true,
 	"response_item":                      true,
@@ -107,6 +127,7 @@ var knownRecordTypes = map[string]bool{
 	"turn_context":                       true,
 	"world_state":                        true,
 	"inter_agent_communication_metadata": true,
+	"token_usage_record":                 true,
 }
 
 // validateKnownRecordTypes reads path top to bottom, decoding only each
@@ -275,6 +296,18 @@ type Manifest struct {
 	EntriesFromResponseItem int             `json:"entries_from_response_item"`
 	EntriesFromCompacted    int             `json:"entries_from_compacted"`
 	Dedup                   DedupAccount    `json:"dedup"`
+
+	// RecordTypeCounts is every top-level record "type" seen across every
+	// parsed file, summed, keyed by the exact string knownRecordTypes checks
+	// against -- agent-estate#1392: a type this package recognises but
+	// extracts nothing from (event_msg, turn_context, world_state,
+	// inter_agent_communication_metadata, token_usage_record) must still
+	// leave a trace of how many were seen, the same discipline
+	// cmd/capturehealth's own RecordTypeCounts already applies to the same
+	// underlying rollout.FileAnalysis field -- otherwise "recognised, not
+	// extracted" and "silently vanished" are indistinguishable to a reader
+	// of this manifest.
+	RecordTypeCounts map[string]int `json:"record_type_counts"`
 }
 
 // ParseFailure names one file this tool could not read, and why -- never
@@ -369,6 +402,15 @@ func buildManifestFromMetas(root string, metas []fileMeta, watermark time.Time, 
 		}
 		m.FilesParsed++
 
+		if len(fa.RecordTypeCounts) > 0 {
+			if m.RecordTypeCounts == nil {
+				m.RecordTypeCounts = map[string]int{}
+			}
+			for k, v := range fa.RecordTypeCounts {
+				m.RecordTypeCounts[k] += v
+			}
+		}
+
 		for _, t := range fa.Turns {
 			entry := ManifestEntry{
 				File:        path,
@@ -424,6 +466,21 @@ func PrintSummary(w interface{ Write([]byte) (int, error) }, m Manifest, slice2D
 	fmt.Fprintf(w, "dedup account: %d distinct compacted turns, %d dropped as duplicate-of-response_item, %d recovered only-in-compacted\n",
 		m.Dedup.CompactedUserTurnsDistinctTotal, m.Dedup.DroppedAsDuplicateOfResponseItem, m.Dedup.RecoveredOnlyInCompacted)
 
+	// agent-estate#1392: every top-level record type seen, across every
+	// parsed file, including the ones this package recognises but extracts
+	// nothing from (event_msg, turn_context, world_state,
+	// inter_agent_communication_metadata, token_usage_record) -- the trace
+	// that makes "recognised, correctly not extracted" visible rather than
+	// indistinguishable from "silently vanished". Same field, same
+	// presentation cmd/capturehealth already applies to the same
+	// rollout.FileAnalysis data.
+	if len(m.RecordTypeCounts) > 0 {
+		fmt.Fprintln(w, "record types seen:")
+		for _, k := range sortedRecordTypeKeys(m.RecordTypeCounts) {
+			fmt.Fprintf(w, "  %-36s %d\n", k, m.RecordTypeCounts[k])
+		}
+	}
+
 	agree := m.Dedup.CompactedUserTurnsDistinctTotal == slice2Distinct &&
 		m.Dedup.DroppedAsDuplicateOfResponseItem == slice2Overlap &&
 		m.Dedup.RecoveredOnlyInCompacted == slice2Only
@@ -446,4 +503,17 @@ func PrintSummary(w interface{ Write([]byte) (int, error) }, m Manifest, slice2D
 	} else {
 		fmt.Fprintln(w, "unparseable files: none")
 	}
+}
+
+// sortedRecordTypeKeys mirrors cmd/capturehealth's own sortedKeys -- kept as
+// a second, package-local copy rather than an import, since these two
+// commands do not otherwise share a "report" type (see this file's own
+// ParseFailure doc comment for the same discipline applied to that type).
+func sortedRecordTypeKeys(m map[string]int) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
