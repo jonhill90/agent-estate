@@ -298,7 +298,7 @@ func runEstateAnyExit(t *testing.T, bin, dir string, env []string, args ...strin
 	t.Helper()
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = dir
-	cmd.Env = env
+	cmd.Env = withHermeticHookCheckout(t, env)
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
