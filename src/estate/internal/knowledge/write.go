@@ -433,7 +433,7 @@ func ResolveWritePath() (path string, requiresAck bool, err error) {
 
 // Write serializes res as indented JSON to path, creating its parent
 // directory if needed. This is the ONLY write this whole package
-// performs -- to its own output path, never to any of the five sources.
+// performs -- to its own output path, never to any of the seven sources.
 func Write(path string, res Result) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("cannot create %s: %w", filepath.Dir(path), err)

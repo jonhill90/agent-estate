@@ -168,8 +168,14 @@ func hasTag(tags []string, want string) bool {
 
 // TestGenerateReportsEverySourceHonestlyWhenAllFail is the whole "a
 // source that cannot be read must say so" requirement, exercised
-// end-to-end: six unreachable sources produce six SourceResults, all
-// OK=false with a Reason, never a silently empty Result.
+// end-to-end: seven unreachable sources produce seven SourceResults, all
+// OK=false with a Reason, never a silently empty Result. RepoRoot is
+// deliberately a directory that was never created (not merely an empty
+// path) -- repoDocsSource and skillsSource both key their own failure on
+// that, and skillsSource in particular treats an EXISTING repoRoot with no
+// docs/skills-registry.jsonl file yet as honest-empty (OK=true), not a
+// failure, so this fixture must fail repoRoot resolution itself to belong
+// in this "all fail" test at all (see TestSkillsSourceNonexistentRepoRootIsAlsoAFailure).
 func TestGenerateReportsEverySourceHonestlyWhenAllFail(t *testing.T) {
 	cfg := Config{
 		VaultDir:      "",
@@ -182,8 +188,8 @@ func TestGenerateReportsEverySourceHonestlyWhenAllFail(t *testing.T) {
 		},
 	}
 	res := Generate(cfg, time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC))
-	if len(res.Sources) != 6 {
-		t.Fatalf("got %d sources, want 6", len(res.Sources))
+	if len(res.Sources) != 7 {
+		t.Fatalf("got %d sources, want 7", len(res.Sources))
 	}
 	for _, s := range res.Sources {
 		if s.OK {

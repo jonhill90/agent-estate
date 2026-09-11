@@ -2,7 +2,7 @@ package knowledge
 
 import "time"
 
-// Generate runs all six sources and assembles one Result. Each source
+// Generate runs all seven sources and assembles one Result. Each source
 // is independent: one failing never stops the others, and never removes
 // its own line from Sources -- see this package's own doc comment on
 // honest absence. now is injected so tests get a fixed GeneratedAt
@@ -44,18 +44,22 @@ func Generate(cfg Config, now time.Time) Result {
 	res.Sources = append(res.Sources, catalogueRes)
 	res.Items = append(res.Items, catalogueItems...)
 
+	skillsRes, skillsItems := skillsSource(cfg.RepoRoot)
+	res.Sources = append(res.Sources, skillsRes)
+	res.Items = append(res.Items, skillsItems...)
+
 	addSourceTag(res.Items)
 
 	return res
 }
 
 // addSourceTag appends "source:<Item.Source>" to every item's own
-// StructuralTags, in place -- agent-estate#1069. Every one of the six
+// StructuralTags, in place -- agent-estate#1069. Every one of the seven
 // readers above already sets Item.Source to its own family name
 // ("github-stars", "repo-docs", "corpus-directive", "catalogue-source",
-// ...); this is the one place all six converge before Generate returns,
-// so it is the one place that needs to know about the filter rather than
-// each source file
+// "skill-registry", ...); this is the one place all seven converge before
+// Generate returns, so it is the one place that needs to know about the
+// filter rather than each source file
 // duplicating the same one-line append. The tag composes with the
 // existing exact-tag filter (extractTagFilters/itemHasAllTags in
 // query.go) for free -- it is a key:value structural tag exactly like
