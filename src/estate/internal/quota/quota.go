@@ -13,9 +13,48 @@
 //     never a pass. Blindness is the condition that cost him the week.
 //  2. A STALE READING IS UNKNOWN. A number from hours ago describes a budget
 //     that has since been spent. Freshness is part of validity, not a detail.
+//
+// agent-estate#1163 (Read had no timeout at all, so a stalled codexbar hung
+// the gate instead of refusing) asked which of three shapes a bounded
+// read should take, and required the rejected two be argued against, not
+// just this package's own choice asserted:
+//
+//   - FAIL OPEN on a timeout -- dispatch anyway, quota unknown -- was
+//     explicitly considered and rejected. This is the shape agent-estate
+//     #1383 chose for the red-main check, and that reasoning is real for
+//     an ADVISORY about a DIFFERENT branch's health. Quota is not
+//     advisory: exceeding it kills the turn mid-work (agent-estate#1127's
+//     122 uncommitted insertions, the literal incident that field exists
+//     to prevent). The cost of being wrong is asymmetric in a direction
+//     #1383's own case does not share -- a needless refusal here wastes a
+//     few minutes; dispatching into an exhausted quota destroys a turn's
+//     work outright. Rule 1 above already settles this and a timeout does
+//     not get a new answer to the same question.
+//   - A LAST-KNOWN-GOOD READING WITH AN AGE (permit on a timeout if a
+//     recent-enough cached value looked healthy) was also considered and
+//     rejected, on agent-estate#474's own authority, a closed issue
+//     recording this exact failure class under a different observer
+//     (`codexbar guard` degrading 5x, not `usage` timing out): "quota
+//     availability must not be inferred from a blocked or stale
+//     observer." A cached reading, by construction, describes what the
+//     window looked like before whatever is blocking the LIVE probe --
+//     using it to permit is exactly the inference that line forbids, not
+//     a milder version of it. #474 also states directly: "Do not fix this
+//     by defaulting UNKNOWN to safe" -- rejecting fail-open in the same
+//     breath. Rule 2 above already encodes the age half of this (a stale
+//     reading is unknown); this package has never had a code path that
+//     uses an old reading to permit, and this timeout does not become the
+//     first one.
+//
+// So a timeout is exactly rule 1: unmeasurable, refuse -- and, per
+// agent-estate#474's other requirement ("make the failure loud... a
+// specific code and it should be interpreted, not ignored"), Read below
+// says so as its own, specifically-named cause, not folded into the
+// generic "codexbar unreachable" wording a plain exit failure gets.
 package quota
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os/exec"
@@ -72,12 +111,54 @@ type payload struct {
 // MaxAge past which a reading is treated as no reading at all.
 const MaxAge = 20 * time.Minute
 
+// ReadTimeout bounds the codexbar call below -- agent-estate#1163: Read used
+// to run `exec.Command(...).Output()` with no deadline at all, so a stalled
+// codexbar made the gate hang instead of producing its intended fail-closed
+// refusal, stalling every dispatch and the Director's own tick along with
+// it. A var, not a const, so a test can lower it temporarily and prove the
+// bound is real without waiting out the production value.
+//
+// 60s, not a round number pulled from nowhere -- measured fresh tonight
+// (agent-estate#1163's own brief: do not trust the issue's 2026-09-05
+// "8-9 seconds", things move), five consecutive live `codexbar usage
+// --provider claude --json` calls on this host under real load (3
+// worktrees->33 tonight, load average 3.0-4.3): four landed at 17.9-18.4s,
+// one outlier at 41.2s. Following #428's own methodology for this exact
+// class of timeout ("4x the measured call, not a round number") rather than
+// inventing a fresh one: 60s clears the observed outlier with real margin
+// (~1.5x) while still bounding a genuine hang to roughly the same order of
+// magnitude #428 itself judged acceptable for a stalled quota probe.
+var ReadTimeout = 60 * time.Second
+
+// runCodexbar is a package-level seam so a test can drive Read's timeout
+// path deterministically -- codexbar itself has no injectable fake short of
+// this, and a real subprocess that never exits is not something a unit
+// test should depend on. Mirrors the discipline stars.go's defaultGHRunner
+// and build_commit.go's defaultGitRunner already established elsewhere in
+// this daemon (agent-estate#1321's own comment cites the same precedent for
+// this package's sibling ReadQuota seam in pressure.Limits).
+var runCodexbar = defaultRunCodexbar
+
+func defaultRunCodexbar(ctx context.Context, args ...string) ([]byte, error) {
+	return exec.CommandContext(ctx, "codexbar", args...).Output()
+}
+
 // Read takes a fresh reading. Every failure path returns an error: there is no
 // value this function can return that means "could not tell, carry on".
 func Read(now time.Time) (Reading, error) {
-	cmd := exec.Command("codexbar", "usage", "--provider", "claude", "--json")
-	out, err := cmd.Output()
+	ctx, cancel := context.WithTimeout(context.Background(), ReadTimeout)
+	defer cancel()
+	out, err := runCodexbar(ctx, "usage", "--provider", "claude", "--json")
 	if err != nil {
+		if ctx.Err() != nil {
+			// Named specifically, not folded into the generic "unreachable"
+			// wrap below -- agent-estate#474's own explicit ask, applied
+			// one level up: a timeout is not the same claim as "codexbar
+			// exited non-zero" or "codexbar was never on PATH", and an
+			// operator or a later fix should not have to guess which one
+			// happened from an error string that reads the same either way.
+			return Reading{}, fmt.Errorf("codexbar timed out after %s -- refusing rather than guessing (agent-estate#1163: an unbounded call here used to hang the gate instead of refusing)", ReadTimeout)
+		}
 		return Reading{}, fmt.Errorf("codexbar unreachable: %w", err)
 	}
 	var ps []payload
