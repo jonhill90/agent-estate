@@ -68,15 +68,97 @@ type Review struct {
 // exempted; everything else here errs toward withholding, because a withheld
 // row is still listed and reachable, while a leaked one is not recallable.
 //
-// "token" on its own is cost vocabulary in this corpus ("waste tokens",
-// "token usage") far more often than a credential, so only credential-token
-// phrases match.
-var sensitive = regexp.MustCompile(`(?i)\b(sk-[a-z0-9]{6,}|ghp_[a-z0-9]{6,}|xox[abp]-[a-z0-9-]{6,}|password|passwd|api[ -]?key|secret|bearer|credential|keychain|botfather|(bearer|api|access|auth|bot|oauth|refresh|session) tokens?|friend'?s? account|my friend|switch(ed|ing)? account|claude account|copilot account|subscriptions?|\bsubs\b|hill90admin)\b`)
+// Three layers, checked in order, any one of which withholds:
+//
+//  1. keywords -- credential words, known key prefixes, and the operator's
+//     own accounts/arrangements;
+//  2. secret SHAPE, independent of any keyword -- a long hex run, a JWT's
+//     three dot-separated segments, a `token=`/`secret:`-style assignment,
+//     or a long mixed-case-or-punctuated alphanumeric literal. A real secret
+//     pasted after a word this list does not know still matches here;
+//  3. the word "token" itself, which in this corpus is cost vocabulary
+//     ("waste tokens", "token usage", "16k tokens") far more often than a
+//     credential. It is withheld unless cost vocabulary sits within ~60
+//     characters of it, and always withheld when a value-shaped literal
+//     follows it. The first cut exempted bare "token" outright and let
+//     "my token is 9f8e7d…" through (review on #1403); the cut before that
+//     withheld 145 of 970 prompts on the bare word. This lands at 121
+//     (measured 2026-09-11), every one listed by id and reachable with
+//     --private.
+var sensitiveKeywords = regexp.MustCompile(`(?i)\b(sk-[a-z0-9]{6,}|ghp_[a-z0-9]{6,}|xox[abp]-[a-z0-9-]{6,}|password|passwd|api[ -]?key|secret|bearer|credential|keychain|botfather|friend'?s? account|my friend|switch(ed|ing)? account|claude account|copilot account|subscriptions?|\bsubs\b|hill90admin)\b`)
+var secretHexRun = regexp.MustCompile(`\b[0-9a-fA-F]{24,}\b`)
+var secretJWT = regexp.MustCompile(`\b[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b`)
+var secretAssignment = regexp.MustCompile(`(?i)\b(token|secret|password|passwd|api[_ -]?key|apikey)\s*[:=]\s*\S{8,}`)
+var longLiteral = regexp.MustCompile(`\b[A-Za-z0-9_-]{20,}\b`)
+var corpusIDPrefix = regexp.MustCompile(`^(it|mp|hp|resp)[-_]`)
+var tokenWord = regexp.MustCompile(`(?i)\btokens?\b`)
+
+// a literal of 12+ key characters within three words after "token"; the
+// digit requirement is checked in Go so "tokens per 5-hour block" passes.
+var tokenThenValue = regexp.MustCompile(`(?i)\btokens?\b\W+(?:\w+\W+){0,3}?([A-Za-z0-9_.-]{12,})`)
+var costVocab = regexp.MustCompile(`(?i)\b(waste\w*|wasting|burn\w*|spend\w*|spent|sav\w*|usage|use[ds]?|using|cost\w*|budge\w*|count\w*|input|output|cached?|cache|context|million|thousand|per|quota|limit\w*|window|consum\w*|expensive|cheap\w*|efficien\w*|resources?|managed|min\W?max\w*|k)\b|\b\d+k?\b|\$|%`)
+
+// secretShapedLiteral reports a long alphanumeric run that looks like a key:
+// digits and letters, and either both cases or an underscore/hyphen inside.
+// Corpus ids (it-…, mp-…) and plain hyphenated words are not keys.
+func secretShapedLiteral(t string) string {
+	for _, s := range longLiteral.FindAllString(t, -1) {
+		if corpusIDPrefix.MatchString(s) {
+			continue
+		}
+		hasDigit := strings.ContainsAny(s, "0123456789")
+		hasLower := strings.ContainsAny(s, "abcdefghijklmnopqrstuvwxyz")
+		hasUpper := strings.ContainsAny(s, "ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+		punct := strings.Contains(s, "_") || strings.Contains(strings.Trim(s, "-"), "-")
+		if hasDigit && (hasLower || hasUpper) && ((hasLower && hasUpper) || punct) {
+			return s
+		}
+	}
+	return ""
+}
+
+// tokenWithoutCostContext reports a "token"/"tokens" whose surrounding ~60
+// characters carry no cost vocabulary -- read as the credential noun.
+func tokenWithoutCostContext(t string) bool {
+	for _, loc := range tokenWord.FindAllStringIndex(t, -1) {
+		lo, hi := loc[0]-60, loc[1]+60
+		if lo < 0 {
+			lo = 0
+		}
+		if hi > len(t) {
+			hi = len(t)
+		}
+		window := t[lo:loc[0]] + " " + t[loc[1]:hi]
+		if !costVocab.MatchString(window) {
+			return true
+		}
+	}
+	return false
+}
 
 func sensitiveReason(texts ...string) string {
+	const prefix = "matches the credential/personal-arrangement filter ("
 	for _, t := range texts {
-		if m := sensitive.FindString(t); m != "" {
-			return "matches the credential/personal-arrangement filter (" + strings.ToLower(m) + ")"
+		if m := sensitiveKeywords.FindString(t); m != "" {
+			return prefix + strings.ToLower(m) + ")"
+		}
+		if secretHexRun.MatchString(t) {
+			return prefix + "hex run)"
+		}
+		if secretJWT.MatchString(t) {
+			return prefix + "jwt shape)"
+		}
+		if secretAssignment.MatchString(t) {
+			return prefix + "key=value assignment)"
+		}
+		if s := secretShapedLiteral(t); s != "" {
+			return prefix + "secret-shaped literal)"
+		}
+		if m := tokenThenValue.FindStringSubmatch(t); m != nil && strings.ContainsAny(m[1], "0123456789") {
+			return prefix + "token followed by a value)"
+		}
+		if tokenWithoutCostContext(t) {
+			return prefix + "token)"
 		}
 	}
 	return ""

@@ -176,15 +176,49 @@ func TestPagingBoundsAndTrailer(t *testing.T) {
 	}
 }
 
+// Direction 1: cost vocabulary must come through. "token" in this corpus is
+// almost always about spend, and withholding those rows costs the artifact
+// real, legible content (145 of 970 prompts on the bare word alone).
 func TestTokenCostVocabularyIsNotASecret(t *testing.T) {
-	if got := sensitiveReason("watch token usage and set a cron"); got != "" {
-		t.Fatalf("'token usage' is cost vocabulary, got withheld: %s", got)
+	for _, s := range []string{
+		"watch token usage and set a cron",
+		"I dont want to waste tokens having something stop halfway",
+		"we burned 2 million tokens on that",
+		"keep the preamble under 16k tokens",
+		"tokens per 5-hour block, then wind down",
+		"we are wasting my token we could be working on that graph",
+		"delegate to subagents to min/max tokens",
+		// corpus ids are long alphanumerics with digits and letters; not keys
+		"see it-0476148f2282ad32 and mp-8abab921cefb695d for the source",
+	} {
+		if got := sensitiveReason(s); got != "" {
+			t.Errorf("cost vocabulary withheld: %q -> %s", s, got)
+		}
 	}
-	if got := sensitiveReason("paste the bearer token here"); got == "" {
-		t.Fatal("'bearer token' must be withheld")
-	}
-	if got := sensitiveReason("as soon as gone i will use my friends account"); got == "" {
-		t.Fatal("a personal arrangement must be withheld")
+}
+
+// Direction 2 (review on #1403): a real secret introduced by the bare word
+// "token" -- no qualifying word, no known prefix -- must be withheld. These
+// are the reviewer's exact constructed rows, plus the boundary case it named.
+func TestBareTokenWithASecretValueIsWithheld(t *testing.T) {
+	for _, s := range []string{
+		"my token is 9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c",
+		"here is the token: gh_1234567890abcdefghijklmnop",
+		"token=abcdef0123456789abcdef0123456789",
+		"the token is 4f8a9b2c7d1e6f3a9b2c7d1e6f3a9b2c",
+		"paste the token I gave you into .env",
+		"copy this token abc123DEF456ghi789 somewhere safe",
+		"here's my github token ghp_abcdef1234567890",
+		// secret shape with no keyword at all
+		"use eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c for the call",
+		"the value is 3f2a9c8b7d6e5f4a3b2c1d0e9f8a7b6c5d4e3f2a",
+		// existing cases
+		"paste the bearer token here",
+		"as soon as gone i will use my friends account",
+	} {
+		if got := sensitiveReason(s); got == "" {
+			t.Errorf("secret passed through unwithheld: %q", s)
+		}
 	}
 }
 
