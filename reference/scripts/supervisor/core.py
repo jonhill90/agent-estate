@@ -73,7 +73,7 @@ from core_lane_relation import (  # noqa: F401 -- re-exported for callers/tests
     pane_id_for_task,
     pid_is_alive,
 )
-from core_ledger_core import LedgerCoreMixin, LockTimeout  # noqa: F401 -- LockTimeout re-exported
+from core_ledger_core import LedgerCoreMixin, LockTimeout, LedgerSymlinkPreconditionError  # noqa: F401 -- both re-exported
 from core_ledger_schema import LedgerSchemaMixin
 from core_ledger_lanes import LedgerLanesMixin
 from core_ledger_task_queries import LedgerTaskQueriesMixin
