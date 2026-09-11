@@ -551,8 +551,21 @@ def load(judged, ledger):
 
 def main():
     ap = argparse.ArgumentParser()
+    # agent-estate#1362: the same defect PR #1360 fixed in
+    # prompt_capture_hook.py and mine_prompts.py. Defaulting this to the
+    # supervisor state dir silently wrote every judgement this tool ever
+    # produced into ~/.local/state/agent-dotfiles-supervisor/ledger.sqlite3
+    # -- the dead DB agent-estate#942 says nothing may use -- while
+    # reporting success. Unlike its two siblings, this one writes `items`:
+    # judgements carrying kind/weight/status, not just raw prompt rows --
+    # 709 orphaned judgements, 53 of them hard/acted law, were sitting
+    # there invisible to internal/corpus.Hard() (every dispatch's grounding
+    # banner), which reads only the corpus. ~/corpus/ledger.sqlite3 is a
+    # compat symlink to corpus.sqlite3, so this resolves to
+    # internal/corpus.Path().
     ap.add_argument("--state-dir", default=os.environ.get(
-        "AGENT_SUPERVISOR_STATE_DIR", os.path.expanduser("~/.local/state/agent-dotfiles-supervisor")))
+        "AGENT_CORPUS_DIR", os.path.expanduser("~/corpus")),
+                     help="corpus directory; must contain corpus.sqlite3 (ledger.sqlite3 is a compat symlink to it)")
     ap.add_argument("--extract", action="store_true")
     ap.add_argument("--drop-noise", action="store_true",
                      help="mechanically exclude agent/system-authored rows (no model), and flag "
