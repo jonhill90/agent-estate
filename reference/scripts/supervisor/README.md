@@ -40,7 +40,7 @@ Telegram offset — the correctness property `inbox.sh`'s own offset lock
 (see its header) already gives independently, this is belt-and-suspenders
 so a raced start fails loudly instead of relying on that deeper net.
 
-`tests/supervisor/test_inbox_poll_service.sh` drives the real script through
+`reference/tests-supervisor/test_inbox_poll_service.sh` drives the real script through
 a real, throwaway LaunchAgent (same posture as
 `test_watchdog_launchd_relaunch.sh`, #75) and proves: a second instance is
 refused while the lock is held; `tmux kill-server` on an isolated socket
@@ -575,7 +575,7 @@ Two consequences of that, both deliberate:
   claims and worktrees — real resources. A bookkeeping write with no reader is
   not one: a broken ledger that stopped the estate dispatching would trade the
   estate for a record nobody consumes. Failures are loud on stderr and the run
-  stands. `tests/supervisor/test_dispatch.sh` mutation-checks this by making
+  stands. `reference/tests-supervisor/test_dispatch.sh` mutation-checks this by making
   the write fatal and asserting the suite goes red.
 - **The write is last, after every abort path.** A record asserting work is in
   flight, left by a dispatch that then aborted, is worse than no record — the
@@ -693,7 +693,7 @@ lane, and adding or deleting one changes no other file under `scripts/`.
 rather than staleness; cost nothing when unused; name every state.
 
 Nothing headless calls this, by rule and now by check
-(`tests/supervisor/test_laneview_isolation.sh`). It exists for the human
+(`reference/tests-supervisor/test_laneview_isolation.sh`). It exists for the human
 half — which is why it is documented here rather than only in its own
 directory: until #4, a human-invoked tool that no document told a human to
 invoke was, from outside, indistinguishable from one nobody invokes.
@@ -927,7 +927,7 @@ python3 -m py_compile scripts/supervisor/*.py
 
 The first command is this repository's own test command, run locally from
 the repository root; it discovers this core's tests under
-`tests/supervisor/` along with the rest of the suite — including the
+`reference/tests-supervisor/` along with the rest of the suite — including the
 stub-driven bash suites for `lanes.sh`, `watchdog.sh`, `claim.sh`,
 `worktree.sh` and `dispatch.sh`, which `test_shell_suites.py` runs as
 subtests. Until that shim existed the sentence above was false for them: they
@@ -939,14 +939,14 @@ but not as that one command (agent-supervisor#440: the 89 bash suites,
 executed serially inside `test_shell_suites_pass`, owned ~99% of a 22-minute
 run — that count is #440's own historical measurement at the time of that
 PR, not a claim about today; re-counted for this pass with `find
-tests/supervisor -name 'test_*.sh' | wc -l` and confirmed against
-`plan_shell_shards.py`'s own discovery: **106** suites now, not 89 — the
+reference/tests-supervisor -name 'test_*.sh' | wc -l` and confirmed against
+`plan_shell_shards.py`'s own discovery: **165** suites now (re-counted 2026-09-11 for agent-estate#1397; an earlier pass had counted 106), not 89 — the
 suite has grown since #440, this is not a retraction of #440's number). The
 Python tests run in their own `unit-tests` job
 (`SHELL_SUITE_SKIP=1` so this job does not also run all 89 bash suites);
 `plan-shell-shards` bin-packs the currently-discovered `test_*.sh` files by
 measured wall time (`scripts/ci/plan_shell_shards.py`,
-`tests/supervisor/shell_suite_timings.json`) into 5 balanced `shell-suites`
+`reference/tests-supervisor/shell_suite_timings.json`) into 5 balanced `shell-suites`
 matrix shards, each invoking `test_shell_suites.py` directly with
 `SHELL_SUITE_ONLY` set to its assigned subset. All three jobs must be green
 for `ci_gate.py` to allow a merge — see `merge-pr.sh`.

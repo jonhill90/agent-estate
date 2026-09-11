@@ -11,7 +11,7 @@ generated:
 > the TUI into `src/tui` and was written against the retired `agent-tui` repo.
 >
 > **Verified today, against the tree:** the code lives in `src/tui`
-> (48 packages); the entrypoints are `src/tui/cmd/{agentsdemo,demo,estate,fakemcp,mergepr,namingdebtbaseline,navwalk,prverdict,skillinvocations}`.
+> (54 packages, `go list ./src/tui/... | wc -l`, re-measured 2026-09-11 for agent-estate#1397 — an earlier pass counted 48 and listed 9 entrypoints); the entrypoints are `src/tui/cmd/{agentsdemo,demo,estate,fakemcp,mergepr,namingdebtbaseline,navwalk,prverdict,skillinvocations,vhscapture}`.
 > Sibling documents referenced below (`docs/PRD.md`, `docs/SPEC.md`,
 > `docs/SPEC-shell.md`, `docs/SPEC-agentbox-execution-mode.md`) **were deleted**
 > and are not coming back.
