@@ -58,3 +58,10 @@
 {"at":"2026-09-10T23:58:10Z","phase_item":"phase-3","src_head":"04aee5db76c34d1dd6068901176f32f7067752da","artifact":"https://github.com/jonhill90/agent-estate/pull/1366","gap_seconds":417299,"observed_turns":44,"observed_spend_usd":55.13170929999999,"observed_turns_with_cost":42}
 {"at":"2026-09-11T00:26:37Z","phase_item":"phase-3","src_head":"04aee5db76c34d1dd6068901176f32f7067752da","artifact":"https://github.com/jonhill90/agent-estate/pull/1367","gap_seconds":1707,"observed_turns":0}
 {"at":"2026-09-11T00:50:43Z","phase_item":"phase-3","src_head":"3ae37a8836d387c2b5e992034ff247ea45fbed68","artifact":"https://github.com/jonhill90/agent-estate/pull/1374","gap_seconds":1446,"observed_turns":0}
+{"at":"2026-09-11T01:02:32Z","phase_item":"phase-3","src_head":"417b8385f981722b4ac081aa269f0b4899c08940","artifact":"https://github.com/jonhill90/agent-estate/pull/1376","gap_seconds":709,"observed_turns":0}
+{"at":"2026-09-11T01:18:27Z","phase_item":"phase-3","src_head":"417b8385f981722b4ac081aa269f0b4899c08940","artifact":"https://github.com/jonhill90/agent-estate/issues/1095","gap_seconds":955,"observed_turns":0}
+{"at":"2026-09-11T01:37:32Z","phase_item":"phase-3","src_head":"2fbce3b069163a3ae21718a3f908d995db84ca8e","artifact":"https://github.com/jonhill90/agent-estate/pull/1377","gap_seconds":1145,"observed_turns":0}
+{"at":"2026-09-11T01:50:42Z","phase_item":"phase-3","src_head":"2fbce3b069163a3ae21718a3f908d995db84ca8e","artifact":"https://github.com/jonhill90/agent-estate/issues/1380","gap_seconds":790,"observed_turns":0}
+{"at":"2026-09-11T02:10:37Z","phase_item":"phase-3","src_head":"2fbce3b069163a3ae21718a3f908d995db84ca8e","artifact":"https://github.com/jonhill90/agent-estate/pull/1381","gap_seconds":1195,"observed_turns":0}
+{"at":"2026-09-11T02:26:54Z","phase_item":"phase-3","src_head":"73dc987551e9c7e6daa422c0b6c1474f1fbd13f8","artifact":"https://github.com/jonhill90/agent-estate/pull/1378","gap_seconds":977,"observed_turns":0}
+{"at":"2026-09-11T02:34:40Z","phase_item":"phase-3","src_head":"73dc987551e9c7e6daa422c0b6c1474f1fbd13f8","artifact":"https://github.com/jonhill90/agent-estate/pull/1381","gap_seconds":466,"observed_turns":0}
