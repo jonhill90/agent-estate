@@ -64,9 +64,8 @@ type Review struct {
 // credential words, and the operator's own accounts or arrangements
 // (CLAUDE.local.md: "anything about his accounts, credentials, or personal
 // arrangements ... they are context you hold, not content you publish").
-// "token usage"/"token spend" are cost vocabulary, not secrets, and are
-// exempted; everything else here errs toward withholding, because a withheld
-// row is still listed and reachable, while a leaked one is not recallable.
+// It errs toward withholding, because a withheld row is still listed and
+// reachable, while a leaked one is not recallable.
 //
 // Three layers, checked in order, any one of which withholds:
 //
@@ -74,23 +73,43 @@ type Review struct {
 //     own accounts/arrangements;
 //  2. secret SHAPE, independent of any keyword -- a long hex run, a JWT's
 //     three dot-separated segments, a `token=`/`secret:`-style assignment,
-//     or a long mixed-case-or-punctuated alphanumeric literal. A real secret
-//     pasted after a word this list does not know still matches here;
+//     or any UNBROKEN alphanumeric run of 20+ characters that mixes digits
+//     and letters, whatever its case. Separators (`-`, `_`, `.`, `/`) end a
+//     run, so a hyphenated deployment name such as `audit-hill90-ui-client`
+//     or a path segment is judged piece by piece and passes, while a pasted
+//     key's own body -- which has no separators -- is caught;
 //  3. the word "token" itself, which in this corpus is cost vocabulary
 //     ("waste tokens", "token usage", "16k tokens") far more often than a
 //     credential. It is withheld unless cost vocabulary sits within ~60
 //     characters of it, and always withheld when a value-shaped literal
-//     follows it. The first cut exempted bare "token" outright and let
-//     "my token is 9f8e7d…" through (review on #1403); the cut before that
-//     withheld 145 of 970 prompts on the bare word. This lands at 121
-//     (measured 2026-09-11), every one listed by id and reachable with
-//     --private.
-var sensitiveKeywords = regexp.MustCompile(`(?i)\b(sk-[a-z0-9]{6,}|ghp_[a-z0-9]{6,}|xox[abp]-[a-z0-9-]{6,}|password|passwd|api[ -]?key|secret|bearer|credential|keychain|botfather|friend'?s? account|my friend|switch(ed|ing)? account|claude account|copilot account|subscriptions?|\bsubs\b|hill90admin)\b`)
+//     follows it.
+//
+// Which side this errs on, stated once: WITHHOLDING. A leaked secret is
+// unrecoverable and this artifact is meant to be publishable; a wrongly
+// withheld row is one of the operator's own prompts he cannot read here, but
+// it is listed by id and reachable with --private. So the rules above accept
+// known false positives -- a 40-hex git SHA reads as a hex run (1 of 970
+// prompts tonight), "ssh key" withholds prompts about provisioning a key
+// (3 of 970) -- rather than loosen.
+//
+// The residual gap this accepts, named rather than claimed away: a secret
+// whose longest unbroken alphanumeric run is UNDER 20 characters and which
+// is introduced by neither a credential word nor "token" -- a UUID-shaped
+// key, a short PIN, "use ab12cd34ef56gh78 to log in" -- passes. Below 20
+// characters the shape of a key is the shape of an ordinary identifier, and
+// no character-class or entropy rule separates them without withholding this
+// corpus's own infrastructure vocabulary; the cut was measured, not assumed.
+//
+// History: the first cut withheld 145 of 970 prompts on the bare word
+// "token"; the second exempted it and let "my token is 9f8e7d…" through;
+// the third caught that but scored hyphenated identifiers as keys and missed
+// single-case keys of any length (review on #1403, twice). This lands at 120
+// (measured 2026-09-11), every one listed by id and reachable with --private.
+var sensitiveKeywords = regexp.MustCompile(`(?i)\b(sk-[a-z0-9]{6,}|ghp_[a-z0-9]{6,}|xox[abp]-[a-z0-9-]{6,}|password|passwd|passphrase|api[ -]?key|secret|bearer|creds?|credentials?|keychain|botfather|private key|ssh key|friend'?s? account|my friend|switch(ed|ing)? account|claude account|copilot account|subscriptions?|\bsubs\b|hill90admin)\b`)
 var secretHexRun = regexp.MustCompile(`\b[0-9a-fA-F]{24,}\b`)
 var secretJWT = regexp.MustCompile(`\b[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b`)
 var secretAssignment = regexp.MustCompile(`(?i)\b(token|secret|password|passwd|api[_ -]?key|apikey)\s*[:=]\s*\S{8,}`)
-var longLiteral = regexp.MustCompile(`\b[A-Za-z0-9_-]{20,}\b`)
-var corpusIDPrefix = regexp.MustCompile(`^(it|mp|hp|resp)[-_]`)
+var alnumRun = regexp.MustCompile(`[A-Za-z0-9]{20,}`)
 var tokenWord = regexp.MustCompile(`(?i)\btokens?\b`)
 
 // a literal of 12+ key characters within three words after "token"; the
@@ -98,19 +117,15 @@ var tokenWord = regexp.MustCompile(`(?i)\btokens?\b`)
 var tokenThenValue = regexp.MustCompile(`(?i)\btokens?\b\W+(?:\w+\W+){0,3}?([A-Za-z0-9_.-]{12,})`)
 var costVocab = regexp.MustCompile(`(?i)\b(waste\w*|wasting|burn\w*|spend\w*|spent|sav\w*|usage|use[ds]?|using|cost\w*|budge\w*|count\w*|input|output|cached?|cache|context|million|thousand|per|quota|limit\w*|window|consum\w*|expensive|cheap\w*|efficien\w*|resources?|managed|min\W?max\w*|k)\b|\b\d+k?\b|\$|%`)
 
-// secretShapedLiteral reports a long alphanumeric run that looks like a key:
-// digits and letters, and either both cases or an underscore/hyphen inside.
-// Corpus ids (it-…, mp-…) and plain hyphenated words are not keys.
+// secretShapedLiteral reports an unbroken alphanumeric run of 20+ characters
+// that mixes digits and letters, regardless of case. Separators end a run,
+// so hyphenated identifiers and paths are judged segment by segment; corpus
+// ids (it-…, mp-…) carry a 16-hex body and fall under the floor.
 func secretShapedLiteral(t string) string {
-	for _, s := range longLiteral.FindAllString(t, -1) {
-		if corpusIDPrefix.MatchString(s) {
-			continue
-		}
+	for _, s := range alnumRun.FindAllString(t, -1) {
 		hasDigit := strings.ContainsAny(s, "0123456789")
-		hasLower := strings.ContainsAny(s, "abcdefghijklmnopqrstuvwxyz")
-		hasUpper := strings.ContainsAny(s, "ABCDEFGHIJKLMNOPQRSTUVWXYZ")
-		punct := strings.Contains(s, "_") || strings.Contains(strings.Trim(s, "-"), "-")
-		if hasDigit && (hasLower || hasUpper) && ((hasLower && hasUpper) || punct) {
+		hasLetter := strings.ContainsAny(s, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+		if hasDigit && hasLetter {
 			return s
 		}
 	}

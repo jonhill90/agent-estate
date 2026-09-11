@@ -190,10 +190,29 @@ func TestTokenCostVocabularyIsNotASecret(t *testing.T) {
 		"delegate to subagents to min/max tokens",
 		// corpus ids are long alphanumerics with digits and letters; not keys
 		"see it-0476148f2282ad32 and mp-8abab921cefb695d for the source",
+		// second review on #1403: hyphenated deployment names and paths mix
+		// digits and letters segment by segment and are not keys
+		"audit-hill90-ui-client rollback of the observability-alerts change",
+		"the tree at Users-jon-source-repos-Personal-Hill90 is the one to read",
+		"roll back deploy-2026-09-11-hill90-app-v2 before the next tick",
 	} {
 		if got := sensitiveReason(s); got != "" {
-			t.Errorf("cost vocabulary withheld: %q -> %s", s, got)
+			t.Errorf("cost vocabulary or ordinary identifier withheld: %q -> %s", s, got)
 		}
+	}
+}
+
+// The residual gap, pinned so it stays named rather than drifting: a secret
+// whose longest unbroken alphanumeric run is under 20 characters, with no
+// credential word and no "token", passes. If a change closes this, update
+// the comment in review.go and flip this test; if a change widens it, the
+// test above must catch what widened.
+func TestResidualGapIsTheOneNamed(t *testing.T) {
+	if got := sensitiveReason("use ab12cd34ef56gh78 to log in"); got != "" {
+		t.Fatalf("the named residual moved: a 16-char keyword-free value is now withheld (%s) -- update review.go's comment", got)
+	}
+	if got := sensitiveReason("use ab12cd34ef56gh78ij90 to log in"); got == "" {
+		t.Fatal("the 20-character floor moved: a 20-char keyword-free value passed")
 	}
 }
 
@@ -212,6 +231,14 @@ func TestBareTokenWithASecretValueIsWithheld(t *testing.T) {
 		// secret shape with no keyword at all
 		"use eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c for the call",
 		"the value is 3f2a9c8b7d6e5f4a3b2c1d0e9f8a7b6c5d4e3f2a",
+		// second review on #1403: single-case keys of any length, no keyword
+		"paste this in: gskq29fh3nvmzax7wlpe9k3jf7h2mzq8x1v5n0c4b6d8e2a1f9c7b3d5e0a2f4c6b8",
+		"the api response included z9x8w7v6u5t4s3r2q1p0o9n8m7l6k5j4i3h2g1f0e9d8c7b6a5",
+		"here is the value you need gskq29fh3nvmzax7wlpe for the deploy",
+		"here are the creds: user and pass in the vault",
+		"I also need an ssh key so you can rebuild the vps",
+		// a 40-hex git SHA reads as a hex run: an accepted false positive
+		"head is 08f76bcfaaf06ae332fb2d3af1aef6c2f82509aa on main",
 		// existing cases
 		"paste the bearer token here",
 		"as soon as gone i will use my friends account",
