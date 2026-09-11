@@ -1,4 +1,0 @@
-#!/bin/bash
-# Stub gh: always reports one actionable item so the watchdog reaches its
-# restart decision rather than exiting early on an empty queue.
-echo 1
