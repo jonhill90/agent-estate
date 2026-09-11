@@ -1516,6 +1516,37 @@ func QueryWithRanking(indexPath, question string, limit int, includePrivate bool
 		tieGroupSize[s.score]++
 	}
 
+	// lexicalContradictions is detectContradictions run against all's OWN
+	// BM25 order, captured HERE -- before any reranking below can touch
+	// it. agent-estate#1368: detectContradictions's three thresholds
+	// (contradiction.go) were calibrated by measurement against BM25
+	// rank specifically ("both matches must be in the first two
+	// positions of the ... ranked ... result set" -- that file's own
+	// doc comment); calling it on out.Matches unconditionally, as this
+	// package did before this fix, silently reused that calibration
+	// against whatever order a reranker produced, which the detector has
+	// no way to detect. Capturing this slice before reranking, from
+	// exactly the top contradictionMaxRank positions of the untouched
+	// BM25 order, means a semantic reorder can never manufacture a pair
+	// the calibration was never shown (an item promoted into rank 0-1 by
+	// cosine similarity alone was never a candidate here, however the
+	// final page is ordered) -- see the branch below for the other half
+	// (a real BM25-top-two pair must still be visible on the page a
+	// --semantic caller is actually shown, or it is not reported as
+	// contradicting something the caller cannot see).
+	var lexicalContradictions []Contradiction
+	{
+		n := len(all)
+		if n > contradictionMaxRank {
+			n = contradictionMaxRank
+		}
+		lexicalTop := make([]Match, n)
+		for i := 0; i < n; i++ {
+			lexicalTop[i] = Match{ID: all[i].item.ID, Source: all[i].item.Source, Score: int(math.Round(all[i].score)), MatchedTerms: all[i].matched}
+		}
+		lexicalContradictions = detectContradictions(lexicalTop)
+	}
+
 	// Reranking happens here: AFTER every admission/privacy/tag filter
 	// above has already run and AFTER BM25 has scored and sorted the full
 	// eligible population, but BEFORE the display limit below. The
@@ -1555,7 +1586,30 @@ func QueryWithRanking(indexPath, question string, limit int, includePrivate bool
 		})
 	}
 	out.NotReturned = out.TotalMatched - len(out.Matches)
-	out.Contradictions = detectContradictions(out.Matches)
+	if out.RankingMethod != "semantic" {
+		// bm25 (rerank nil, or supplied but rejected/errored): out.Matches
+		// IS all's own BM25 order (reranking never ran, or never took
+		// effect), the exact basis detectContradictions was calibrated
+		// against -- unchanged from before this fix, byte-identical.
+		out.Contradictions = detectContradictions(out.Matches)
+	} else {
+		// semantic: never re-run the detector against the reordered
+		// page (that is exactly agent-estate#1368's defect). Instead,
+		// keep only the pairs lexicalContradictions already found against
+		// the untouched BM25 order, dropping any pair where reranking
+		// pushed either member off the final displayed page entirely --
+		// a caller cannot be usefully warned about a disagreement
+		// involving an item it was never shown.
+		visible := make(map[string]bool, len(out.Matches))
+		for _, m := range out.Matches {
+			visible[m.ID] = true
+		}
+		for _, pair := range lexicalContradictions {
+			if visible[pair.QuestionID] && visible[pair.AssertionID] {
+				out.Contradictions = append(out.Contradictions, pair)
+			}
+		}
+	}
 	// agent-estate#1315: a weak top match gets its own state, checked
 	// last and only when nothing more specific already claimed State --
 	// see StateMatchedWeak's own doc comment for why it never overrides
