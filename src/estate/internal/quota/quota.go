@@ -32,19 +32,20 @@
 //     not get a new answer to the same question.
 //   - A LAST-KNOWN-GOOD READING WITH AN AGE (permit on a timeout if a
 //     recent-enough cached value looked healthy) was also considered and
-//     rejected, on agent-estate#474's own authority, a closed issue
-//     recording this exact failure class under a different observer
-//     (`codexbar guard` degrading 5x, not `usage` timing out): "quota
-//     availability must not be inferred from a blocked or stale
-//     observer." A cached reading, by construction, describes what the
-//     window looked like before whatever is blocking the LIVE probe --
-//     using it to permit is exactly the inference that line forbids, not
-//     a milder version of it. #474 also states directly: "Do not fix this
-//     by defaulting UNKNOWN to safe" -- rejecting fail-open in the same
-//     breath. Rule 2 above already encodes the age half of this (a stale
-//     reading is unknown); this package has never had a code path that
-//     uses an old reading to permit, and this timeout does not become the
-//     first one.
+//     rejected, on the real precedent for exactly this shape:
+//     agent-estate#436 (a revert of a quota fast path that served a
+//     cached SAFE verdict) cites agent-estate#264 item 4 -- "stale-but-
+//     dated beats hung" is #264's own verbatim wording -- and states the
+//     invariant #436 itself derived and enforced: "the gate's own exit
+//     code must never soften to 0 just because a cached number exists."
+//     #436 names a real incident behind that rule: a cached-SAFE read
+//     that spent an exhausted window, $80 -> $8. A cached reading, by
+//     construction, describes what the window looked like before
+//     whatever is blocking the LIVE probe -- using it to permit here is
+//     exactly the softening #436 reverted. Rule 2 above already encodes
+//     the age half of this (a stale reading is unknown); this package
+//     has never had a code path that uses an old reading to permit, and
+//     this timeout does not become the first one.
 //
 // So a timeout is exactly rule 1: unmeasurable, refuse -- and, per
 // agent-estate#474's other requirement ("make the failure loud... a
@@ -135,8 +136,12 @@ var ReadTimeout = 60 * time.Second
 // this, and a real subprocess that never exits is not something a unit
 // test should depend on. Mirrors the discipline stars.go's defaultGHRunner
 // and build_commit.go's defaultGitRunner already established elsewhere in
-// this daemon (agent-estate#1321's own comment cites the same precedent for
-// this package's sibling ReadQuota seam in pressure.Limits).
+// this daemon -- the same class of fix (a real external dependency gets a
+// function seam so a test never touches it) pressure.Limits.ReadQuota
+// itself is, per its own comment (agent-estate#1321), though that comment
+// cites a different, same-file precedent (pressure.go's own swapoutRate
+// sample func()) rather than these two, since ReadQuota's seam lives in a
+// different package than either.
 var runCodexbar = defaultRunCodexbar
 
 func defaultRunCodexbar(ctx context.Context, args ...string) ([]byte, error) {
