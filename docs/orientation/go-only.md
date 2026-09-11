@@ -9,21 +9,25 @@ one script" and "only for delivery".
 **2026-09-11 — the rule was narrowed to the app, on Jon's own words
 (agent-estate#1412).** He was asked whether `reference/tests-supervisor/`
 (the retired shell supervisor's test tree) should be repaired, kept frozen,
-or dropped. His answer narrowed the rule itself, not just that tree:
+or dropped. His answer narrowed the rule itself, not just that tree —
+described here rather than quoted, since `text_clean` is NULL for the
+source row (`hp-41cc3914d6d18816`); see
+[the ADR](../decisions/2026-09-11-go-only-rule-narrowed-to-the-app.md) for
+why publishing the exact wording matters more there, and what that costs:
 
-> Fix the guard. Move the reference test stuff to other directories as needed
-> if that will help, or remove the reference folder — I don't know. Just
-> don't start writing the app in shell and Python again and we will be fine.
-> That was the whole reason for doing that. But I feel now we are good and
-> don't need you to be that way, and can use the scripts as needed — make
-> them as needed. But delete what we don't need, and just reference from old
-> commits, browse files if needed.
+He said either moving the retired test material elsewhere or dropping the
+reference folder outright would be fine, and he wasn't certain which was
+better; that the one thing that actually mattered was never writing the app
+itself in shell and Python again, which he named as the original reason the
+rule existed; that he now trusts the team enough to let scripts be written
+and used as needed; and that whatever isn't needed should be deleted, since
+old commits already carry the history.
 
 Two things follow from that, and they are different in kind:
 
-1. **The rule binds the app only.** "Just don't start writing the app in
-   shell and Python again" is, in his own words, "the whole reason" the rule
-   existed. Helper scripts elsewhere in the repo — tooling, one-off checks, a
+1. **The rule binds the app only.** Never writing the app itself in shell or
+   Python again is, by his own account, the whole reason the rule existed in
+   the first place. Helper scripts elsewhere in the repo — tooling, one-off checks, a
    sandbox, an experiment — may be written and used as needed. This was
    already true in practice (see "guidance, not a gate" below); it is now
    also true by direct instruction, not just by omission.
@@ -94,7 +98,8 @@ wedge an agent that legitimately needs a script for tooling, a sandbox, or an
 experiment. The 2026-09-11 decision above made that reading's opposite
 explicit rather than merely un-blocked: scripts elsewhere are not just
 tolerated, they are Jon's stated preference for how supporting tooling gets
-built ("can use the scripts as needed — make them as needed"). The intent
+built — see the same source row above (`hp-41cc3914d6d18816`) for the source,
+described rather than quoted. The intent
 that is *not* relaxed is equally narrow and equally explicit: the APP is not
 built out of shell and Python.
 
