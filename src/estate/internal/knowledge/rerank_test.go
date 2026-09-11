@@ -354,25 +354,17 @@ func displayLimitFixtureIndex(t *testing.T) string {
 	return path
 }
 
-// promoteToFrontRerank is a trivial, deterministic RerankFunc: targetID
-// first, every other candidate id after it in whatever order Query itself
-// already handed in (BM25 order) -- the smallest possible reorder that can
-// prove promotion across a rank boundary, deliberately not a full reverse
-// (reverseRerank above already covers "the reorder is genuinely applied";
-// this stub isolates "one specific low-ranked item moves to a visible
-// position" instead).
-func promoteToFrontRerank(targetID string) RerankFunc {
-	return func(_ string, candidates []RerankCandidate) ([]string, error) {
-		ids := make([]string, 0, len(candidates))
-		ids = append(ids, targetID)
-		for _, c := range candidates {
-			if c.ID != targetID {
-				ids = append(ids, c.ID)
-			}
-		}
-		return ids, nil
-	}
-}
+// promoteToFrontRerank (targetID here becomes the variadic front below) is
+// defined once, in query_contradiction_semantic_test.go -- PR #1373 and PR
+// #1374 each independently added a same-named helper to this package's test
+// files (this one, single-id; that one, variadic) and both merged to main
+// without either PR's own CI run ever seeing the other's file, so neither
+// review could catch the collision. query_contradiction_semantic_test.go's
+// variadic promoteToFrontRerank(front ...string) is a strict superset --
+// every call site below that passes one id (promoteToFrontRerank(target))
+// compiles unchanged against it, Go does not distinguish a single argument
+// from a one-element variadic call -- so this duplicate is deleted rather
+// than the other one, with no call site anywhere in this package touched.
 
 // TestQueryWithRankingPromotesAnItemAcrossTheDisplayLimit is agent-estate#1369:
 // the one hermetic-suite gap TestSemanticCeilingExperiment's real-corpus,
