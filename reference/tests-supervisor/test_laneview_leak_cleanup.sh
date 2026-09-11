@@ -6,7 +6,7 @@
 # (agent-supervisor#387's own lesson, applied to this leak family too).
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SUP="$HERE/../../scripts/supervisor"
+SUP="$HERE/../../reference/scripts/supervisor"
 pass=0; fail=0
 say_ok()  { echo "  ok   $1"; pass=$((pass+1)); }
 say_bad() { echo "  FAIL $1 -- $2"; fail=$((fail+1)); }

@@ -5,8 +5,8 @@
 # already cover that.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LANEVIEW="$HERE/../../scripts/supervisor/laneview.sh"
-TEXT_IMPL="$HERE/../../scripts/supervisor/laneview/text.sh"
+LANEVIEW="$HERE/../../reference/scripts/supervisor/laneview.sh"
+TEXT_IMPL="$HERE/../../reference/scripts/supervisor/laneview/text.sh"
 pass=0; fail=0
 ok()   { echo "  ok   $1"; pass=$((pass+1)); }
 bad()  { echo "  FAIL $1 — $2"; fail=$((fail+1)); }
@@ -66,7 +66,7 @@ fi
 # with no description reads as "(no description -- add a ...)", never as a
 # silently blank line).
 missing=0
-for impl in $(cd "$HERE/../../scripts/supervisor/laneview" && ls *.sh | sed 's/\.sh$//'); do
+for impl in $(cd "$HERE/../../reference/scripts/supervisor/laneview" && ls *.sh | sed 's/\.sh$//'); do
   line=$(grep -E "^  $impl " <<<"$out") || true
   if [ -z "$line" ] || grep -q 'no description' <<<"$line"; then
     missing=1
@@ -99,7 +99,7 @@ fi
 # not about text.sh at all.
 EMPTY=$(mktemp -d)
 cp "$LANEVIEW" "$EMPTY/laneview.sh"
-ln -s "$HERE/../../scripts/supervisor/laneview" "$EMPTY/laneview"
+ln -s "$HERE/../../reference/scripts/supervisor/laneview" "$EMPTY/laneview"
 printf '#!/bin/bash\nexit 0\n' > "$EMPTY/lanes.sh"
 out=$(bash "$EMPTY/laneview.sh" opensessions fixture 2>&1); rc=$?
 if [ "$rc" -ne 0 ] && grep -q 'produced no output' <<<"$out" \
@@ -175,7 +175,7 @@ else
   bad "text.sh gives an unheard-of state a glyph of its own, not blocked's ?" "$out"
 fi
 
-OS_IMPL="$HERE/../../scripts/supervisor/laneview/opensessions.sh"
+OS_IMPL="$HERE/../../reference/scripts/supervisor/laneview/opensessions.sh"
 S=$(mktemp -d); mkdir -p "$S/bin"
 cp "$HERE/stubs/curl-opensessions" "$S/bin/curl"
 chmod +x "$S/bin/curl"
@@ -264,7 +264,7 @@ fi
 # session > file`) actually gets: the static-frame fallback. It must still
 # obey the same contract text.sh does -- no tmux, no daemon, name every
 # state.
-TUI_IMPL="$HERE/../../scripts/supervisor/laneview/tui.sh"
+TUI_IMPL="$HERE/../../reference/scripts/supervisor/laneview/tui.sh"
 
 out=$(PATH=/usr/bin:/bin bash "$TUI_IMPL" demo-session \
   '[{"window":1,"name":"free-2","command":"claude.exe","state":"free"}]' </dev/null 2>&1)
@@ -341,7 +341,7 @@ fi
 # also the ONLY branch a non-interactive caller (this suite, cron, a piped
 # `laneview.sh dock session > file`) can ever reach -- the live refresh
 # loop only runs when stdout is a real tty.
-DOCK_IMPL="$HERE/../../scripts/supervisor/laneview/dock.sh"
+DOCK_IMPL="$HERE/../../reference/scripts/supervisor/laneview/dock.sh"
 
 out=$(PATH=/usr/bin:/bin bash "$DOCK_IMPL" demo-session \
   '[{"window":1,"name":"free-2","command":"claude.exe","state":"free"}]' </dev/null 2>&1)
