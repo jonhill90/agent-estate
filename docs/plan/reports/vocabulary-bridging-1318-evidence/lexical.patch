@@ -1,0 +1,455 @@
+diff --git a/src/estate/internal/knowledge/bm25.go b/src/estate/internal/knowledge/bm25.go
+index 57f7d47..24373fb 100644
+--- a/src/estate/internal/knowledge/bm25.go
++++ b/src/estate/internal/knowledge/bm25.go
+@@ -108,18 +108,18 @@ func tier1SearchableText(it Item) string {
+ 	if tier1 == "" {
+ 		tier1 = it.Tier1
+ 	}
+-	return strings.ToLower(strings.Join(append([]string{tier1}, append(it.StructuralTags, it.SynapticTags...)...), " \x1f "))
++	return strings.Join(append([]string{tier1}, append(it.StructuralTags, it.SynapticTags...)...), " \x1f ")
+ }
+ 
+ // ancestorSearchableText carries a repo-docs section's dropped ancestor
+ // heading text (Item.Tier1AncestorScored) -- empty, and so contributing
+ // nothing, for every other source.
+ func ancestorSearchableText(it Item) string {
+-	return strings.ToLower(it.Tier1AncestorScored)
++	return it.Tier1AncestorScored
+ }
+ 
+ func tier2SearchableText(it Item) string {
+-	return strings.ToLower(it.Tier2)
++	return it.Tier2
+ }
+ 
+ // weightedTermFreqs returns one item's stemmed-term -> weighted term
+diff --git a/src/estate/internal/knowledge/query.go b/src/estate/internal/knowledge/query.go
+index 9ced7ea..42c10eb 100644
+--- a/src/estate/internal/knowledge/query.go
++++ b/src/estate/internal/knowledge/query.go
+@@ -392,6 +392,22 @@ type QueryResult struct {
+ 	// for semantic ranking and got BM25 instead (agent-estate#1255: "a caller
+ 	// must be able to tell which ranking produced the answer").
+ 	RankingFallbackReason string `json:"ranking_fallback_reason,omitempty"`
++	// LexicalExperiment is scratch-only instrumentation for the #1318
++	// measurement worktree. It is populated only when the caller sets
++	// ESTATE_LEXICAL_EXPERIMENT_TARGET to an item ID, and must not ship.
++	LexicalExperiment *LexicalExperiment `json:"_lexical_experiment,omitempty"`
++}
++
++// LexicalExperiment exposes full-population rank and construction timing
++// without widening the production display limit or emitting item text.
++// Rank 0 means the target was absent from the eligible population.
++type LexicalExperiment struct {
++	TargetID         string `json:"target_id"`
++	BM25Rank         int    `json:"bm25_rank"`
++	FinalRank        int    `json:"final_rank"`
++	CandidateCount   int    `json:"candidate_count"`
++	ScorerBuildNanos int64  `json:"scorer_build_nanos"`
++	ScoreFilterNanos int64  `json:"score_filter_nanos"`
+ }
+ 
+ // CoverageState is the taxonomy for whether a QueryResult can be trusted
+@@ -720,12 +736,66 @@ func isDistilledRule(it Item) bool {
+ //     the operator's own words -- the cost this issue asked to weigh
+ //     explicitly (splitting perturbs their retrieval too) is real in
+ //     scale, even though this measurement found no case where it did.
++var lexicalExperimentLegacy = os.Getenv("ESTATE_LEXICAL_EXPERIMENT_LEGACY") == "1"
++
+ func splitWords(s string) []string {
++	if lexicalExperimentLegacy {
++		return splitWordsLegacy(s)
++	}
++	return splitWordsProjected(s)
++}
++
++func splitWordsProjected(s string) []string {
++	raw := strings.FieldsFunc(s, func(r rune) bool {
++		return !('a' <= r && r <= 'z' || 'A' <= r && r <= 'Z' || '0' <= r && r <= '9')
++	})
++	words := make([]string, 0, len(raw))
++	for _, token := range raw {
++		// Preserve the original token in the same lowercased space the
++		// shipped scorer uses. The projection only adds components.
++		words = append(words, strings.ToLower(token))
++		parts := splitCamelToken(token)
++		if len(parts) <= 1 {
++			continue
++		}
++		for _, part := range parts {
++			words = append(words, strings.ToLower(part))
++		}
++	}
++	return words
++}
++
++func splitWordsLegacy(s string) []string {
+ 	return strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
+ 		return !('a' <= r && r <= 'z' || '0' <= r && r <= '9')
+ 	})
+ }
+ 
++// splitCamelToken splits lower-to-upper transitions and the final capital of
++// an acronym before a title-cased word. It does not remove prefixes or suffixes;
++// a plain token such as "unrequested" remains one token, preserving negation.
++func splitCamelToken(token string) []string {
++	start := 0
++	var parts []string
++	for i := 1; i < len(token); i++ {
++		curUpper := 'A' <= token[i] && token[i] <= 'Z'
++		if !curUpper {
++			continue
++		}
++		prevLowerOrDigit := 'a' <= token[i-1] && token[i-1] <= 'z' || '0' <= token[i-1] && token[i-1] <= '9'
++		nextLower := i+1 < len(token) && 'a' <= token[i+1] && token[i+1] <= 'z'
++		prevUpper := 'A' <= token[i-1] && token[i-1] <= 'Z'
++		if prevLowerOrDigit || prevUpper && nextLower {
++			parts = append(parts, token[start:i])
++			start = i
++		}
++	}
++	if len(parts) == 0 {
++		return []string{token}
++	}
++	return append(parts, token[start:])
++}
++
+ // queryTerms splits question into the distinct, non-stop, stemmed words
+ // Query scores against -- stemmed so a question's own inflection
+ // ("refreshed") reaches the same term as an item's ("refresh"), per
+@@ -1342,7 +1412,11 @@ func QueryWithRanking(indexPath, question string, limit int, includePrivate bool
+ 	// privacy -- so a term's idf never shifts between a default-mode and
+ 	// a --private call against the same index (see NewBM25Scorer's own
+ 	// doc comment).
++	experimentTarget := os.Getenv("ESTATE_LEXICAL_EXPERIMENT_TARGET")
++	buildStarted := time.Now()
+ 	scorer := NewBM25Scorer(res.Items)
++	buildNanos := time.Since(buildStarted).Nanoseconds()
++	scoreStarted := time.Now()
+ 	var all []scored
+ 	withheldPrivate := 0
+ 	for _, it := range res.Items {
+@@ -1424,6 +1498,7 @@ func QueryWithRanking(indexPath, question string, limit int, includePrivate bool
+ 		}
+ 		all = append(all, scored{it, score, matched})
+ 	}
++	scoreNanos := time.Since(scoreStarted).Nanoseconds()
+ 
+ 	// Sort by BM25 score, item id breaking ties (oldest first).
+ 	sort.SliceStable(all, func(i, j int) bool {
+@@ -1460,6 +1535,18 @@ func QueryWithRanking(indexPath, question string, limit int, includePrivate bool
+ 	// while never fixing the rank of the case that motivated it. See
+ 	// #1105's own measurement comment for the full per-cap tables.
+ 	out.TotalMatched = len(all)
++	if experimentTarget != "" {
++		out.LexicalExperiment = &LexicalExperiment{
++			TargetID: experimentTarget, CandidateCount: len(all),
++			ScorerBuildNanos: buildNanos, ScoreFilterNanos: scoreNanos,
++		}
++		for i := range all {
++			if all[i].item.ID == experimentTarget {
++				out.LexicalExperiment.BM25Rank = i + 1
++				break
++			}
++		}
++	}
+ 	out.WithheldPrivate = withheldPrivate
+ 	if len(all) == 0 {
+ 		if withheldPrivate > 0 {
+@@ -1565,6 +1652,14 @@ func QueryWithRanking(indexPath, question string, limit int, includePrivate bool
+ 			out.RankingMethod = "semantic"
+ 		}
+ 	}
++	if out.LexicalExperiment != nil {
++		for i := range all {
++			if all[i].item.ID == experimentTarget {
++				out.LexicalExperiment.FinalRank = i + 1
++				break
++			}
++		}
++	}
+ 
+ 	n := len(all)
+ 	if n > limit {
+diff --git a/src/estate/main.go b/src/estate/main.go
+index 8e9fd80..c201a02 100644
+--- a/src/estate/main.go
++++ b/src/estate/main.go
+@@ -2379,7 +2379,12 @@ func main() {
+ 			// see the same freshness finding a human reading the note
+ 			// sees. No-op when IndexGeneratedAt is zero (the two
+ 			// index-read-failure states already returned above).
+-			qr.Coverage = foldFreshnessIntoCoverage(qr.Coverage, qr.IndexGeneratedAt, qr.SourceStatuses)
++			// Scratch-only #1318 measurement override: the experiment is
++			// intentionally pinned to one frozen index while live sources keep
++			// moving. Skip freshness-derived refusal only when explicitly set.
++			if os.Getenv("ESTATE_LEXICAL_EXPERIMENT_FROZEN_INDEX") != "1" {
++				qr.Coverage = foldFreshnessIntoCoverage(qr.Coverage, qr.IndexGeneratedAt, qr.SourceStatuses)
++			}
+ 			// agent-estate#1082: fold the index-vs-binary comparison in
+ 			// the same way -- detection, not prevention or refusal (see
+ 			// foldGeneratedByIntoCoverage's own doc comment).
+@@ -2390,7 +2395,9 @@ func main() {
+ 			// backing it is also stale. See applyStaleWithheldRefusal's own
+ 			// doc comment for why this check belongs here rather than
+ 			// inside Query itself.
+-			qr = applyStaleWithheldRefusal(qr)
++			if os.Getenv("ESTATE_LEXICAL_EXPERIMENT_FROZEN_INDEX") != "1" {
++				qr = applyStaleWithheldRefusal(qr)
++			}
+ 			if asJSON {
+ 				printKnowledgeQueryJSON(qr)
+ 			} else {
+diff --git a/src/estate/internal/knowledge/lexical_experiment_test.go b/src/estate/internal/knowledge/lexical_experiment_test.go
+new file mode 100644
+index 0000000..805c53b
+--- /dev/null
++++ b/src/estate/internal/knowledge/lexical_experiment_test.go
+@@ -0,0 +1,246 @@
++package knowledge
++
++import (
++	"os"
++	"reflect"
++	"runtime"
++	"sort"
++	"testing"
++	"time"
++
++	"github.com/jonhill90/agent-estate/estate/internal/knowledge/goldenset"
++)
++
++var lexicalExperimentScorerSink *BM25Scorer
++var lexicalExperimentTokenSink int
++
++// BenchmarkLexicalScorerConstruction is scratch-only instrumentation for
++// comparing the shipped and projected token-stat construction on one frozen
++// compiled index. It emits no item text and must not ship.
++func BenchmarkLexicalScorerConstruction(b *testing.B) {
++	path := os.Getenv("ESTATE_LEXICAL_INDEX")
++	if path == "" {
++		b.Skip("ESTATE_LEXICAL_INDEX is unset")
++	}
++	res, err := Read(path)
++	if err != nil {
++		b.Fatal(err)
++	}
++	original := lexicalExperimentLegacy
++	defer func() { lexicalExperimentLegacy = original }()
++	for _, tc := range []struct {
++		name   string
++		legacy bool
++	}{{"shipped", true}, {"projected", false}} {
++		b.Run(tc.name, func(b *testing.B) {
++			lexicalExperimentLegacy = tc.legacy
++			b.ReportAllocs()
++			b.ReportMetric(float64(len(res.Items)), "items")
++			b.ResetTimer()
++			for i := 0; i < b.N; i++ {
++				lexicalExperimentScorerSink = NewBM25Scorer(res.Items)
++			}
++		})
++	}
++}
++
++// BenchmarkLexicalProjectionOnly isolates token construction from BM25 maps,
++// IDF, scoring, index reads, and semantic work. One operation tokenizes every
++// scored field in the frozen index once.
++func BenchmarkLexicalProjectionOnly(b *testing.B) {
++	path := os.Getenv("ESTATE_LEXICAL_INDEX")
++	if path == "" {
++		b.Skip("ESTATE_LEXICAL_INDEX is unset")
++	}
++	res, err := Read(path)
++	if err != nil {
++		b.Fatal(err)
++	}
++	type tokenizer func(string) []string
++	for _, tc := range []struct {
++		name string
++		fn   tokenizer
++	}{{"shipped", splitWordsLegacy}, {"projected", splitWordsProjected}} {
++		b.Run(tc.name, func(b *testing.B) {
++			b.ReportAllocs()
++			b.ReportMetric(float64(len(res.Items)), "items")
++			for i := 0; i < b.N; i++ {
++				n := 0
++				for _, it := range res.Items {
++					for _, field := range lexicalFields(it) {
++						n += len(tc.fn(field))
++					}
++				}
++				lexicalExperimentTokenSink = n
++			}
++		})
++	}
++}
++
++func TestLexicalProjectionShape(t *testing.T) {
++	got := splitWords("loggedIn JSONParser unrequested")
++	want := []string{"loggedin", "logged", "in", "jsonparser", "json", "parser", "unrequested"}
++	if !reflect.DeepEqual(got, want) {
++		t.Fatalf("splitWords projection = %v, want %v", got, want)
++	}
++	requested := queryTerms("requested")
++	negated := fieldTermCounts("unrequested")
++	if len(requested) != 1 || negated[requested[0]] != 0 {
++		t.Fatalf("negation collapsed: query terms=%v negated-count=%d", requested, negated[requested[0]])
++	}
++}
++
++func TestLexicalExperimentAffectedQueries(t *testing.T) {
++	type stratum struct {
++		name string
++		load func() ([]goldenset.Case, error)
++	}
++	strata := []stratum{
++		{"retrieval", goldenset.LoadRetrievalBaseline},
++		{"cases", goldenset.Load},
++		{"natural", goldenset.LoadNatural},
++		{"stars", goldenset.LoadStars},
++	}
++	original := lexicalExperimentLegacy
++	defer func() { lexicalExperimentLegacy = original }()
++	for _, s := range strata {
++		cases, err := s.load()
++		if err != nil {
++			t.Fatal(err)
++		}
++		var affected []string
++		for _, c := range cases {
++			lexicalExperimentLegacy = true
++			shipped := queryTerms(c.Question)
++			lexicalExperimentLegacy = false
++			projected := queryTerms(c.Question)
++			if !reflect.DeepEqual(shipped, projected) {
++				affected = append(affected, c.ID)
++			}
++		}
++		t.Logf("stratum=%s affected_queries=%d total=%d ids=%v", s.name, len(affected), len(cases), affected)
++	}
++}
++
++func legacyFieldTermCounts(text string) map[string]int {
++	counts := map[string]int{}
++	for _, f := range splitWordsLegacy(text) {
++		if len(f) <= 2 || stopWords[f] {
++			continue
++		}
++		counts[stem(f)]++
++	}
++	return counts
++}
++
++func lexicalMedian(ds []time.Duration) time.Duration {
++	sort.Slice(ds, func(i, j int) bool { return ds[i] < ds[j] })
++	return ds[len(ds)/2]
++}
++
++// TestLexicalExperimentAlternatingConstruction alternates which variant runs
++// first on every pair so warm caches and transient system load do not always
++// benefit the same arm. Counts and durations only; no indexed text is emitted.
++func TestLexicalExperimentAlternatingConstruction(t *testing.T) {
++	path := os.Getenv("ESTATE_LEXICAL_INDEX")
++	if path == "" {
++		t.Skip("ESTATE_LEXICAL_INDEX is unset")
++	}
++	res, err := Read(path)
++	if err != nil {
++		t.Fatal(err)
++	}
++	original := lexicalExperimentLegacy
++	defer func() { lexicalExperimentLegacy = original }()
++	measure := func(legacy bool) time.Duration {
++		lexicalExperimentLegacy = legacy
++		started := time.Now()
++		lexicalExperimentScorerSink = NewBM25Scorer(res.Items)
++		return time.Since(started)
++	}
++	var shipped, projected []time.Duration
++	for i := 0; i < 12; i++ {
++		runtime.GC()
++		if i%2 == 0 {
++			shipped = append(shipped, measure(true))
++			projected = append(projected, measure(false))
++		} else {
++			projected = append(projected, measure(false))
++			shipped = append(shipped, measure(true))
++		}
++	}
++	shippedMedian := lexicalMedian(shipped)
++	projectedMedian := lexicalMedian(projected)
++	t.Logf("items=%d pairs=%d shipped_median_ns=%d projected_median_ns=%d delta_ns=%d delta_percent=%.2f",
++		len(res.Items), len(shipped), shippedMedian.Nanoseconds(), projectedMedian.Nanoseconds(),
++		(projectedMedian - shippedMedian).Nanoseconds(), 100*float64(projectedMedian-shippedMedian)/float64(shippedMedian))
++}
++
++func lexicalFields(it Item) []string {
++	return []string{tier1SearchableText(it), ancestorSearchableText(it), tier2SearchableText(it)}
++}
++
++// TestLexicalExperimentAffectedDocuments reports counts only: no item text,
++// titles, permalinks, or private source material leave the test.
++func TestLexicalExperimentAffectedDocuments(t *testing.T) {
++	path := os.Getenv("ESTATE_LEXICAL_INDEX")
++	if path == "" {
++		t.Skip("ESTATE_LEXICAL_INDEX is unset")
++	}
++	res, err := Read(path)
++	if err != nil {
++		t.Fatal(err)
++	}
++	bySource := map[string]int{}
++	total := 0
++	for _, it := range res.Items {
++		affected := false
++		for _, field := range lexicalFields(it) {
++			if !reflect.DeepEqual(legacyFieldTermCounts(field), fieldTermCounts(field)) {
++				affected = true
++				break
++			}
++		}
++		if affected {
++			total++
++			bySource[it.Source]++
++		}
++	}
++	sources := make([]string, 0, len(bySource))
++	for source := range bySource {
++		sources = append(sources, source)
++	}
++	sort.Strings(sources)
++	t.Logf("affected_total=%d index_total=%d", total, len(res.Items))
++	for _, source := range sources {
++		t.Logf("affected_source=%s count=%d", source, bySource[source])
++	}
++}
++
++func TestLexicalExperimentVault02Token(t *testing.T) {
++	path := os.Getenv("ESTATE_LEXICAL_INDEX")
++	target := os.Getenv("ESTATE_LEXICAL_VAULT02_TARGET")
++	if path == "" || target == "" {
++		t.Skip("lexical experiment env is unset")
++	}
++	res, err := Read(path)
++	if err != nil {
++		t.Fatal(err)
++	}
++	for _, it := range res.Items {
++		if it.ID != target {
++			continue
++		}
++		legacy, projected := 0, 0
++		for _, field := range lexicalFields(it) {
++			legacy += legacyFieldTermCounts(field)["log"]
++			projected += fieldTermCounts(field)["log"]
++		}
++		t.Logf("target_found=true legacy_log_count=%d projected_log_count=%d", legacy, projected)
++		if legacy != 0 || projected == 0 {
++			t.Fatalf("unexpected token bridge: legacy=%d projected=%d", legacy, projected)
++		}
++		return
++	}
++	t.Fatal("target_found=false")
++}

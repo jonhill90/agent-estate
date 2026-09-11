@@ -1,0 +1,27 @@
+id	target_present	target_item_id	bm25_rank	semantic_rank	bm25_count	semantic_count	semantic_method	fallback
+rb-01	1	it-f40fb3ace77afa88	3	1	10	10	semantic	
+rb-02	1	it-3aa75cba76675da0	0	0	10	10	semantic	
+rb-03	1	it-80eb1937fe08580b	0	0	10	10	semantic	
+rb-04	1	it-80eb1937fe08580b	0	0	10	10	semantic	
+rb-05	1	it-cf02f71daa8a202e	0	0	10	10	semantic	
+rb-06	1	it-2ff5d5e031f53c97	0	0	10	10	semantic	
+rb-07	1	it-2ff5d5e031f53c97	0	0	10	10	semantic	
+rb-08	0		0	0	10	10	semantic	
+rb-09	1	it-3e96dc77ab2458b4	1	1	10	10	semantic	
+rb-10	1	it-24fb3478a3b3f5a1	10	2	10	10	semantic	
+rb-11	1	it-39b8f397a5a29513	0	0	10	10	semantic	
+rb-12	1	it-f0b9ef6f62a86700	1	1	10	10	semantic	
+rb-13	1	it-28b173ffc4194ce7	0	0	10	10	semantic	
+rb-14	1	it-d63e74a0bbba3ea9	6	0	10	10	semantic	
+rb-15	1	it-368ecab9a699e73a	4	1	10	10	semantic	
+rb-16	1	it-4101f16b310acad4	6	1	10	10	semantic	
+rb-17	1	it-4852ea93a2108006	0	6	10	10	semantic	
+rb-18	1	it-783ccf0cc41a5c46	0	1	10	10	semantic	
+rb-19	1	it-2f8be74086321c89	0	0	10	10	semantic	
+rb-20	1	it-3ea3740c54704a5d	0	5	10	10	semantic	
+rb-21	1	it-c8042feab6fffac6	0	1	10	10	semantic	
+rb-22	1	it-affc02f2962e9aff	0	2	10	10	semantic	
+rb-23	1	it-70932b1260e12c2f	0	0	10	10	semantic	
+rb-24	1	it-421dac27146971f4	0	0	10	10	semantic	
+rb-25	1	it-744a963911381479	3	1	10	10	semantic	
+rb-26	1	it-794ba0adb7190358	2	1	10	10	semantic	

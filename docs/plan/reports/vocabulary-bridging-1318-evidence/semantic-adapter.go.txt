@@ -1,0 +1,26 @@
+package main
+
+import (
+	"fmt"
+	"os"
+	"syscall"
+)
+
+// semantic-adapter preserves goldenquery's production CLI boundary while
+// adding the flag its runner does not expose. The real estate binary remains
+// responsible for every query, parse, rank, fallback, and exit decision.
+func main() {
+	realBin := os.Getenv("ESTATE_REAL_BIN")
+	if realBin == "" {
+		fmt.Fprintln(os.Stderr, "semantic-adapter: ESTATE_REAL_BIN is required")
+		os.Exit(2)
+	}
+	args := append([]string{realBin}, os.Args[1:]...)
+	if len(args) >= 3 && args[1] == "knowledge" && args[2] == "query" {
+		args = append(args[:3], append([]string{"--semantic"}, args[3:]...)...)
+	}
+	if err := syscall.Exec(realBin, args, os.Environ()); err != nil {
+		fmt.Fprintln(os.Stderr, "semantic-adapter:", err)
+		os.Exit(2)
+	}
+}

@@ -1,0 +1,23 @@
+section/id	bm25	semantic
+cases_private/camelcase-03	MISS	HIT
+cases_private/corpus-03	MISS	HIT
+cases_private/loops-01	HIT	MISS
+cases_private/loops-02	HIT	MISS
+cases_private/vault-01	MISS	HIT
+cases_public/docs-01	HIT	MISS
+natural_private_scoped/nl-05	HIT top-3	HIT top-10 only (rank 6)
+natural_private_scoped/nl-06	HIT top-10 only (rank 7)	HIT top-3
+natural_private_scoped/nl-07	HIT top-10 only (rank 7)	MISS (not in top 10)
+natural_private_scoped/nl-15	HIT top-3	HIT top-10 only (rank 4)
+natural_private_scoped/nl-17	HIT top-3	HIT top-10 only (rank 8)
+natural_private_scoped/nl-22	HIT top-10 only (rank 4)	HIT top-3
+natural_private_scoped/nl-23	HIT top-10 only (rank 7)	MISS (not in top 10)
+natural_private_scoped/nl-24	HIT top-3	MISS (not in top 10)
+natural_public_unscoped/nl-03	MISS (not in top 10)	HIT top-10 only (rank 5)
+natural_public_unscoped/nl-05	HIT top-3	HIT top-10 only (rank 4)
+natural_public_unscoped/nl-06	HIT top-10 only (rank 7)	HIT top-3
+natural_public_unscoped/nl-07	HIT top-10 only (rank 7)	MISS (not in top 10)
+natural_public_unscoped/nl-14	HIT top-3	MISS (not in top 10)
+natural_public_unscoped/nl-22	MISS (not in top 10)	HIT top-10 only (rank 8)
+natural_public_unscoped/nl-24	HIT top-3	HIT top-10 only (rank 5)
+natural_public_unscoped/nl-30	HIT top-3	HIT top-10 only (rank 4)

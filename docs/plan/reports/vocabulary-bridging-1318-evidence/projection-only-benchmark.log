@@ -1,0 +1,16 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/jonhill90/agent-estate/estate/internal/knowledge
+cpu: Apple M3 Pro
+BenchmarkLexicalProjectionOnly/shipped-11         	      10	  38465225 ns/op	      7889 items	52504831 B/op	   63483 allocs/op
+BenchmarkLexicalProjectionOnly/shipped-11         	      10	  44876854 ns/op	      7889 items	52504297 B/op	   63482 allocs/op
+BenchmarkLexicalProjectionOnly/shipped-11         	      10	  39766162 ns/op	      7889 items	52504275 B/op	   63482 allocs/op
+BenchmarkLexicalProjectionOnly/shipped-11         	      10	  39947446 ns/op	      7889 items	52504275 B/op	   63482 allocs/op
+BenchmarkLexicalProjectionOnly/shipped-11         	      10	  40596638 ns/op	      7889 items	52504264 B/op	   63482 allocs/op
+BenchmarkLexicalProjectionOnly/projected-11       	      10	  62408462 ns/op	      7889 items	87331047 B/op	 1093201 allocs/op
+BenchmarkLexicalProjectionOnly/projected-11       	      10	  61695883 ns/op	      7889 items	87330513 B/op	 1093201 allocs/op
+BenchmarkLexicalProjectionOnly/projected-11       	      10	  62016700 ns/op	      7889 items	87330548 B/op	 1093201 allocs/op
+BenchmarkLexicalProjectionOnly/projected-11       	      10	  63031642 ns/op	      7889 items	87330504 B/op	 1093201 allocs/op
+BenchmarkLexicalProjectionOnly/projected-11       	      10	  79291475 ns/op	      7889 items	87330513 B/op	 1093201 allocs/op
+PASS
+ok  	github.com/jonhill90/agent-estate/estate/internal/knowledge	6.183s

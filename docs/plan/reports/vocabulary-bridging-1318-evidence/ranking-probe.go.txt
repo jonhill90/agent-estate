@@ -1,0 +1,206 @@
+// Scratch measurement only. This file is not part of the report PR.
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"math"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/jonhill90/agent-estate/estate/internal/embedding"
+	"github.com/jonhill90/agent-estate/estate/internal/knowledge"
+	"github.com/jonhill90/agent-estate/estate/internal/knowledge/goldenset"
+)
+
+type result struct {
+	ID       string `json:"id"`
+	Pool     int    `json:"pool"`
+	Present  bool   `json:"present"`
+	BM25     int    `json:"bm25"`
+	Semantic int    `json:"semantic"`
+	RRF10    int    `json:"rrf10"`
+	RRF60    int    `json:"rrf60"`
+	Dense    int    `json:"dense"`
+	CLIEqual bool   `json:"cli_equal"`
+}
+
+func must(err error) {
+	if err != nil {
+		panic(err)
+	}
+}
+func cosine(a, b []float32) float64 {
+	if len(a) != len(b) {
+		panic("vector dimension mismatch")
+	}
+	var dot, aa, bb float64
+	for i := range a {
+		dot += float64(a[i]) * float64(b[i])
+		aa += float64(a[i]) * float64(a[i])
+		bb += float64(b[i]) * float64(b[i])
+	}
+	if aa == 0 || bb == 0 {
+		return 0
+	}
+	return dot / math.Sqrt(aa*bb)
+}
+func main() {
+	idx := os.Getenv("ESTATE_KNOWLEDGE_INDEX")
+	if !strings.HasPrefix(idx, "/tmp/vocabulary-1318-evidence/") {
+		panic("requires designated frozen private index")
+	}
+	data, err := knowledge.Read(idx)
+	must(err)
+	cases, err := goldenset.LoadRetrievalBaseline()
+	must(err)
+	standard, err := goldenset.Load()
+	must(err)
+	for _, c := range standard {
+		if c.ID == "vault-02" {
+			cases = append(cases, c)
+		}
+	}
+	cache, err := embedding.LoadOrNil(embedding.CachePath(idx), idx, embedding.DefaultModel)
+	must(err)
+	client, err := embedding.NewClient(embedding.NewConfig())
+	must(err)
+	qs := make([]string, len(cases))
+	for i, c := range cases {
+		qs[i] = c.Question
+	}
+	start := time.Now()
+	vecs, err := client.Embed(context.Background(), qs)
+	must(err)
+	fmt.Fprintf(os.Stderr, "question_batch_count=%d embedding_seconds=%.6f\n", len(qs), time.Since(start).Seconds())
+	byID := map[string]knowledge.Item{}
+	for _, it := range data.Items {
+		byID[it.ID] = it
+	}
+	// Query's tag-only path retains current-revision and privacy policy while
+	// omitting lexical admission. Union it across source tags for a dense ceiling.
+	allPolicyIDs := []string{}
+	seenSources := map[string]bool{}
+	seenIDs := map[string]bool{}
+	for _, it := range data.Items {
+		if seenSources[it.Source] {
+			continue
+		}
+		seenSources[it.Source] = true
+		q := knowledge.Query(idx, "source:"+it.Source, len(data.Items)+1, true)
+		for _, m := range q.Matches {
+			if !seenIDs[m.ID] {
+				allPolicyIDs = append(allPolicyIDs, m.ID)
+				seenIDs[m.ID] = true
+			}
+		}
+	}
+	sort.Strings(allPolicyIDs)
+	fmt.Fprintf(os.Stderr, "policy_eligible_items=%d\n", len(allPolicyIDs))
+	results := []result{}
+	fusionTimes := map[int][]float64{10: {}, 60: {}}
+	fmt.Println("id\tpresent\teligible\tpool\tbm25\tsemantic\trrf10\trrf60\tdense\tcli_equal")
+	for ci, c := range cases {
+		qr := knowledge.Query(idx, c.Question, len(data.Items)+1, true)
+		ids := make([]string, len(qr.Matches))
+		ranks := map[string]int{}
+		sims := map[string]float64{}
+		target := ""
+		for _, it := range data.Items {
+			if it.Source == string(c.ExpectedSource) && strings.HasSuffix(it.Permalink, c.ExpectedIdentifier) {
+				target = it.ID
+				break
+			}
+		}
+		for i, m := range qr.Matches {
+			ids[i] = m.ID
+			ranks[m.ID] = i + 1
+			it := byID[m.ID]
+			v, ok := cache.Lookup(it.ID, strings.TrimSpace(it.Tier1+". "+it.Tier2))
+			if !ok {
+				panic("cache missing")
+			}
+			sims[m.ID] = cosine(vecs[ci], v)
+		}
+		sort.SliceStable(ids, func(i, j int) bool { return sims[ids[i]] > sims[ids[j]] })
+		sr := map[string]int{}
+		for i, id := range ids {
+			sr[id] = i + 1
+		}
+		rr := result{ID: c.ID, Pool: len(ids), Present: target != "", BM25: ranks[target], Semantic: sr[target], CLIEqual: true}
+		dense := append([]string(nil), allPolicyIDs...)
+		denseScores := map[string]float64{}
+		for _, id := range dense {
+			it := byID[id]
+			v, ok := cache.Lookup(id, strings.TrimSpace(it.Tier1+". "+it.Tier2))
+			if !ok {
+				panic("dense cache missing")
+			}
+			denseScores[id] = cosine(vecs[ci], v)
+		}
+		sort.SliceStable(dense, func(i, j int) bool { return denseScores[dense[i]] > denseScores[dense[j]] })
+		for i, id := range dense {
+			if id == target {
+				rr.Dense = i + 1
+				break
+			}
+		}
+		for _, k := range []float64{10, 60} {
+			fusionStart := time.Now()
+			mixed := append([]string(nil), ids...)
+			score := func(id string) float64 { return 1/(k+float64(ranks[id])) + 1/(k+float64(sr[id])) }
+			sort.SliceStable(mixed, func(i, j int) bool {
+				a, b := score(mixed[i]), score(mixed[j])
+				if a == b {
+					return ranks[mixed[i]] < ranks[mixed[j]]
+				}
+				return a > b
+			})
+			rank := 0
+			for i, id := range mixed {
+				if id == target {
+					rank = i + 1
+					break
+				}
+			}
+			if k == 10 {
+				rr.RRF10 = rank
+			} else {
+				rr.RRF60 = rank
+			}
+			fusionTimes[int(k)] = append(fusionTimes[int(k)], float64(time.Since(fusionStart))/float64(time.Millisecond))
+		}
+		if strings.HasPrefix(c.ID, "rb-") {
+			raw, err := os.ReadFile(filepath.Join("/tmp/vocabulary-1318-evidence/raw", "retrieval-semantic-"+c.ID+".json"))
+			must(err)
+			var cli knowledge.QueryResult
+			must(json.Unmarshal(raw, &cli))
+			if cli.RankingMethod != "semantic" {
+				panic("CLI fallback")
+			}
+			for i, m := range cli.Matches {
+				if i >= len(ids) || ids[i] != m.ID {
+					rr.CLIEqual = false
+				}
+			}
+		}
+		results = append(results, rr)
+		fmt.Printf("%s\t%t\t%t\t%d\t%d\t%d\t%d\t%d\t%d\t%t\n", rr.ID, rr.Present, rr.BM25 > 0, rr.Pool, rr.BM25, rr.Semantic, rr.RRF10, rr.RRF60, rr.Dense, rr.CLIEqual)
+	}
+	raw, err := json.MarshalIndent(results, "", "  ")
+	must(err)
+	must(os.WriteFile("/tmp/vocabulary-1318-probe-results.json", raw, 0600))
+	for _, k := range []int{10, 60} {
+		v := fusionTimes[k]
+		sort.Float64s(v)
+		var sum float64
+		for _, x := range v {
+			sum += x
+		}
+		fmt.Fprintf(os.Stderr, "fusion_k%d_sort_ms mean=%.6f median=%.6f max=%.6f n=%d\n", k, sum/float64(len(v)), v[len(v)/2], v[len(v)-1], len(v))
+	}
+}

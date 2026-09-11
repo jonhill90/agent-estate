@@ -1,0 +1,27 @@
+id	bm25_full_rank	semantic_full_rank	bm25_candidates	semantic_candidates	semantic_method	fallback
+rb-01	3	1	714	714	semantic	
+rb-02	145	323	2542	2542	semantic	
+rb-03	75	143	982	982	semantic	
+rb-04	0	0	1041	1041	semantic	
+rb-05	123	84	1446	1446	semantic	
+rb-06	0	0	938	938	semantic	
+rb-07	0	0	697	697	semantic	
+rb-08	0	0	1553	1553	semantic	
+rb-09	1	1	553	553	semantic	
+rb-10	10	2	989	989	semantic	
+rb-11	0	0	1617	1617	semantic	
+rb-12	1	1	495	495	semantic	
+rb-13	42	420	1559	1559	semantic	
+rb-14	6	77	2239	2239	semantic	
+rb-15	4	1	1008	1008	semantic	
+rb-16	6	1	2339	2339	semantic	
+rb-17	17	6	3521	3521	semantic	
+rb-18	27	1	917	917	semantic	
+rb-19	53	12	1717	1717	semantic	
+rb-20	944	5	3213	3213	semantic	
+rb-21	138	1	1985	1985	semantic	
+rb-22	12	2	1225	1225	semantic	
+rb-23	0	0	1404	1404	semantic	
+rb-24	29	32	971	971	semantic	
+rb-25	3	1	916	916	semantic	
+rb-26	2	1	1502	1502	semantic	

@@ -1,0 +1,17 @@
+rrf_width	baseline	section	cutoff	id	baseline_status	rrf_status
+10	bm25	cases_private	top-3	loops-02	HIT	MISS
+10	bm25	cases_public	top-3	docs-01	HIT	MISS
+10	bm25	natural_private_scoped	top-3	nl-05	HIT top-3	HIT top-10 only (rank 4)
+10	bm25	natural_private_scoped	top-10	nl-07	HIT top-10 only (rank 7)	MISS (not in top 10)
+10	bm25	natural_private_scoped	top-10	nl-23	HIT top-10 only (rank 7)	MISS (not in top 10)
+10	bm25	natural_public_unscoped	top-10	nl-07	HIT top-10 only (rank 7)	MISS (not in top 10)
+10	semantic	cases_private	top-3	camelcase-03	HIT	MISS
+10	semantic	natural_private_scoped	top-3	nl-06	HIT top-3	HIT top-10 only (rank 4)
+60	bm25	cases_private	top-3	loops-02	HIT	MISS
+60	bm25	cases_public	top-3	docs-01	HIT	MISS
+60	bm25	natural_private_scoped	top-3	nl-05	HIT top-3	HIT top-10 only (rank 4)
+60	bm25	natural_private_scoped	top-10	nl-07	HIT top-10 only (rank 7)	MISS (not in top 10)
+60	bm25	natural_private_scoped	top-10	nl-23	HIT top-10 only (rank 7)	MISS (not in top 10)
+60	bm25	natural_public_unscoped	top-10	nl-07	HIT top-10 only (rank 7)	MISS (not in top 10)
+60	semantic	cases_private	top-3	vault-01	HIT	MISS
+60	semantic	natural_private_scoped	top-3	nl-06	HIT top-3	HIT top-10 only (rank 4)
