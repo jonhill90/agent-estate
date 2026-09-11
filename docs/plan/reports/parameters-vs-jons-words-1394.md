@@ -106,6 +106,14 @@ hypergeometric inversion: **8.1%–21.5%**. That is a statement about sampling
 uncertainty on this one measurement, not a confidence interval Jon should
 read as "the true rate is probably in the middle" — the census's own
 authors called it a bounded, moderate-confidence estimate, not a census.
+The same source computes two sensitivity cuts over the identical 300 rows
+and names both as legitimate alternatives, not additional defects: excluding
+the two rows where only an added editorial attribution diverges lowers the
+divergent count to **32 of 300 (10.7%)**, the more favourable reading;
+treating four faithful judgements that rest on narrowly endorsed context as
+unresolved instead leaves 34 divergent, raises unresolved to 21, and widens
+the envelope to **8.1%–22.9%**, the less favourable one. Both are stated
+here because reporting either without the other would tilt the number.
 
 ## Who wrote the source prompts — the layer the divergence numbers cannot see
 
