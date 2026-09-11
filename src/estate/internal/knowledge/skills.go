@@ -91,7 +91,14 @@ type skillRegistryEntry struct {
 // sufficient, not merely a convention nobody happens to have broken yet,
 // lives in this PR's own body (agent-estate#1021's own framing: "if the
 // only thing stopping installation is that no code calls an installer,
-// say so explicitly and argue whether that is sufficient").
+// say so explicitly and argue whether that is sufficient"). NO *exec.Cmd,
+// NO NETWORK CALL of any kind appears anywhere in this function's own call
+// graph -- mechanically pinned, not merely asserted, by
+// TestSkillsSourceCallGraphNeverReachesExecOrNet
+// (skills_inertness_test.go, agent-estate#1378's review): a static
+// call-graph walk from this function, failing if any function reachable
+// from it directly calls os/exec, net, or net/http. See that test's own
+// doc comment for the scope this pin covers and does not.
 //
 // A repoRoot that cannot be resolved is one failed source, matching
 // repoDocsSource's own handling (docs.go) -- both read a file this same
