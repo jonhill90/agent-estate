@@ -232,6 +232,16 @@ func lowQuota(time.Time) (quota.Reading, error) {
 	return quota.Reading{WeeklyUsedPercent: 95}, nil // 5% remaining
 }
 
+// lowSessionQuota simulates the exact reading behind agent-estate#1127's
+// own incident: the WEEKLY window comfortably healthy (56% left, matching
+// what `estate pressure` actually reported that night) while the SHORTER
+// rolling SESSION window is fully exhausted -- 0% remaining, the "You've
+// hit your session limit" state. WeeklyUsedPercent 44 keeps this fixture
+// clear of quota.StopThresholdPercent so only the session limit fires.
+func lowSessionQuota(time.Time) (quota.Reading, error) {
+	return quota.Reading{WeeklyUsedPercent: 44, SessionUsedPercent: 100}, nil
+}
+
 // unreadableQuota simulates codexbar itself failing -- a live, external
 // dependency, unlike the other four limits' OS-level reads, which do not
 // fail on a normal host. Budget blindness must refuse exactly like a low
@@ -243,7 +253,8 @@ func unreadableQuota(time.Time) (quota.Reading, error) {
 const (
 	swapReason     = "actively paging"
 	worktreeReason = "worktrees above ceiling"
-	budgetReason   = "stop threshold"
+	budgetReason   = "weekly budget"
+	sessionReason  = "session usage"
 )
 
 func emptyLedger(t *testing.T) *ledger.Ledger {
@@ -386,19 +397,52 @@ func TestBudgetLimitAloneRefusesWithItsOwnReasonWhenUnreadable(t *testing.T) {
 	}
 }
 
+// Arms the SESSION limit alone -- agent-estate#1127's own required
+// coverage, the mutation-shaped test the review asked this fix pass to
+// demonstrate in both directions. lowSessionQuota fixes the weekly window
+// comfortably healthy and the session window fully exhausted (the exact
+// reading behind "You've hit your session limit"), so this pins that
+// pressure.Check now refuses on the session window specifically, not just
+// that it eventually refuses for some reason.
+func TestSessionLimitAloneRefusesWithItsOwnReason(t *testing.T) {
+	lim := neutralised()
+	lim.ReadQuota = lowSessionQuota
+	v := Check(emptyLedger(t), lim)
+
+	if v.OK {
+		t.Fatalf("Check() allowed dispatch with the session window fully exhausted; the session gate is not wired. reading=%+v", v.Reading)
+	}
+	joined := strings.Join(v.Reasons, " ")
+	if !strings.Contains(joined, sessionReason) {
+		t.Errorf("refusal did not name the session limit that caused it; got %v", v.Reasons)
+	}
+	if strings.Contains(joined, budgetReason) {
+		t.Errorf("the session limit's refusal is contaminated by the WEEKLY budget reason, even though lowSessionQuota's own weekly window is healthy: %v", v.Reasons)
+	}
+	if strings.Contains(joined, swapReason) || strings.Contains(joined, worktreeReason) {
+		t.Errorf("the session limit's refusal is contaminated by another limit; the two are not independent: %v", v.Reasons)
+	}
+	if v.Reading.SessionRemaining != 0 {
+		t.Errorf("Check reported %.0f%% session remaining, want 0%% from the fixture reading", v.Reading.SessionRemaining)
+	}
+	if v.Reading.WeeklyRemaining != 56 {
+		t.Errorf("Check reported %.0f%% weekly remaining, want 56%% from the fixture reading -- the weekly reading must still be carried even though only session refused", v.Reading.WeeklyRemaining)
+	}
+}
+
 // Neither limit fires when neither is armed -- the other direction, and the
 // thing that stops the two tests above from being satisfied by a gate that
 // refuses everything.
 func TestNeitherNewLimitRefusesWhenNotArmed(t *testing.T) {
 	v := Check(emptyLedger(t), neutralised())
 	joined := strings.Join(v.Reasons, " ")
-	// These three hold in EITHER environment: on a host that cannot measure
+	// These four hold in EITHER environment: on a host that cannot measure
 	// load/memory/paging at all (CI's Linux runner -- hostIsMeasurable's own
 	// doc comment), Check() refuses for "could not measure load/memory/
-	// paging", never for swapReason/worktreeReason/budgetReason -- those
-	// strings only appear when a THRESHOLD is actually crossed, which
-	// neutralised() prevents regardless of whether the instrument reading it
-	// exists at all.
+	// paging", never for swapReason/worktreeReason/budgetReason/
+	// sessionReason -- those strings only appear when a THRESHOLD is
+	// actually crossed, which neutralised() prevents regardless of whether
+	// the instrument reading it exists at all.
 	if strings.Contains(joined, swapReason) {
 		t.Errorf("the paging limit refused at a threshold of 1e9 swapouts: %v", v.Reasons)
 	}
@@ -407,6 +451,9 @@ func TestNeitherNewLimitRefusesWhenNotArmed(t *testing.T) {
 	}
 	if strings.Contains(joined, budgetReason) {
 		t.Errorf("the budget limit refused under neutralised()'s own healthyQuota fixture: %v", v.Reasons)
+	}
+	if strings.Contains(joined, sessionReason) {
+		t.Errorf("the session limit refused under neutralised()'s own healthyQuota fixture (SessionUsedPercent 0, well clear of the threshold): %v", v.Reasons)
 	}
 	// v.OK itself is NOT one of those three -- it is the WHOLE verdict, and
 	// load/memory/paging are not neutralised the way swap/worktree/budget
