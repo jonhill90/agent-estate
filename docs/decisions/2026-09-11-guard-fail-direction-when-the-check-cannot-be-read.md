@@ -26,26 +26,25 @@ different directions because the two checks are not the same kind of thing.
 
 ## What actually distinguishes them
 
-**1. Is the failing check evidence about the action being gated, or an
-advisory about something else?**
+Two questions, asked of each guard. Both answers point the same way inside
+each guard's own case, and in opposite directions between the two guards.
+
+### Is the failing check evidence about this action, or advisory about something else?
 
 `estate merge`'s other four conditions (checks green, author ≠ reviewer, an
-independent review completed, that review approved) already establish
-*this PR's own* safety before condition 5 (main's status) is ever reached.
-An unreadable main-status check says nothing about whether those four
-conditions hold — it's an out-of-band signal about a *different* branch,
-layered on top of a PR that already cleared its own bar. Confirmed by
-tracing `gate.Evaluate`'s own control flow: a genuine total-outage-shaped
-failure is already caught earlier, by the pre-existing, unchanged,
-fail-closed PR-fetch path — condition 5's own fail-open branch is reached
-only when everything else about this specific PR already checked out.
+independent review, an approval) already establish *this PR's own* safety
+before condition 5 (main's status) is reached. An unreadable main-status
+check says nothing about whether those four hold — it's a signal about a
+*different* branch, layered on a PR that already cleared its own bar. A
+genuine total-outage failure is caught earlier, by the pre-existing,
+fail-closed PR-fetch path — condition 5 is reached only once this PR
+already checked out.
 
 Quota has no such fallback layer. The check *is* the resource the
-dispatch is about to consume — there is no other condition establishing
-"this dispatch is safe to start" that quota's own unreadability leaves
-intact.
+dispatch is about to consume — no other condition establishes "this
+dispatch is safe" that quota's own unreadability leaves intact.
 
-**2. Which failure direction actually costs more, evidenced, not assumed?**
+### Which failure direction actually costs more, evidenced, not assumed?
 
 For the red-main guard: the guarded event (main is genuinely red) measured
 2.8% over 8.25 days (7 of 250 runs), zero of them transient. But the same

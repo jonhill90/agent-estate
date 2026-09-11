@@ -10,40 +10,32 @@ built and mutation-tested the obvious static check for it, and concluded
 the check should not ship — not because building it was too hard, but
 because the measurement itself argued against it.
 
-**agent-estate#1380** — five closed/open issues (#1210, #1248, #1194,
-#1348, #1095) all described as "a mechanism that is correct, tested, and
-called by nothing." The naive check — "every exported writer needs a
-non-test caller" — was built for both Go and Python, mutation-validated
-against a synthetic dead function, then run for real:
+### agent-estate#1380 — a naive dead-code check, measured against five known instances
 
-- 4 of the 5 named instances turned out to be **operational
-  invocation-cadence gaps** (a cron that never runs, a process that never
-  restarts, a gate whose precondition became unsatisfiable) — invisible to
-  any static analysis of source, however sophisticated, because the code
-  itself is fully reachable; nothing in the *environment* invokes it.
-- The naive check, run unscoped, was ~100% noise (false "dead" hits from
-  values-as-defaults and dispatch-table entries the AST pass can't see;
-  false "live" hits from doc-comment self-mentions). Correctly scoped
-  (only files git history confirms are actually maintained), the same
-  check's real hit rate dropped to a handful of genuine findings — but
-  getting that scoping right required a human reading `git log` and
-  tracing an import graph, not something the check could determine about
-  itself.
-- Retro-run at the one case that *is* this shape (#1095's `link_items`),
-  a correctly-built version would have caught it on day one. That is the
-  entire positive result: one real class, caught reliably, at real
-  engineering cost to scope correctly, against four other cases it could
-  never have touched.
+Five issues (#1210, #1248, #1194, #1348, #1095) all "a mechanism that is
+correct, tested, and called by nothing." A naive check — every exported
+writer needs a non-test caller — was built for Go and Python and run for
+real, mutation-validated first against a synthetic dead function.
 
-**agent-estate#1095** — `links`/`conflicts_with`/`supersedes`/`depends_on`,
-zero rows since the schema was created a month ago. Investigated whether
-to build the missing manual entry point (the schema's own comment: "the
-views ARE the deliverable... Jon asked for these five by name," with
-`conflicts` the one view actually reading `links`). Decision, differentiated
-per relation rather than one verdict for the whole table:
-`conflicts_with`'s use case is already served by a different, shipped
-mechanism (`internal/knowledge/contradiction.go`'s query-time detector,
-recalibrated the same night — see it own record if one exists);
+4 of 5 were **operational invocation-cadence gaps**: a cron that never
+runs, a process that never restarts, an unsatisfiable precondition —
+invisible to static analysis, since the code is reachable and nothing in
+the *environment* invokes it. Unscoped, the check was ~100% noise; scoped
+to actually-maintained files, hits dropped to a handful, but that scoping
+needed a human. Retro-run at #1095's own `link_items` (the one genuinely
+static case), a correct version would have caught it day one.
+
+### agent-estate#1095 — one empty table, three relations, three different answers
+
+`links`/`conflicts_with`/`supersedes`/`depends_on`, zero rows since the
+schema was created a month ago. Investigated whether to build the missing
+manual entry point (the schema's own comment: "the views ARE the
+deliverable... Jon asked for these five by name," with `conflicts` the
+one view actually reading `links`). Decision, differentiated per relation
+rather than one verdict for the whole table: `conflicts_with`'s use case
+is already served by a different, shipped mechanism
+(`internal/knowledge/contradiction.go`'s query-time detector,
+recalibrated the same night — see its own record if one exists);
 `supersedes` overlaps a vault-layer mechanism that covers a narrower case;
 `depends_on` has no consumer at any layer and is the strongest candidate
 to eventually retire, not build for.
