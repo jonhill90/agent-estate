@@ -950,7 +950,15 @@ func usage() {
   estate tick check                     has the loop stalled? resolves each
                                         artifact in the window for real
                                         (a request, a status) rather than
-                                        trusting its shape.
+                                        trusting its shape. Also discloses,
+                                        every run and never affecting the
+                                        exit code below: any reclaimable
+                                        ledger record (agent-estate#1194)
+                                        and any deployed hook that is stale,
+                                        drifted, absent, or mis-wired
+                                        (agent-dotfiles#356, see 'estate
+                                        hook-status' for the same detail) --
+                                        a report, not a stop condition.
                                         exit 0 = moving
                                         exit 1 = STALLED, unacknowledged --
                                           stop and run 'tick escalate'
@@ -2805,7 +2813,6 @@ func main() {
 			}
 			break
 		}
-		clean := true
 		headShort := rep.HeadSHA
 		if len(headShort) > 12 {
 			headShort = headShort[:12]
@@ -2819,12 +2826,12 @@ func main() {
 		fmt.Println()
 		fmt.Printf("%-9s %-6s %-11s %s\n", "STATE", "WIRED", "SHOULD_WIRE", "PATH")
 		for _, f := range rep.Files {
-			if f.State != hookstatus.Current || f.Wired != f.ShouldWire {
-				clean = false
-			}
 			fmt.Printf("%-9s %-6v %-11v %s\n", f.State, f.Wired, f.ShouldWire, f.Path)
 		}
-		if !clean {
+		// Shared with printHookStatus's tick-check disclosure
+		// (hookStatusDirtyFiles) so the two can never classify the same
+		// report differently.
+		if len(hookStatusDirtyFiles(rep)) > 0 {
 			os.Exit(1)
 		}
 
@@ -3218,6 +3225,18 @@ func main() {
 			// report/--apply split, and PR #1189's precedent of disclosing
 			// a divergence without repairing it).
 			printReclaimable(l)
+			// agent-dotfiles#356: a deployed PreToolUse guard that silently
+			// drifted, went stale, or was never wired looks exactly like a
+			// guard that works, and until now nothing but a human
+			// remembering to run `estate hook-status` by hand would ever
+			// say so -- its own brief named this "the same failure one
+			// level up" from #353's own drift, i.e. exactly the
+			// reclaim.Report gap immediately above. Same disclosure shape,
+			// same non-fatal contract: printHookStatus never changes this
+			// command's exit code (see its own doc comment for why a
+			// report that could block the loop would just get routed
+			// around).
+			printHookStatus()
 			// Before reading the record, confirm the record is still there.
 			// It lives in a file the Director can delete, and deleting it
 			// used to turn a real stall into "no tick log yet".
@@ -4029,4 +4048,83 @@ func printReclaimable(l *ledger.Ledger) {
 		fmt.Printf("  %s  %s  (dispatched %s)\n", a.Record.ID, a.Reason, a.Record.At.UTC().Format("15:04:05Z"))
 	}
 	fmt.Println("report only -- `estate reclaim --apply` frees these; tick check never does")
+}
+
+// hookStatusDirtyFiles returns the files in rep that are not in the goal
+// state: not Current, or Wired disagrees with ShouldWire -- agent-dotfiles#356's
+// two-gap shape, where a file can be undeployed, unwired, or both,
+// independently. Shared by `estate hook-status`'s own exit code and
+// printHookStatus's tick-check disclosure below so the two can never
+// classify the same report differently.
+func hookStatusDirtyFiles(rep hookstatus.Report) []hookstatus.File {
+	var bad []hookstatus.File
+	for _, f := range rep.Files {
+		if f.State != hookstatus.Current || f.Wired != f.ShouldWire {
+			bad = append(bad, f)
+		}
+	}
+	return bad
+}
+
+// computeHookStatus resolves the same defaults `estate hook-status` itself
+// uses (ESTATE_HOOK_CHECKOUT / ESTATE_HOOK_SETTINGS overrides, then the
+// real ~/source/repos/Personal/agent-dotfiles and ~/.claude/settings.json)
+// and runs hookstatus.Compute against them. Split out from
+// printHookStatus so renderHookStatus below can be tested against a
+// constructed Report with no git checkout or network involved at all.
+func computeHookStatus() (rep hookstatus.Report, checkoutDir string, err error) {
+	checkoutDir, err = hookstatus.DefaultCheckoutDir()
+	if err != nil {
+		return hookstatus.Report{}, "", err
+	}
+	settingsPath, err := hookstatus.DefaultSettingsPath()
+	if err != nil {
+		return hookstatus.Report{}, "", err
+	}
+	rep, err = hookstatus.Compute(checkoutDir, settingsPath, hookstatus.GH{})
+	return rep, checkoutDir, err
+}
+
+// renderHookStatus is the pure half of printHookStatus: given an
+// already-computed Report (or a resolve error), it returns the exact text
+// tick check prints, with no I/O of its own -- the seam
+// TestHookStatusDisclosure* tests against directly, since hookstatus.Compute
+// itself needs a real git checkout and a live GitHub read that a unit test
+// should not depend on.
+func renderHookStatus(rep hookstatus.Report, checkoutDir string, computeErr error) string {
+	if computeErr != nil {
+		return "hook-status: could not be determined -- " + computeErr.Error() + "\n"
+	}
+	bad := hookStatusDirtyFiles(rep)
+	var b strings.Builder
+	if len(bad) == 0 {
+		fmt.Fprintf(&b, "hook-status: clean -- %d hook(s) tracked at %s, all current and correctly wired\n", len(rep.Files), checkoutDir)
+		return b.String()
+	}
+	fmt.Fprintf(&b, "hook-status: %d of %d hook(s) at %s are not current or not correctly wired:\n", len(bad), len(rep.Files), checkoutDir)
+	for _, f := range bad {
+		if f.Wired != f.ShouldWire {
+			fmt.Fprintf(&b, "  %-9s wired=%-5v should_wire=%-5v %s\n", f.State, f.Wired, f.ShouldWire, f.Path)
+		} else {
+			fmt.Fprintf(&b, "  %-9s %s\n", f.State, f.Path)
+		}
+	}
+	b.WriteString("report only -- `estate hook-status` shows the same detail; tick check never deploys or repairs anything\n")
+	return b.String()
+}
+
+// printHookStatus discloses agent-dotfiles#356's finding at the one place
+// every tick already reads (docs/canonical/director-loop.md step 1), the
+// same disclose-never-repair shape printReclaimable establishes just above
+// for agent-estate#1194's reclaimable-record gap. DETECTION ONLY --
+// hookstatus.Compute never fetches, pulls, tidies, or writes to the
+// checkout it inspects (see that package's own doc comment), and a dirty
+// report never changes this command's exit code: tick check's stop
+// contract is "did this tick produce an artifact", not "is every guard on
+// this machine current" -- a report that could block the loop on a guard
+// nobody has deployed yet would just get routed around, the same
+// reasoning that already keeps the reclaimable disclosure non-fatal.
+func printHookStatus() {
+	rep, checkoutDir, err := computeHookStatus()
+	fmt.Print(renderHookStatus(rep, checkoutDir, err))
 }

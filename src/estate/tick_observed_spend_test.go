@@ -255,7 +255,7 @@ func runEstate(t *testing.T, bin, dir string, env []string, args ...string) stri
 	t.Helper()
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = dir
-	cmd.Env = env
+	cmd.Env = withHermeticHookCheckout(t, env)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -263,4 +263,23 @@ func runEstate(t *testing.T, bin, dir string, env []string, args ...string) stri
 		t.Fatalf("estate %s: %v\nstdout:\n%sstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
 	return stdout.String()
+}
+
+// withHermeticHookCheckout keeps every existing `tick check` test hermetic
+// after printHookStatus (agent-dotfiles#356) started running there: unless
+// a test has already set its own ESTATE_HOOK_CHECKOUT (the hookstatus
+// disclosure tests do, deliberately), point it at a fresh directory that is
+// not a git checkout at all, so hookstatus.Compute fails at its very first
+// local git call (`git remote get-url origin`) -- honestly, fast, and with
+// no network request attempted -- rather than every test in this package
+// silently depending on this machine's real ~/source/repos/Personal/agent-dotfiles
+// checkout and a live GitHub read.
+func withHermeticHookCheckout(t *testing.T, env []string) []string {
+	t.Helper()
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "ESTATE_HOOK_CHECKOUT=") {
+			return env
+		}
+	}
+	return append(env, "ESTATE_HOOK_CHECKOUT="+t.TempDir())
 }
