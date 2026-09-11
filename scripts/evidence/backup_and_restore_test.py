@@ -25,9 +25,13 @@ own.
 
 ## HARD CONSTRAINTS (never relax these)
 
-- Every read of the LIVE corpus.sqlite3 uses `sqlite3 -readonly`. Never
-  opened read-write, never opened without -readonly, anywhere in this
-  script.
+- Every read of the LIVE corpus.sqlite3 opens it via Python's own sqlite3
+  module with a `file:...?mode=ro` URI (agent-estate#1372 -- the sqlite3
+  CLI's `-readonly`/`.backup` cannot open a WAL-journaled database with no
+  `-wal`/`-shm` sidecars present, which is exactly the state a database
+  with no active writer is in; Python's sqlite3 module has no such
+  limitation). Never opened read-write, never opened any other way,
+  anywhere in this script.
 - The ledger-write-guard hook that blocks direct sqlite writes to the
   live corpus is correct and is never worked around -- this script
   simply never attempts a write against the live corpus path at all.
@@ -36,9 +40,10 @@ own.
 - Restore always targets a fresh temporary directory (tempfile.mkdtemp),
   never the live store's own path, and is removed at the end of the run
   unless --keep-restore-dir is passed.
-- Backup artifacts derived from corpus.sqlite3 (the .backup copy, then
-  the restored copy) are the only files this script ever opens in
-  read-write mode with sqlite3 -- both are copies, never the live file.
+- Backup artifacts derived from corpus.sqlite3 (the destination of
+  Connection.backup(), then the restored copy) are the only files this
+  script ever opens in read-write mode with sqlite3 -- both are copies,
+  never the live file.
 
 ## Typed absence (requirement 3)
 
@@ -56,7 +61,7 @@ import hashlib
 import json
 import os
 import shutil
-import subprocess
+import sqlite3
 import sys
 import tempfile
 from dataclasses import dataclass, field
@@ -189,10 +194,28 @@ def stat_snapshot(path: Path) -> dict[str, Any]:
     return {"size_bytes": st.st_size, "mtime": st.st_mtime}
 
 
-def run_sqlite(args: list[str], check: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["sqlite3", *args], capture_output=True, text=True, check=check
-    )
+def sqlite_integrity_check(path: Path) -> tuple[bool, str]:
+    """PRAGMA integrity_check via Python's sqlite3, read-only. Returns
+    (ok, result_text). Never opens path for write.
+
+    A corrupt or truncated file does not always let PRAGMA
+    integrity_check RUN and report "malformed" as a row -- caught directly
+    while mutation-testing this fix (agent-estate#1372): truncating a
+    real backup copy hard enough raised sqlite3.DatabaseError
+    ("database disk image is malformed") out of execute() itself, before
+    any row could be fetched. Both shapes -- a query that runs and
+    reports corruption, and a corruption so severe the query cannot even
+    execute -- must read as the same "ok=False" finding, never let the
+    second shape crash this function and abort the whole run."""
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        rows = conn.execute("PRAGMA integrity_check").fetchall()
+    except sqlite3.DatabaseError as e:
+        return False, f"integrity_check could not run: {e}"
+    finally:
+        conn.close()
+    text = "\n".join(r[0] for r in rows)
+    return text.strip() == "ok", text
 
 
 @dataclass
@@ -246,38 +269,74 @@ def backup_sqlite(src: Path, dest: Path) -> ArtifactResult:
         r.live_untouched = r.live_after == r.live_before
         return r
 
-    # HARD CONSTRAINT: -readonly on every open of the live source.
-    backup_proc = run_sqlite(
-        ["-readonly", str(src), f".backup '{dest}'"], check=False
-    )
-    if backup_proc.returncode != 0:
+    # HARD CONSTRAINT: read-only open of the live source -- via Python's
+    # own sqlite3 module and a file:...?mode=ro URI, not the CLI.
+    # agent-estate#1372: the sqlite3 CLI's `.backup` dot-command opens its
+    # source with `-readonly`, which -- the same "error 14" condition every
+    # brief in this repo warns about -- CANNOT open a WAL-journaled
+    # database unless its -wal/-shm sidecars already exist alongside it.
+    # Sidecars are absent exactly when no writer currently holds the
+    # database, so the CLI's own mechanism failed precisely at the moment
+    # nothing was wrong. Python's sqlite3 module opens the identical URI
+    # fine regardless of sidecar state (this is why every brief already
+    # tells agents to read the corpus this way instead of the CLI), and
+    # Connection.backup() is SQLite's own ONLINE backup API: unlike a raw
+    # file copy (the issue's own named alternative, `cp`), it is correct
+    # whether or not a writer is concurrently active -- see this
+    # function's own doc comment in the PR that fixed this for the case
+    # against `cp` specifically. There is no dual code path here for
+    # "sidecars present" vs "absent": this ONE mechanism is correct in
+    # both states, so there is nothing to detect and no race window
+    # between detecting and acting.
+    try:
+        src_conn = sqlite3.connect(f"file:{src}?mode=ro", uri=True)
+    except sqlite3.Error as e:
         r.status = "error"
-        r.detail = f".backup failed: {backup_proc.stderr.strip()}"
+        r.detail = f"could not open source read-only: {e}"
         r.live_after = stat_snapshot(src)
         r.live_untouched = r.live_after == r.live_before
         return r
 
-    # Flatten the COPY (never the live source) to journal_mode=DELETE --
-    # a single self-contained file, no -wal/-shm sidecars required to
-    # open it, and openable with -readonly cleanly (a WAL-mode file
-    # cannot be opened -readonly without its -wal/-shm already present,
-    # which a bare .backup copy does not carry -- verified directly
-    # against the real corpus before writing this script).
-    flatten_proc = run_sqlite([str(dest), "PRAGMA journal_mode=DELETE;"], check=False)
-    if flatten_proc.returncode != 0:
+    dest_conn = sqlite3.connect(str(dest))
+    try:
+        with dest_conn:
+            src_conn.backup(dest_conn)
+    except sqlite3.Error as e:
+        src_conn.close()
+        dest_conn.close()
         r.status = "error"
-        r.detail = f"journal_mode flatten failed: {flatten_proc.stderr.strip()}"
+        r.detail = f"Connection.backup() failed: {e}"
         r.live_after = stat_snapshot(src)
         r.live_untouched = r.live_after == r.live_before
         return r
+    src_conn.close()
+
+    # Flatten the COPY (never the live source) to journal_mode=DELETE --
+    # Connection.backup() copies the source's own page content wholesale,
+    # including whichever journal_mode its header records, so a WAL-mode
+    # source produces a WAL-mode COPY too (verified directly against the
+    # real corpus before writing this fix) unless flattened here. A single
+    # self-contained file needs no -wal/-shm sidecars to open later --
+    # exactly the property this fix's own reproduction showed matters, and
+    # the same reasoning the pre-existing flatten step already had, now
+    # done through the same connection rather than a second CLI call.
+    try:
+        dest_conn.execute("PRAGMA journal_mode=DELETE")
+    except sqlite3.Error as e:
+        dest_conn.close()
+        r.status = "error"
+        r.detail = f"journal_mode flatten failed: {e}"
+        r.live_after = stat_snapshot(src)
+        r.live_untouched = r.live_after == r.live_before
+        return r
+    dest_conn.close()
     for sidecar in (dest.with_name(dest.name + "-wal"), dest.with_name(dest.name + "-shm")):
         sidecar.unlink(missing_ok=True)
 
-    integrity_proc = run_sqlite(["-readonly", str(dest), "PRAGMA integrity_check;"], check=False)
-    integrity_ok = integrity_proc.returncode == 0 and integrity_proc.stdout.strip() == "ok"
+    integrity_ok, integrity_text = sqlite_integrity_check(dest)
     r.integrity_check = {
-        "tool": "sqlite3 -readonly ... 'PRAGMA integrity_check;'",
-        "result": integrity_proc.stdout.strip() or integrity_proc.stderr.strip(),
+        "tool": "python sqlite3, file:...?mode=ro -- PRAGMA integrity_check",
+        "result": integrity_text,
         "ok": integrity_ok,
     }
     if not integrity_ok:
@@ -304,32 +363,35 @@ def restore_test_sqlite(backup_path: Path, restore_dir: Path) -> dict[str, Any]:
     restored_hash = sha256_file(restored)
     byte_identical = backup_hash == restored_hash
 
-    integrity_proc = run_sqlite(["-readonly", str(restored), "PRAGMA integrity_check;"], check=False)
-    integrity_ok = integrity_proc.returncode == 0 and integrity_proc.stdout.strip() == "ok"
+    # Python sqlite3 throughout, not the CLI (agent-estate#1372) -- the
+    # restored copy is already flattened to journal_mode=DELETE by
+    # backup_sqlite, so the CLI's -readonly would actually work here too,
+    # but there is no reason left to depend on the CLI being installed at
+    # all once nothing in this file needs it for the one case that broke.
+    integrity_ok, integrity_text = sqlite_integrity_check(restored)
 
     # Prove queryability, not just "opens": a real query against a real
     # table, read-only, against the RESTORED copy only.
-    query_proc = run_sqlite(
-        ["-readonly", str(restored), "SELECT count(*) FROM sqlite_master WHERE type='table';"],
-        check=False,
-    )
-    table_count = query_proc.stdout.strip() if query_proc.returncode == 0 else None
-    sample_proc = run_sqlite(
-        ["-readonly", str(restored), "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name LIMIT 5;"],
-        check=False,
-    )
+    check = sqlite3.connect(f"file:{restored}?mode=ro", uri=True)
+    try:
+        table_count = str(check.execute("SELECT count(*) FROM sqlite_master WHERE type='table'").fetchone()[0])
+        sample_tables = [row[0] for row in check.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name LIMIT 5"
+        ).fetchall()]
+    finally:
+        check.close()
 
     return {
         "restored_path": str(restored),
         "backup_sha256": backup_hash,
         "restored_sha256": restored_hash,
         "byte_identical": byte_identical,
-        "integrity_check": {"result": integrity_proc.stdout.strip(), "ok": integrity_ok},
+        "integrity_check": {"result": integrity_text, "ok": integrity_ok},
         "query_proof": {
             "table_count_sql": "SELECT count(*) FROM sqlite_master WHERE type='table';",
             "table_count": table_count,
             "sample_tables_sql": "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name LIMIT 5;",
-            "sample_tables": sample_proc.stdout.strip().splitlines() if sample_proc.returncode == 0 else [],
+            "sample_tables": sample_tables,
         },
     }
 
@@ -485,6 +547,12 @@ def main() -> int:
             continue
         if r.status == "error":
             print(f"  ERROR: {r.detail}")
+            # agent-estate#1372: a failed backup must be unmistakably a
+            # stop sign, not a step a caller can read as optional and
+            # move past. This exact wording is checked by
+            # test_backup_and_restore_test.py -- if you change it, update
+            # that test's own assertion, don't just delete it.
+            print(f"  *** DO NOT PROCEED WITH THE WRITE this backup was for -- {name} could not be backed up. ***")
             print()
             continue
 
@@ -535,6 +603,15 @@ def main() -> int:
     print()
     print(f"=== Summary: {sum(1 for r in results if r.status == 'ok')}/{len(results)} sources ok, "
           f"live stores untouched: {untouched} ===")
+    if hard_fail:
+        # Same requirement as the per-source ERROR line above, restated at
+        # the point a caller is most likely to actually be looking: the
+        # last thing this script prints. Exit code alone (already
+        # non-zero below, unchanged by this fix) is not a substitute for
+        # this -- a caller piping only stdout to a log and skimming it
+        # must not be able to read a failed backup as a step that merely
+        # didn't apply.
+        print("*** BACKUP FAILED -- DO NOT PROCEED WITH ANY WRITE THIS BACKUP WAS SUPPOSED TO PROTECT. ***")
 
     return 1 if hard_fail or not untouched else 0
 

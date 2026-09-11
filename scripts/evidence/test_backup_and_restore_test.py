@@ -4,7 +4,6 @@ import importlib.util
 import json
 import shutil
 import sqlite3
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -114,32 +113,59 @@ class SqliteBackupAndRestore(unittest.TestCase):
         # (sqlite3 refuses to copy a malformed database), which is
         # already a correctly-typed "error" -- but it does not exercise
         # backup_sqlite's OWN integrity_check gate specifically. To
-        # isolate that gate, intercept run_sqlite so the .backup and
-        # flatten steps succeed against a genuinely valid fixture, and
-        # only the integrity_check call is forced to report failure --
-        # proving backup_sqlite itself refuses to report "ok" status on
-        # a failing integrity_check, not merely that sqlite3 can detect
-        # corruption in general.
+        # isolate that gate, intercept sqlite_integrity_check so the
+        # backup and flatten steps succeed against a genuinely valid
+        # fixture, and only the integrity_check call is forced to report
+        # failure -- proving backup_sqlite itself refuses to report "ok"
+        # status on a failing integrity_check, not merely that sqlite3
+        # can detect corruption in general.
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             src = root / "src.sqlite3"
             make_fixture_sqlite(src)
             dest = root / "backup" / "corpus-sqlite3.sqlite3"
 
-            real_run_sqlite = m.run_sqlite
-
-            def faking_integrity_check(args, check=True):
-                if "PRAGMA integrity_check;" in args:
-                    fake = subprocess.CompletedProcess(args, returncode=0, stdout="*** in database main ***\nPage 3: btreeInitPage() returns error code 11\n", stderr="")
-                    return fake
-                return real_run_sqlite(args, check=check)
-
-            with patch.object(m, "run_sqlite", side_effect=faking_integrity_check):
+            fake_result = (False, "*** in database main ***\nPage 3: btreeInitPage() returns error code 11\n")
+            with patch.object(m, "sqlite_integrity_check", return_value=fake_result):
                 r = m.backup_sqlite(src, dest)
 
             self.assertEqual(r.status, "error")
             self.assertFalse(r.integrity_check["ok"])
             self.assertIn("integrity_check", r.detail)
+
+    def test_wal_source_with_no_sidecars_present_backs_up_cleanly(self):
+        # agent-estate#1372's own reproduction, as a regression test: a
+        # WAL-mode database whose connection has been CLOSED (SQLite's
+        # own close() auto-checkpoints and removes the -wal/-shm
+        # sidecars) -- exactly the state the real ~/corpus/corpus.sqlite3
+        # was found in. The CLI's `sqlite3 -readonly ... .backup` this
+        # file used before this fix cannot open a WAL database in this
+        # state at all ("unable to open database file"); Python's sqlite3
+        # module (file:...?mode=ro) and Connection.backup() must not care
+        # either way.
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            src = root / "src.sqlite3"
+            conn = make_wal_fixture_sqlite(src)
+            conn.close()  # checkpoints and removes -wal/-shm -- the bug's own precondition
+
+            self.assertFalse(src.with_name(src.name + "-wal").exists(),
+                              "fixture setup itself is wrong -- sidecars should be gone after close()")
+            self.assertFalse(src.with_name(src.name + "-shm").exists())
+
+            dest = root / "backup" / "corpus-sqlite3.sqlite3"
+            r = m.backup_sqlite(src, dest)
+
+            self.assertEqual(r.status, "ok", msg=r.detail)
+            self.assertTrue(r.integrity_check["ok"])
+            self.assertIsNotNone(r.sha256)
+
+            restore_dir = root / "restore"
+            restore_dir.mkdir()
+            rt = m.restore_test_sqlite(dest, restore_dir)
+            self.assertTrue(rt["byte_identical"])
+            self.assertTrue(rt["integrity_check"]["ok"])
+            self.assertIn("widgets", rt["query_proof"]["sample_tables"])
 
     def test_corrupted_source_is_caught_at_the_backup_step_end_to_end(self):
         # Complementary real-world check: an actually-corrupt SOURCE
@@ -225,6 +251,76 @@ class LiveUntouchedProof(unittest.TestCase):
             r = m.backup_sqlite(src, dest)
             self.assertIn(r.status, ("error",))
             self.assertEqual(src.read_bytes(), before_bytes)
+
+
+class FailedBackupIsUnmistakablyAStopSign(unittest.TestCase):
+    """agent-estate#1372's second requirement: a failed backup must read,
+    in the tool's own words, as a stop sign a caller cannot mistake for an
+    optional step -- not just a non-zero exit code a caller might not be
+    checking. Drives the real main() end to end (not backup_sqlite in
+    isolation) against SOURCES monkeypatched to synthetic, guaranteed-to-
+    fail paths, and asserts the actual printed text, not just the exit
+    code -- exercising exactly what a human running this script would
+    read on their own screen."""
+
+    def test_main_prints_an_explicit_do_not_proceed_line_on_a_failed_backup(self):
+        import contextlib
+        import io
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            corrupt_sqlite = root / "corrupt.sqlite3"
+            corrupt_sqlite.write_bytes(b"not a real sqlite file at all")
+            missing_jsonl = root / "does-not-exist.jsonl"
+            backup_dir = root / "backups" / "run1"
+
+            fake_sources = [
+                {"name": "corpus-sqlite3", "kind": "sqlite", "path": corrupt_sqlite},
+                {"name": "estate-ledger-jsonl", "kind": "jsonl", "path": missing_jsonl},
+            ]
+
+            buf = io.StringIO()
+            with patch.object(m, "SOURCES", fake_sources), \
+                 patch.object(sys, "argv", ["backup_and_restore_test.py", "--backup-dir", str(backup_dir)]), \
+                 contextlib.redirect_stdout(buf):
+                exit_code = m.main()
+
+            output = buf.getvalue()
+            self.assertEqual(exit_code, 1, msg=output)
+            self.assertIn("DO NOT PROCEED WITH THE WRITE", output)
+            self.assertIn("BACKUP FAILED", output)
+            self.assertIn("DO NOT PROCEED WITH ANY WRITE", output)
+
+    def test_main_prints_no_stop_sign_language_when_every_source_backs_up_cleanly(self):
+        # The negative case: a caller must not see stop-sign language on a
+        # genuinely successful run -- otherwise the warning stops meaning
+        # anything.
+        import contextlib
+        import io
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            good_sqlite = root / "good.sqlite3"
+            make_fixture_sqlite(good_sqlite)
+            good_jsonl = root / "good.jsonl"
+            good_jsonl.write_text('{"id": 1}\n')
+            backup_dir = root / "backups" / "run1"
+
+            fake_sources = [
+                {"name": "corpus-sqlite3", "kind": "sqlite", "path": good_sqlite},
+                {"name": "estate-ledger-jsonl", "kind": "jsonl", "path": good_jsonl},
+            ]
+
+            buf = io.StringIO()
+            with patch.object(m, "SOURCES", fake_sources), \
+                 patch.object(sys, "argv", ["backup_and_restore_test.py", "--backup-dir", str(backup_dir)]), \
+                 contextlib.redirect_stdout(buf):
+                exit_code = m.main()
+
+            output = buf.getvalue()
+            self.assertEqual(exit_code, 0, msg=output)
+            self.assertNotIn("DO NOT PROCEED", output)
+            self.assertNotIn("BACKUP FAILED", output)
 
 
 if __name__ == "__main__":
