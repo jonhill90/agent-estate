@@ -91,7 +91,7 @@ had stopped running, not a memory problem at all.
 
 Exit status is 0 only for `complete`.
 
-## Merge gate — `src/estate` (`estate merge <repo> <pr> <reviewer-lane>`)
+## Merge gate — `src/estate` (`estate merge <repo> <pr> <reviewer-lane> [--override-red-main=REASON]`)
 
 `estate merge` **decides**; it never runs `gh pr merge` or any other mutating
 call. It evaluates one PR against its head SHA: checks green at that exact
@@ -101,6 +101,16 @@ head — a stale review (an earlier head, since superseded) does not count, and
 neither does a reviewer whose own author-record HeadSHA matches the PR
 (self-review). Prints its reasons either way; the operator or the Director
 merges.
+
+It also refuses if `main`'s own most recent CI run (`.github/workflows/estate-ci.yml`)
+is not a completed success — agent-estate#1379: two PRs, each green against
+the `main` they branched from, broke `main`'s test binary once merged
+together, and nothing re-checked `main` afterward. `--override-red-main=REASON`
+bypasses only this one condition, explicitly, and is always echoed back —
+never a silent bypass. `estate main-status <repo>` is the same red/green
+check on its own, with none of `estate merge`'s other conditions, so it stays
+usable even while agent-estate#1348 makes `estate merge` refuse every PR the
+estate currently produces over an unrelated branch-naming defect.
 
 ## Worktree cleanup — `src/estate` (`estate sweep-worktrees [--apply]`)
 
