@@ -112,6 +112,43 @@ check on its own, with none of `estate merge`'s other conditions, so it stays
 usable even while agent-estate#1348 makes `estate merge` refuse every PR the
 estate currently produces over an unrelated branch-naming defect.
 
+## Hook deployment status — `src/estate/internal/hookstatus` (`estate hook-status [checkout-dir] [--json]`)
+
+agent-dotfiles#356 named the shared failure behind #353 (`main-branch-guard`
+kept running its pre-fix behavior for hours after the fix merged) and #357
+(`keychain-write-guard.sh` merged upstream, never deployed, never wired):
+*nothing reports it.* A PreToolUse guard silently running an old version
+looks exactly like a guard that works. `estate hook-status` is that report,
+DETECTION ONLY — it never fetches, pulls, tidies, or writes to the checkout
+it inspects (deployment is Jon's decision, not this command's). It classifies
+every file under a deployed `hooks/` checkout (default
+`~/source/repos/Personal/agent-dotfiles`, `ESTATE_HOOK_CHECKOUT` override)
+against `origin/main`, by git blob SHA: `current` (byte-identical to
+`origin/main`), `stale` (unmodified locally, `origin/main` has since moved),
+`drifted` (matches neither `HEAD` nor `origin/main` — someone hand-edited the
+live file), or `absent` (`origin/main` has it, the checkout does not — #357's
+shape, which a diff of only the files already on disk would never surface).
+Separately, each file's `wired` state (registered in the live
+`~/.claude/settings.json`, `ESTATE_HOOK_SETTINGS` override) is compared
+against `should_wire` (registered in `origin/main`'s own
+`settings/claude/settings.json` fragment) — a file can be deployed and still
+never invoked. Every `origin/main` fact is read through the GitHub API
+(`gh api`); every local fact is read through git plumbing that touches
+nothing (`git ls-tree`, `git hash-object`, `git rev-parse`) — this command
+never runs `git fetch` itself, so a stale local `origin/main` tracking ref
+cannot produce a wrong answer: the `ahead_by` headline is reported unknown
+rather than guessed when that ref is not freshly corroborated against
+GitHub's own live SHA (per-file classification is unaffected either way, since
+it never depends on that ref at all). Exit 0 when everything is current and
+correctly wired; exit 1 when anything is not (see the printed table, or pipe
+`--json` into a script); exit 2 when the checkout or GitHub could not be read
+at all. **Not yet wired into any recurring check** (`estate tick check`, a
+pressure check, session start) — a report nobody runs fails the same way the
+gap it reports on failed, so this is a real gap in this command's own value,
+named rather than left implicit; deliberately left as a follow-on rather than
+bundled into landing the detector itself, since which trigger (if any) is
+right is a separate design decision this PR does not make unasked.
+
 ## Worktree cleanup — `src/estate` (`estate sweep-worktrees [--apply]`)
 
 Report mode by default; only `--apply` removes anything. Every ledger record
