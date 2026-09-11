@@ -65,8 +65,10 @@ will bite you and where to look for a given task.
 - **The app is Go.** Shell and Python are not an implementation option for the
   app (`src/estate`, `src/tui`), at any size, for any reason. That is the
   whole rule; it does not extend to helper scripts elsewhere in the repo —
-  Jon relaxed that part on 2026-09-11 ("can use the scripts as needed — make
-  them as needed"; agent-estate#1412). A named 17-file subset of
+  Jon relaxed that part on 2026-09-11, saying scripts outside the app may now
+  be written and used as needed (`hp-41cc3914d6d18816`, described rather than
+  quoted — `text_clean` is NULL for that row; agent-estate#1412). A named
+  17-file subset of
   `reference/scripts/supervisor/` — `core.py` and its ledger mixins, plus
   `itemize_prompts.py`, `mine_prompts.py`, `prompt_capture_hook.py` (a live
   registered hook) and two migration scripts — is live infrastructure the app
