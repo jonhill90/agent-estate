@@ -33,6 +33,67 @@ class LockTimeout(TimeoutError):
     bounded, small delay*, not an indefinite hang."""
 
 
+class LedgerSymlinkPreconditionError(RuntimeError):
+    """Raised by `Ledger.__init__` when `root` holds a `corpus.sqlite3` but
+    `ledger.sqlite3` is missing, or resolves to a DIFFERENT file, instead of
+    the `ledger.sqlite3 -> corpus.sqlite3` compat symlink (agent-estate#P6)
+    that is supposed to make the two the same file.
+
+    agent-estate#1364: `self.db_path = self.root / "ledger.sqlite3"` (below)
+    is unconditional -- if the compat symlink is ever absent (deleted,
+    never created, clobbered by a plain file) while `corpus.sqlite3` still
+    exists alongside it, sqlite silently CREATES a brand-new, separate,
+    empty `ledger.sqlite3` the moment `_initialize()` opens `self.db_path`,
+    and every write after that succeeds against it while `corpus.sqlite3`
+    is never touched -- the exact #1357 failure shape (a writer reports
+    success while the record goes quietly stale), one level further down,
+    undetectable except by recency. Reproduced directly in scratch before
+    this check was written (never against the real ~/corpus/): a
+    `corpus.sqlite3` with no sibling symlink at all, one `record_prompt`
+    call, and the row lands in a newly-created `ledger.sqlite3` while
+    `corpus.sqlite3` stays at zero rows.
+
+    This refuses loudly, at construction time, BEFORE `_initialize()` ever
+    opens `self.db_path` and creates the divergent file -- not after. It is
+    a no-op for every other `Ledger` caller: a root with no `corpus.sqlite3`
+    at all (the dead supervisor state dir, any test fixture's own temp dir,
+    any other lane state directory) never reaches the comparison below, so
+    this changes behavior only for the one directory shape it exists to
+    protect."""
+
+
+def _assert_ledger_corpus_symlink_intact(root: Path, db_path: Path) -> None:
+    corpus_path = root / "corpus.sqlite3"
+    if not corpus_path.exists():
+        # No corpus.sqlite3 in this root at all -- not a corpus directory,
+        # nothing for this check to protect (the dead state dir, a test
+        # fixture's own temp dir, any other Ledger root).
+        return
+    if not db_path.exists():
+        # corpus.sqlite3 is here but ledger.sqlite3 is not -- the exact
+        # #1364 shape: the compat symlink is simply missing. _initialize()
+        # below would silently create a brand-new, empty ledger.sqlite3
+        # right here if this refusal did not fire first.
+        raise LedgerSymlinkPreconditionError(
+            f"{corpus_path} exists but {db_path} does not -- the "
+            "ledger.sqlite3 -> corpus.sqlite3 compat symlink (agent-estate#P6) is "
+            "missing. Refusing to construct a Ledger here: proceeding would let "
+            "sqlite silently create a brand-new, empty ledger.sqlite3 and every "
+            "write would land there instead of the real corpus, reproducing "
+            "agent-estate#1357's 'writer reports success, record goes stale' "
+            f"failure at the filesystem level. Fix: ln -s corpus.sqlite3 {db_path}"
+        )
+    if os.path.realpath(str(db_path)) != os.path.realpath(str(corpus_path)):
+        raise LedgerSymlinkPreconditionError(
+            f"{db_path} and {corpus_path} both exist as SEPARATE files, not the same "
+            "one via the ledger.sqlite3 -> corpus.sqlite3 compat symlink (agent-estate#P6). "
+            "Refusing to construct a Ledger here: writing to either file individually "
+            "would silently diverge from the other, reproducing agent-estate#1357's "
+            "'writer reports success, record goes stale' failure at the filesystem level. "
+            f"Fix the symlink: rm {db_path} && ln -s corpus.sqlite3 {db_path}"
+        )
+
+
 class LedgerCoreMixin:
 
     def __init__(self, root: Path | str, *, clock=None, _migration_failpoint=None, lock_timeout=None):
@@ -58,6 +119,10 @@ class LedgerCoreMixin:
         self.lock_path.touch(mode=0o600, exist_ok=True)
         os.chmod(self.lock_path, 0o600)
         self._lock_depth = 0
+        # agent-estate#1364: refuse BEFORE _initialize() ever opens
+        # self.db_path -- see _assert_ledger_corpus_symlink_intact's own
+        # doc comment (on LedgerSymlinkPreconditionError above) for why.
+        _assert_ledger_corpus_symlink_intact(self.root, self.db_path)
         self._initialize()
         self._migrate_lanes_table(failpoint=_migration_failpoint)
         self._migrate_tasks_table(failpoint=_migration_failpoint)
