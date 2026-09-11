@@ -99,10 +99,56 @@ func TestVerifyCatchesShipSkipMeaningInversion(t *testing.T) {
 	for _, c := range []struct{ raw, clean, label string }{
 		{"ship the release tonight", "skip the release tonight", "ship/skip -- opposite instructions"},
 		{"that lets the process finish", "that lots the process finish", "lets/lots -- nonsense substitution"},
+		{"deploy from main", "deploy form main", "from/form"},
+		{"push the fix now", "push the fix new", "now/new"},
+		{"read the file", "reed the file", "read/reed"},
 	} {
 		v := VerifyMeaningPreserved(c.raw, c.clean)
 		if v.OK {
 			t.Fatalf("%s: VerifyMeaningPreserved(%q, %q) returned OK -- a real word substituted for a different, unrelated real word must be refused", c.label, c.raw, c.clean)
+		}
+		t.Logf("%s: correctly refused: %s", c.label, v.Reason)
+	}
+}
+
+// Round two's own finding (Fable, REQUEST-CHANGES 5663876e): round one's fix
+// anchored to the vetted replacement WORD, not to its POSITION -- it asked
+// whether the `to` tokens were present anywhere in the clean token SET.
+// When a typo's vetted replacement is a common function word that already
+// appears elsewhere in the sentence (the, and, that -- most sentences),
+// that unrelated occurrence "vouches" for a substitution it had nothing to
+// do with, and the real, wrong substitution passes. All four reproduce
+// against 5663876e and must be refused here.
+func TestVerifyAnchorsToPositionNotJustToTheVettedWord(t *testing.T) {
+	for _, c := range []struct{ raw, clean, label string }{
+		{"run teh tests then deploy the app", "run all tests then deploy the app", "teh->all, vouched for by the unrelated \"the\" in \"the app\""},
+		{"fix teh bug in the module", "fix bug in the module", "teh dropped outright, \"the\" already present"},
+		{"stop adn revert, and report", "stop now revert, and report", "adn->now, vouched for by nothing -- no \"and\"/\"now\" elsewhere, but still a real word swap"},
+		{"i think taht is wrong, that one", "i think this is wrong, that one", "taht->this, vouched for by the unrelated \"that\" later in the sentence"},
+	} {
+		v := VerifyMeaningPreserved(c.raw, c.clean)
+		if v.OK {
+			t.Fatalf("%s: VerifyMeaningPreserved(%q, %q) returned OK -- a set-membership check would vouch for this on an unrelated occurrence of the vetted word; a positional one must not", c.label, c.raw, c.clean)
+		}
+		t.Logf("%s: correctly refused: %s", c.label, v.Reason)
+	}
+}
+
+// Bonus closure, not required: PR #1405's second review named "added words
+// are unchecked" as a non-blocking limit to write down. The positional walk
+// closes most of it as a direct consequence (a leading or interior addition
+// displaces every raw word after it), and the trailing case specifically
+// (nothing left to misalign against) is closed by the explicit
+// leftover-content check at the end of alignContentWords.
+func TestVerifyCatchesAddedContentWords(t *testing.T) {
+	for _, c := range []struct{ raw, clean, label string }{
+		{"commit before continuing", "always commit before continuing", "leading addition"},
+		{"commit before continuing", "commit always before continuing", "interior addition"},
+		{"commit before continuing", "commit before continuing always", "trailing addition"},
+	} {
+		v := VerifyMeaningPreserved(c.raw, c.clean)
+		if v.OK {
+			t.Fatalf("%s: VerifyMeaningPreserved(%q, %q) returned OK -- an added content word with no vetted correction behind it must be refused", c.label, c.raw, c.clean)
 		}
 		t.Logf("%s: correctly refused: %s", c.label, v.Reason)
 	}
@@ -139,7 +185,8 @@ func TestVerifyPassesRealSpellingFixes(t *testing.T) {
 }
 
 func TestVerifyPreservesProfanityAndBluntness(t *testing.T) {
-	// CLAUDE.local.md: "the force... 'That made it worse' stays." text_clean
+	// CLAUDE.local.md: "The force. He is often blunt and that bluntness is
+	// usually the point. 'That made it worse' stays." text_clean
 	// must carry profanity/bluntness unchanged -- this is a quoting-time
 	// filter, never a cleaning-time one (see the PR body for the argument).
 	raw := "this is fucking broken and you made it worse, fix it now"

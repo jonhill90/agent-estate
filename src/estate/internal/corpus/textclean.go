@@ -11,7 +11,9 @@ package corpus
 // THE LINE THIS FILE MUST NOT CROSS: "spelling and grammar fixed, meaning
 // untouched" (CLAUDE.local.md). Concretely: never substitute a word for a
 // different word, never drop or soften a word, never touch profanity or
-// bluntness ("the force... 'That made it worse' stays" -- CLAUDE.local.md).
+// bluntness ("The force. He is often blunt and that bluntness is usually
+// the point. 'That made it worse' stays." -- CLAUDE.local.md, quoted
+// exactly, not paraphrased with a lowercase opening and an ellipsis).
 // Checked directly against the corpus before writing a line of this file:
 // at least one of the EXISTING 181 text_clean rows already violates this --
 // mp-c9a15849f62017a1's raw "ew. you made it worse... asking me to review
@@ -246,17 +248,6 @@ func negationCount(s string) int {
 // generator: widening the whitelist (adding an entry to `contractionFixes`/
 // `typoFixes`/`productNameFixes`) widens what the verifier recognises as a
 // legitimate word-level variant in the exact same commit, automatically.
-// This is the fix for PR #1405's own review finding (agent-estate#1394's
-// PR): "ship"->"skip" and "lets"->"lots" both passed the OLD wordSurvives,
-// which asked whether ANY word anywhere in the clean text sat within a
-// generic edit-distance band of the raw word -- close enough in shape to
-// pass, with no notion of whether it was actually the word `w` was supposed
-// to become. Levenshtein distance cannot tell "teh"/"the" (a real typo of a
-// real word) apart from "ship"/"skip" (two different real words that
-// happen to be one substitution apart) -- geometrically they are the same
-// shape. The only thing that CAN tell them apart is knowing, specifically,
-// which corrections are actually vetted; `knownVariant` is exactly that
-// knowledge, not a distance threshold.
 var knownVariant = func() map[string][]string {
 	m := map[string][]string{}
 	for _, s := range allFixes {
@@ -265,31 +256,112 @@ var knownVariant = func() map[string][]string {
 	return m
 }()
 
-// wordSurvives reports whether raw content word w has a recognisable match
-// in the clean token set: itself verbatim (case-insensitive; also covers
-// `productNameFixes`'s pure-capitalisation entries, since tokenize()
-// lowercases both sides), or the specific, vetted replacement `allFixes`
-// names for w (see knownVariant) -- never a merely-nearby word, however
-// close in edit-distance shape. No generic fuzzy fallback: alignment to a
-// SPECIFIC, known-safe correction, not set-membership against the whole
-// clean text. A raw word this file has no vetted correction for, and which
-// does not appear verbatim in clean, does not survive -- refused, not
-// guessed, exactly the same "unknown means not offered" posture as every
-// other unresolved case in this file.
-func wordSurvives(w string, cleanTokens map[string]bool) bool {
-	if cleanTokens[w] {
-		return true
-	}
-	variant, known := knownVariant[w]
-	if !known {
-		return false
-	}
-	for _, part := range variant {
-		if !cleanTokens[part] {
-			return false
+// alignContentWords is PR #1405's third pass at this check, after two
+// rounds both failed on the same underlying shape: set membership standing
+// in for position.
+//
+//  1. round one: `wordSurvives` asked whether SOME word anywhere in clean
+//     sat within a generic edit-distance band of w. "ship"->"skip" passed --
+//     geometrically indistinguishable from "teh"->"the" to a bare distance
+//     threshold.
+//  2. round two: anchored to the SPECIFIC vetted word (knownVariant) instead
+//     of a distance band, but still asked whether that word's tokens were
+//     present anywhere in the clean token SET. "run teh tests then deploy
+//     the app" -> "run all tests then deploy the app" passed: "the" is
+//     vetted for "teh", "the" appears in "the app", so it vouched for a
+//     substitution it had nothing to do with. Any typo whose vetted
+//     replacement is a common function word could be swapped for anything
+//     and still "survive".
+//
+// The pattern across both failures is the same: neither check has any
+// notion of WHERE in the sentence a word is allowed to have changed, only
+// whether an acceptable-looking token exists somewhere. A generic distance
+// threshold and a set-membership lookup are both instances of "search the
+// whole clean text for something that looks right" -- exactly the shape
+// that keeps failing, regardless of what "looks right" means.
+//
+// The generator (applyFixes) does not have this problem: it walks raw
+// left to right and knows, for each token, whether it changed and to
+// what. Re-deriving that from two finished strings is solving a strictly
+// harder problem than the generator already solved, and throwing away
+// information it had. This function does not take an edit list from the
+// generator (that would mean changing VerifyMeaningPreserved's signature,
+// and every existing and prior-round test that hand-constructs a (raw,
+// clean) pair to attack this gate), but it stops SEARCHING the clean text
+// and starts WALKING it instead: a single left-to-right pass over raw's
+// content words, tracking a cursor into clean's own tokens that only ever
+// moves forward. A raw word is accepted only if, starting from where the
+// walk currently sits, clean holds it verbatim OR holds its one specific
+// vetted replacement (knownVariant), immediately (skipping only stopwords
+// clean may have legitimately inserted first). A word that "survives"
+// later in the sentence, or that only the WRONG position could explain,
+// no longer counts -- there is no set left to search.
+//
+// This closes the class, not the instance: multiset counting (count(to) >=
+// count(from) + pre-existing count(to)) was the other fix on the table and
+// is also defeated by a decoy -- pad the sentence with one extra
+// coincidental "the" and a count-only check is satisfied again. Position is
+// the only thing neither a distance band nor a count can fake.
+//
+// As a consequence, not a separate feature: this also closes most of what
+// PR #1405's second review named as a non-blocking, unchecked limit -- an
+// ADDED content word ("commit before continuing" -> "always commit before
+// continuing") that the old set-membership check never noticed at all. A
+// leading or interior addition breaks the walk the same way a substitution
+// does, because everything after it stops finding its match at the
+// position the walk expects. A purely TRAILING addition (after every raw
+// content word has already matched) is not caught by the walk itself --
+// there is nothing left to misalign -- so it is checked separately, once,
+// after the walk: any non-stopword token left over in clean past where the
+// last match landed is unaccounted-for content, and refuses the same way a
+// missing word does. Between the two, no content word may be added,
+// dropped, or moved without being named -- applyFixes itself never adds a
+// content word at all (a substitution's `to` is a vetted replacement, never
+// an insertion), so this costs nothing against the real generator; it only
+// closes a gap a hand-constructed or future generator could otherwise slip
+// through.
+func alignContentWords(rawTokens, cleanTokens []string) (missing []string) {
+	j := 0
+	for _, w := range rawTokens {
+		if stopwords[w] {
+			continue
+		}
+		matched := false
+		for j < len(cleanTokens) {
+			if cleanTokens[j] == w {
+				j++
+				matched = true
+				break
+			}
+			if variant, ok := knownVariant[w]; ok && j+len(variant) <= len(cleanTokens) {
+				same := true
+				for k, part := range variant {
+					if cleanTokens[j+k] != part {
+						same = false
+						break
+					}
+				}
+				if same {
+					j += len(variant)
+					matched = true
+					break
+				}
+			}
+			if !stopwords[cleanTokens[j]] {
+				break
+			}
+			j++ // a stopword clean may have legitimately inserted; keep looking
+		}
+		if !matched {
+			missing = append(missing, w)
 		}
 	}
-	return true
+	for _, extra := range cleanTokens[j:] {
+		if !stopwords[extra] {
+			missing = append(missing, fmt.Sprintf("(added) %s", extra))
+		}
+	}
+	return missing
 }
 
 // VerifyResult is the outcome of checking one proposed (raw, clean) pair.
@@ -303,23 +375,17 @@ type VerifyResult struct {
 // defence in depth, not a restatement of what applyFixes already does by
 // construction. Three checks, any one failing refuses the whole row:
 //
-//  1. Every content word (non-stopword) in raw survives in clean, verbatim
-//     or as the SPECIFIC, vetted replacement this file's own whitelist
-//     names for it (see wordSurvives/knownVariant) -- catches a word
-//     dropped or substituted for a different one. PR #1405's own review
-//     found the first cut of this check used a generic edit-distance
-//     fallback instead of an anchored lookup, and "ship the release
-//     tonight" -> "skip the release tonight" (a meaning-INVERTING
-//     substitution) passed it, because "skip" merely sat close enough to
-//     "ship" in edit-distance space to SOME word in the clean text -- not
-//     because it was the word "ship" was supposed to become. Levenshtein
-//     distance alone cannot distinguish "teh"/"the" (a real typo of a real
-//     word) from "ship"/"skip" (two different real words one edit apart);
-//     only knowing which corrections are actually vetted can. This check
-//     also catches the "garbage" -> "something broken" shape found live in
-//     this corpus's own existing text_clean population (see this file's
-//     own header comment) -- a word dropped or replaced with something not
-//     in the whitelist is refused either way.
+//  1. Every content word (non-stopword) in raw survives in clean, at the
+//     position the walk has reached, verbatim or as the SPECIFIC, vetted
+//     replacement this file's own whitelist names for it -- never a word
+//     that merely appears somewhere else in the sentence (see
+//     alignContentWords's own doc comment for why two prior shapes of this
+//     check both failed exactly that way, and why a positional walk closes
+//     the class rather than the instance). This also catches the
+//     "garbage" -> "something broken" shape found live in this corpus's
+//     own existing text_clean population (see this file's own header
+//     comment) -- a word dropped or replaced with something not in the
+//     whitelist is refused either way.
 //  2. Negation count is unchanged -- a dropped or added "not"/"never"/-n't
 //     inverts meaning outright and must never pass silently.
 //  3. Length stays within a generous band (0.6x-1.6x by character count) --
@@ -327,20 +393,8 @@ type VerifyResult struct {
 //     checks were not built to catch directly.
 func VerifyMeaningPreserved(raw, clean string) VerifyResult {
 	rawTokens := tokenize(raw)
-	cleanList := tokenize(clean)
-	cleanSet := map[string]bool{}
-	for _, c := range cleanList {
-		cleanSet[c] = true
-	}
-	var missing []string
-	for _, w := range rawTokens {
-		if stopwords[w] || len(w) == 0 {
-			continue
-		}
-		if !wordSurvives(w, cleanSet) {
-			missing = append(missing, w)
-		}
-	}
+	cleanTokens := tokenize(clean)
+	missing := alignContentWords(rawTokens, cleanTokens)
 	if len(missing) > 0 {
 		return VerifyResult{false, fmt.Sprintf("content word(s) not found in clean text: %s", strings.Join(missing, ", "))}
 	}
