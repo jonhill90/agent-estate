@@ -225,6 +225,14 @@ class TmuxAdapter:
             # source state. Nothing after this point trusts echoed pane text
             # to decide whether the send actually reached the harness.
             self.ledger.mark_delivery_pending(task_id, pane_nonce=record["nonce"])
+            # agent-estate#1395/#1394 (wire-author-registration): register
+            # BEFORE the physical send, same ordering as mark_delivery_pending
+            # above and for the same reason -- if this raises, the send never
+            # happens, so nothing is captured with a stale or absent
+            # registration. This IS the Hill90 supervisor assigning a task,
+            # never Jon typing directly -- see prompt_capture_hook.capture's
+            # own comment on why author is otherwise left 'unknown'.
+            self.ledger.register_pending_author(prompt, author="supervisor")
             self.transport.send_literal(record["pane_id"], prompt)
             return self.ledger.mark_delivered(task_id, pane_nonce=record["nonce"])
 
@@ -268,6 +276,11 @@ class TmuxAdapter:
                 + f"python3 {SUPERVISOR_CLI} ack --event "
                 + " --event ".join(keys)
             )
+            # agent-estate#1395/#1394: same reasoning as assign_task's own
+            # registration above -- this is the mechanical event digest the
+            # supervisor pool sends into the standing supervisor lane, never
+            # Jon typing directly.
+            self.ledger.register_pending_author(prompt, author="supervisor")
             self.transport.send_literal(record["pane_id"], prompt)
             post_state = classify_capture(record["harness"], self.transport.capture(record["pane_id"], lines=25))
             if post_state != "active":
@@ -362,6 +375,9 @@ class ACPAdapter:
             # is left `delivery_pending` rather than silently eligible for
             # an automatic resend.
             self.ledger.mark_delivery_pending(task_id, pane_nonce=record["nonce"])
+            # agent-estate#1395/#1394: same reasoning as TmuxAdapter's own
+            # registration -- before the physical send, never Jon.
+            self.ledger.register_pending_author(prompt, author="supervisor")
             transport = self.transport_factory()
             try:
                 transport.initialize()
@@ -484,6 +500,9 @@ class PiRPCAdapter:
             # is left `delivery_pending` rather than silently eligible for
             # an automatic resend.
             self.ledger.mark_delivery_pending(task_id, pane_nonce=record["nonce"])
+            # agent-estate#1395/#1394: same reasoning as the other adapters'
+            # own registration -- before the physical send, never Jon.
+            self.ledger.register_pending_author(prompt, author="supervisor")
             transport = self.transport_factory(cwd=record["repo"], session=record["session_id"])
             try:
                 result = transport.send_literal(record["session_id"], prompt)
@@ -684,6 +703,14 @@ class ClaudePrintAdapter:
             # by the test double, which is exactly what a test double is for.
             # Whoever writes to a path is responsible for its parent.
             log_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            # agent-estate#1395/#1394: `run_detached` is this adapter's own
+            # send -- not named `send_literal`, but the same act (the prompt
+            # becomes the new process's first turn, which will hit
+            # `prompt_capture_hook.py`'s own `UserPromptSubmit` the same as
+            # any other submitted prompt). Registered before the process is
+            # started, same "before the physical send" ordering as every
+            # other adapter above.
+            self.ledger.register_pending_author(prompt, author="supervisor")
             proc = transport.run_detached(prompt, log_path=log_path)
             with open(log_path, "a") as handle:
                 handle.write(f"\n--- dispatched detached: task={task_id} lane={lane} pid={proc.pid} ---\n")

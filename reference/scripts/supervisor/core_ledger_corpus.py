@@ -66,15 +66,39 @@ class LedgerCorpusMixin:
     #
     # `register_pending_author`/`consume_pending_author` are the durable,
     # hash-keyed handoff between an injecting caller (a supervisor/Director
-    # tool that is ABOUT to type text into a lane's pane, e.g. via
-    # `TmuxTransport.send_literal`) and `prompt_capture_hook.py`, which
-    # captures whatever the pane submits without itself knowing who sent
-    # it. Nothing in this repo wires an injection call site to
-    # `register_pending_author` yet -- that is deliberately proposed, not
-    # landed, in this same change (see the PR body: which call sites, and
-    # why auditing every transport's coverage is separate follow-up work).
-    # Landing the primitive now means the schema and the consuming half
-    # (the hook) never have to migrate twice.
+    # tool that is ABOUT to type text into a lane's pane) and
+    # `prompt_capture_hook.py`, which captures whatever the pane submits
+    # without itself knowing who sent it.
+    #
+    # WIRED (wire-author-registration, following the primitive PR #1398
+    # landed): every Python-side send in this file's own object model --
+    # `TmuxAdapter.assign_task`/`notify_supervisor`, `ACPAdapter.assign_task`,
+    # `PiRPCAdapter.assign_task`, `ClaudePrintAdapter.assign_task` (its own
+    # `run_detached`, not `send_literal`, but the same act), and
+    # `recycle.respawn_supervisor` -- registers `author="supervisor"` before
+    # its own send. See each call site's own comment in `adapter.py`/
+    # `recycle.py`.
+    #
+    # NOT WIRED, DELIBERATELY, AND WHY: `dispatch-send.sh` (dispatch.sh's own
+    # brief-to-a-new-lane send, sourced from send.sh's `verified_type`/
+    # `verified_submit`), `director-route.sh`'s idle-nudge, and
+    # `watchdog.sh`'s `blind_send` all inject text into a pane too, entirely
+    # in bash, through `send.sh` -- never through this Python transport
+    # class hierarchy at all. That is a structurally separate mechanism this
+    # primitive was not designed against, wiring it safely means a NEW
+    # cross-language CLI surface (arbitrary-length brief text cannot go over
+    # argv; needs stdin or a temp file, with its own test coverage) bolted
+    # onto `dispatch-send.sh`'s "point of no return" sequence specifically --
+    # the most heavily-scrutinized, correctness-critical path in this whole
+    # tree (#178/#186/#446's own history). Not attempted in the same turn as
+    # the Python-side wiring; a real, separate task. See the PR body.
+    #
+    # Landing the primitive first (PR #1398) meant the schema and the
+    # consuming half (the hook) never had to migrate twice; this file's own
+    # `author` values are correspondingly partial until the bash side is
+    # wired too -- a Python-adapter-sent prompt now carries proof, a
+    # dispatch.sh-sent brief still reads `unknown`, same as anything else
+    # unregistered.
 
     # How long an unconsumed registration survives before it is treated as
     # abandoned (a `send_literal` that raised before the text ever reached
