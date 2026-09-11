@@ -318,6 +318,11 @@ type naturalResult struct {
 	c    goldenset.Case
 	rank int
 	ran  bool
+	// matches is the full returned list this rank was found in -- kept so
+	// the retrieval-baseline stratum can credit an equivalent answer under
+	// another id (equivalence.go, agent-estate#1318) without re-querying.
+	// The other strata never read it.
+	matches []parsedMatch
 }
 
 // scopedQuestion is agent-estate#1077's own primitive: it builds the
@@ -431,17 +436,34 @@ func runStarStratum(w *bufio.Writer, bin string, verbose bool) (top3Hits, top10H
 // source in advance would answer a different, easier question. Shares
 // runStratum/tallyNatural with the other two stratum runners rather than
 // a fourth reimplementation of the same run-query-then-rank loop.
-func runBaselineStratum(w *bufio.Writer, bin string, verbose bool) (top10Hits, total int, ranAtLeastOne bool) {
+//
+// agent-estate#1318: the strict identifier score is computed exactly as
+// before and returned first. credits are the cases scored as strict
+// misses whose top ten nonetheless carried the designated text under
+// another id, per equivalence.go's rule -- returned separately so the
+// caller prints both numbers and the delta, never one in place of the
+// other. If the compiled index cannot be read for the equivalence pass,
+// that is printed and credits is nil; the strict score is unaffected.
+func runBaselineStratum(w *bufio.Writer, bin string, verbose bool) (top10Hits, total int, credits []equivalentCredit, ranAtLeastOne bool) {
 	cases, err := goldenset.LoadRetrievalBaseline()
 	if err != nil {
 		fmt.Fprintln(w, "goldenquery: retrieval-baseline stratum:", err)
-		return 0, 0, false
+		return 0, 0, nil, false
 	}
 	fmt.Fprintln(w, "=== retrieval-baseline stratum (--private, unscoped -- agent-estate#1315/#1318) ===")
 	var results []naturalResult
 	results, ranAtLeastOne = runStratum(w, bin, verbose, false, true, cases, "")
 	_, top10Hits, total = tallyNatural(results, nil)
-	return top10Hits, total, ranAtLeastOne
+	items, path, err := indexItems()
+	if err != nil {
+		fmt.Fprintf(w, "goldenquery: equivalent-answer pass skipped -- could not read the compiled index (%s): %v\n", path, err)
+		return top10Hits, total, nil, ranAtLeastOne
+	}
+	credits = creditEquivalents(results, items)
+	for _, e := range credits {
+		fmt.Fprintln(w, equivalenceLine(e))
+	}
+	return top10Hits, total, credits, ranAtLeastOne
 }
 
 // runStratum is the shared run loop behind runNaturalStratum and
@@ -481,7 +503,7 @@ func runStratum(w *bufio.Writer, bin string, verbose bool, scoped bool, private 
 		if exitCode == 0 {
 			rank = firstMatchRank(c, matches)
 		}
-		results = append(results, naturalResult{c: c, rank: rank, ran: true})
+		results = append(results, naturalResult{c: c, rank: rank, ran: true, matches: matches})
 
 		hit3 := rank >= 1 && rank <= 3
 		hit10 := rank >= 1 && rank <= 10
@@ -1022,14 +1044,24 @@ func main() {
 	if *baseline {
 		w := bufio.NewWriter(os.Stdout)
 		defer w.Flush()
-		top10Hits, total, ran := runBaselineStratum(w, *bin, *verbose)
+		top10Hits, total, credits, ran := runBaselineStratum(w, *bin, *verbose)
 		if !ran {
 			fmt.Fprintln(w, "goldenquery: could not run the retrieval-baseline stratum -- is the estate binary on PATH, and has `estate knowledge` been run to compile the index?")
 			w.Flush()
 			os.Exit(2)
 		}
-		fmt.Fprintf(w, "---\nretrieval-baseline stratum, top-10 (--private, unscoped -- agent-estate#1315/#1318): %d/%d\n", top10Hits, total)
-		fmt.Fprintf(w, "retrieval-baseline stratum ranking failures (present, not top-10): %d/%d\n", total-top10Hits, total)
+		// agent-estate#1318: three numbers from one run, labelled. The
+		// strict score is what shipped before and is printed unchanged;
+		// the equivalent-answer score credits a strict miss only when a
+		// returned item's text IS the designated sentence or cites its id
+		// (equivalence.go -- verbatim containment plus ownership, never a
+		// paraphrase); the delta is the count of [EQUIV] lines above. A
+		// reader scoping retrieval work should price it against the last
+		// line, not the first: "designated identifier not in top ten" is
+		// not "answer not returned".
+		fmt.Fprintf(w, "---\nretrieval-baseline stratum, top-10 by designated identifier (strict; --private, unscoped -- agent-estate#1315/#1318): %d/%d\n", top10Hits, total)
+		fmt.Fprintf(w, "retrieval-baseline stratum, top-10 by equivalent answer (identifier OR returned item opens with / cites the designated text): %d/%d (+%d, each attributed above as [EQUIV])\n", top10Hits+len(credits), total, len(credits))
+		fmt.Fprintf(w, "retrieval-baseline stratum, designated identifier not in top-10: %d/%d -- of which %d returned the designated text under another id; %d genuinely lack it in the top ten\n", total-top10Hits, total, len(credits), total-top10Hits-len(credits))
 		return
 	}
 
