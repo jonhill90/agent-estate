@@ -50,11 +50,20 @@ set -g @laneview-impl 'text'
 
 ## Together and apart
 
-- **Apart:** `rm -rf` this directory. Nothing outside it references
-  `laneview-plugin-tmux` (`grep -rl laneview-plugin-tmux` from the repo
-  root returns only this directory's own files) -- no key is bound, no
+- **Apart:** `rm -rf` this directory. `grep -rl laneview-plugin-tmux` from
+  the repo root returns 3 hits, not 1 (corrected 2026-09-11,
+  agent-estate#1397) -- this file, `reference/tests-supervisor/
+  test_laneview_tmux_plugin.sh`, and `../laneview/README.md`'s own
+  cross-reference to this directory. Neither of the other two is a
+  dependency: the test's own first check is `[ ! -d ... ] && SKIP exit 0`
+  -- it degrades, not fails, when this directory is gone, the same
+  pattern `../laneview/README.md` documents for its own suite -- and the
+  `laneview/README.md` mention is prose, not code that reads this
+  directory. So the practical claim still holds -- no key is bound, no
   popup exists, and the headless supervisor (`dispatch.sh`, `watchdog.sh`,
-  `notify.sh`) never had a dependency on it to lose.
+  `notify.sh`) never had a dependency on it to lose -- only the specific
+  "returns only this directory's own files" sentence was wrong, and is
+  removed rather than repeated.
 - **Together:** the popup renders live lane state without the supervisor
   ever running, because the renderer it launches reads only `lanes.sh
   --json`, which reads tmux and the ledger directly.
