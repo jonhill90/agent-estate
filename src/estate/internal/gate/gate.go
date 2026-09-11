@@ -152,6 +152,16 @@ type Decision struct {
 	Allow   bool
 	Reasons []string
 	HeadOID string
+	// Notes are informational, never contribute to Allow, and are never
+	// merged into Reasons -- a caller printing every Reasons entry under a
+	// "refuse:" label (main.go does exactly this whenever Allow is false)
+	// must not do that to a note that is not itself a refusal. Added by
+	// agent-estate#1383's fetch-error fix pass: MainStatusReason's fail-open
+	// permit message ("main's CI state is UNKNOWN ... permitting") and its
+	// override-used message ("merging anyway, override: ...") both belong
+	// here, not in Reasons, precisely because printing "refuse: ... --
+	// permitting" would contradict itself.
+	Notes []string
 }
 
 // fetch reads the pull request's own state from GitHub. Everything Evaluate
@@ -489,9 +499,16 @@ func Evaluate(repo string, pr int, reviewerLane string, l *ledger.Ledger, overri
 	}
 	d := evaluate(p, reviewerLane, l)
 	if note, refuse := MainStatusReason(repo, MainBranch, MainWorkflow, overrideRedMain); note != "" {
-		d.Reasons = append(d.Reasons, note)
 		if refuse {
+			// A CONFIRMED red run: this genuinely is a reason not to merge,
+			// alongside whatever evaluate() already found.
 			d.Allow = false
+			d.Reasons = append(d.Reasons, note)
+		} else {
+			// Fail-open (unreadable state) or an override already used --
+			// informational either way, and must never be printed as if it
+			// were itself a refusal (see Decision.Notes's own doc comment).
+			d.Notes = append(d.Notes, note)
 		}
 	}
 	return d

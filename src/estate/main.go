@@ -2661,17 +2661,20 @@ func main() {
 		}
 		d := gate.Evaluate(repo, pr, reviewer, l, overrideRedMain)
 		fmt.Printf("%s#%d head %s\n", repo, pr, d.HeadOID)
+		// Notes are printed unconditionally, whether or not Reasons below
+		// also refuses for an unrelated cause -- an unreadable-main-state
+		// permit or an override acknowledgement is information either way,
+		// never itself a "refuse:" line (agent-estate#1383: printing
+		// "refuse: ... -- permitting" under the old, single-list Reasons
+		// contradicted itself).
+		for _, n := range d.Notes {
+			fmt.Fprintln(os.Stderr, "note: "+n)
+		}
 		if !d.Allow {
 			for _, r := range d.Reasons {
 				fmt.Fprintln(os.Stderr, "refuse: "+r)
 			}
 			os.Exit(1)
-		}
-		for _, r := range d.Reasons {
-			// Only reachable here for a note that did not flip Allow false --
-			// today that is exactly the overrideRedMain acknowledgement, and
-			// it must still be seen, not just swallowed by a clean exit.
-			fmt.Fprintln(os.Stderr, "note: "+r)
 		}
 		fmt.Println("may merge: checks green at head, reviewer completed an independent review and approved at the current head")
 

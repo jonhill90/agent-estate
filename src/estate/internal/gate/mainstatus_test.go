@@ -105,17 +105,51 @@ func TestBypass_RedMainOverrideActuallyWorks(t *testing.T) {
 	}
 }
 
-func TestMainStatusReasonFetchErrorRefuses(t *testing.T) {
+// TestBypass_FetchErrorWithoutOverridePermitsButSaysUnknown is agent-estate#1383's
+// review finding, fixed: an unreadable CI state (gh unreachable, rate
+// limited, unauthenticated) is a DIFFERENT claim than a confirmed red run,
+// and this package now fails OPEN on it (see MainStatusReason's own doc
+// comment for the full argument) -- WITHOUT needing an override at all. The
+// wording must not read like a confirmed red run: "could not tell" and "is
+// broken" must not look the same to an operator scanning Reasons.
+func TestBypass_FetchErrorWithoutOverridePermitsButSaysUnknown(t *testing.T) {
 	orig := listMainRuns
 	defer func() { listMainRuns = orig }()
 	listMainRuns = func(repo, branch, workflow string) (MainRun, bool, error) {
 		return MainRun{}, false, errors.New("network unreachable")
 	}
 	note, refuse := MainStatusReason("o/r", "main", "estate-ci", "")
-	if !refuse {
-		t.Fatal("an unreadable CI state must refuse, not assume green")
+	if refuse {
+		t.Fatalf("an unreadable CI state must fail OPEN, not refuse -- got refuse=true, note=%q", note)
 	}
 	if note == "" {
-		t.Fatal("must say why")
+		t.Fatal("a fail-open permit on an unreadable state must still say so -- must not be silent")
+	}
+	if !strings.Contains(note, "UNKNOWN") {
+		t.Fatalf("note must say the state is unknown, got %q", note)
+	}
+	if strings.Contains(note, "concluded failure") || strings.Contains(note, "is red (") {
+		t.Fatalf("note must not read like a CONFIRMED red run, got %q", note)
+	}
+}
+
+// TestBypass_FetchErrorWithOverrideAlsoPermits is the same probe WITH a
+// non-empty override supplied -- proving the override does not somehow
+// break or double-refuse this path now that it fails open by default. The
+// override is not doing the work here (there is no refusal left to bypass);
+// this exists so a future change to the error path cannot silently
+// reintroduce a refusal that only the red-run override covers.
+func TestBypass_FetchErrorWithOverrideAlsoPermits(t *testing.T) {
+	orig := listMainRuns
+	defer func() { listMainRuns = orig }()
+	listMainRuns = func(repo, branch, workflow string) (MainRun, bool, error) {
+		return MainRun{}, false, errors.New("rate limited")
+	}
+	note, refuse := MainStatusReason("o/r", "main", "estate-ci", "gh rate limited, spot-checked main by hand")
+	if refuse {
+		t.Fatalf("an unreadable CI state must permit even with an override present -- got refuse=true, note=%q", note)
+	}
+	if !strings.Contains(note, "UNKNOWN") {
+		t.Fatalf("note must still say the state is unknown, got %q", note)
 	}
 }
