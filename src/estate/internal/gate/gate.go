@@ -97,6 +97,17 @@
 // ledger, a head ref that is not a dispatch branch, or a head commit that
 // does not match the HeadSHA the estate itself recorded for it -- is a
 // REFUSAL. "Cannot tell" is never "allowed".
+//
+// A fifth condition, added by agent-estate#1379 and living in Evaluate
+// itself rather than evaluate() (see mainstatus.go): the PR's own head can
+// satisfy all four conditions above and still be refused if MainBranch's
+// own most recent CI run is red. Nothing here re-tests the merge RESULT
+// (that is the unbuilt merge-queue shape #1379 explicitly declines to
+// build) -- it only refuses to add another merge on top of a build main
+// itself already reports broken, which is what went unchecked for 28
+// minutes and three red runs in #1379's own incident. An explicit
+// --override-red-main reason bypasses this one condition; it is never
+// silent -- see MainStatusReason.
 package gate
 
 import (
@@ -141,6 +152,16 @@ type Decision struct {
 	Allow   bool
 	Reasons []string
 	HeadOID string
+	// Notes are informational, never contribute to Allow, and are never
+	// merged into Reasons -- a caller printing every Reasons entry under a
+	// "refuse:" label (main.go does exactly this whenever Allow is false)
+	// must not do that to a note that is not itself a refusal. Added by
+	// agent-estate#1383's fetch-error fix pass: MainStatusReason's fail-open
+	// permit message ("main's CI state is UNKNOWN ... permitting") and its
+	// override-used message ("merging anyway, override: ...") both belong
+	// here, not in Reasons, precisely because printing "refuse: ... --
+	// permitting" would contradict itself.
+	Notes []string
 }
 
 // fetch reads the pull request's own state from GitHub. Everything Evaluate
@@ -463,12 +484,34 @@ func classifyReviewedSHA(reviewed, head string) reviewedSHAStatus {
 // other fact it needs -- who authored the work it closes, whether the
 // reviewer actually reviewed, and what they said -- is derived from GitHub
 // and the ledger, never from a caller-supplied argument.
-func Evaluate(repo string, pr int, reviewerLane string, l *ledger.Ledger) Decision {
+//
+// overrideRedMain, per agent-estate#1379, is an explicit, logged
+// acknowledgement to merge anyway while MainBranch's own CI is red. Empty
+// means no override was given. This condition is evaluated here, not inside
+// evaluate(), because it is not about the PR at all -- it is the one check in
+// this package that would refuse identically for every PR on file until
+// someone fixes MainBranch, so gate_test.go's PR-fixture-driven suite (which
+// exercises evaluate() directly) is untouched by it.
+func Evaluate(repo string, pr int, reviewerLane string, l *ledger.Ledger, overrideRedMain string) Decision {
 	p, err := fetch(repo, pr)
 	if err != nil {
 		return Decision{Allow: false, Reasons: []string{"could not read the PR: " + err.Error()}}
 	}
-	return evaluate(p, reviewerLane, l)
+	d := evaluate(p, reviewerLane, l)
+	if note, refuse := MainStatusReason(repo, MainBranch, MainWorkflow, overrideRedMain); note != "" {
+		if refuse {
+			// A CONFIRMED red run: this genuinely is a reason not to merge,
+			// alongside whatever evaluate() already found.
+			d.Allow = false
+			d.Reasons = append(d.Reasons, note)
+		} else {
+			// Fail-open (unreadable state) or an override already used --
+			// informational either way, and must never be printed as if it
+			// were itself a refusal (see Decision.Notes's own doc comment).
+			d.Notes = append(d.Notes, note)
+		}
+	}
+	return d
 }
 
 // evaluate is Evaluate's whole decision logic, taking an already-fetched PR

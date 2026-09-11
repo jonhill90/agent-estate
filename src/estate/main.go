@@ -818,14 +818,22 @@ func usage() {
                                         run one fix-pass turn (role=author, PR-scoped)
                                         continuing an EXISTING PR's own branch, fetched
                                         fresh from origin -- not a fresh dispatch branch
-  estate merge <repo> <pr> <reviewer-lane>
+  estate merge <repo> <pr> <reviewer-lane> [--override-red-main=REASON]
                                         may this PR merge? identity comes from the PR's
                                         own head ref (must be a dispatch/<id> branch),
                                         joined either directly or through a chain of
                                         completed fix-pass turns for that PR -- never a
                                         caller argument and never a closing issue --
                                         checks green, author != reviewer, reviewer
-                                        actually completed a review, and posted APPROVE
+                                        actually completed a review, and posted APPROVE;
+                                        also refuses if main's own CI is red
+                                        (agent-estate#1379) unless --override-red-main
+                                        names why, which is always logged, never silent
+  estate main-status <repo>             is main's own CI green right now? independent of
+                                        estate merge's other conditions and of
+                                        agent-estate#1348 -- call this before every merge
+                                        decision even while #1348 makes merge itself
+                                        refuse everything (agent-estate#1379)
   estate corpus-audit [n]               hard parameters least supported by your words
   estate candidates [-db path]          derive quarantined, cited CANDIDATE knowledge
                                          rows (status=candidate, kind=unclassified) from
@@ -2641,8 +2649,27 @@ func main() {
 			fmt.Fprintln(os.Stderr, "estate: pr must be a number:", os.Args[3])
 			os.Exit(2)
 		}
-		d := gate.Evaluate(repo, pr, reviewer, l)
+		// agent-estate#1379: an explicit, logged acknowledgement to merge
+		// while MainBranch's own CI is red -- never a silent bypass, and
+		// never mixed into the positional PR arguments above so a caller
+		// cannot pass it by accident.
+		var overrideRedMain string
+		for _, a := range os.Args[5:] {
+			if v, ok := strings.CutPrefix(a, "--override-red-main="); ok {
+				overrideRedMain = v
+			}
+		}
+		d := gate.Evaluate(repo, pr, reviewer, l, overrideRedMain)
 		fmt.Printf("%s#%d head %s\n", repo, pr, d.HeadOID)
+		// Notes are printed unconditionally, whether or not Reasons below
+		// also refuses for an unrelated cause -- an unreadable-main-state
+		// permit or an override acknowledgement is information either way,
+		// never itself a "refuse:" line (agent-estate#1383: printing
+		// "refuse: ... -- permitting" under the old, single-list Reasons
+		// contradicted itself).
+		for _, n := range d.Notes {
+			fmt.Fprintln(os.Stderr, "note: "+n)
+		}
 		if !d.Allow {
 			for _, r := range d.Reasons {
 				fmt.Fprintln(os.Stderr, "refuse: "+r)
@@ -2650,6 +2677,32 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Println("may merge: checks green at head, reviewer completed an independent review and approved at the current head")
+
+	case "main-status":
+		// agent-estate#1379: the actual gap the issue reports -- nobody
+		// re-checked MainBranch's own CI after a merge. Deliberately
+		// independent of "merge" above: agent-estate#1348 means estate merge
+		// currently refuses every PR this estate produces over an unrelated
+		// branch-naming defect, and this check must not be hostage to that.
+		// A tick can (and, per #1379, should) call this before every merge
+		// decision regardless of whether #1348 is resolved.
+		repo := ""
+		if len(os.Args) > 2 {
+			repo = os.Args[2]
+		}
+		if repo == "" {
+			usage()
+			os.Exit(2)
+		}
+		note, refuse := gate.MainStatusReason(repo, gate.MainBranch, gate.MainWorkflow, "")
+		if note == "" {
+			fmt.Printf("%s@%s: green\n", repo, gate.MainBranch)
+			break
+		}
+		fmt.Println(note)
+		if refuse {
+			os.Exit(1)
+		}
 
 	case "tasks", "inflight":
 		var rs []ledger.Record
