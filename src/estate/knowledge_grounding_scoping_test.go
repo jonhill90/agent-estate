@@ -74,3 +74,29 @@ func TestKnowledgeGrounding_MentionsVaultFactsArePrivateByDefault(t *testing.T) 
 		t.Errorf("knowledge grounding does not tell a caller to use --private:\n%s", got)
 	}
 }
+
+// WHY THIS TEST EXISTS. agent-estate#1099: the abstract instruction alone
+// ("scope whenever you already know which source holds the answer")
+// measurably did not produce scoped queries -- estate toolusage --recent 20/40
+// showed 0 scoped private-mode queries across two independent re-measurements
+// the same night this test was added, including cases (a lane asking how the
+// vault is organised) that squarely matched the abstract trigger. This pins a
+// CONCRETE worked example naming real source values for the two most common
+// private-mode query shapes -- an operator standing-rule/decision question,
+// and a repo-mechanics question -- so a lane does not have to independently
+// generalise the abstract instruction to its own query. Mirrors this file's
+// own established discipline: fails against grounding text lacking the
+// example, passes once it is concrete and cites agent-estate#1099.
+func TestKnowledgeGrounding_PrivateModeScopingHasAWorkedExample(t *testing.T) {
+	got := knowledgeGrounding()
+
+	if !strings.Contains(got, "agent-estate#1099") {
+		t.Fatalf("knowledge grounding does not cite agent-estate#1099 for the worked example it adds:\n%s", got)
+	}
+	if !strings.Contains(got, "source:vault-fact") {
+		t.Fatalf("knowledge grounding's worked example does not name source:vault-fact for a standing-rule question:\n%s", got)
+	}
+	if !strings.Contains(got, "source:corpus-directive") {
+		t.Fatalf("knowledge grounding's worked example does not name source:corpus-directive for an operator-decision question:\n%s", got)
+	}
+}
