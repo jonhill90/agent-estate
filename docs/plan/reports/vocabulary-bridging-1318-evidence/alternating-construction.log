@@ -1,0 +1,11 @@
+=== RUN   TestLexicalExperimentAlternatingConstruction
+    lexical_experiment_test.go:106: items=7889 pairs=12 shipped_median_ns=205942167 projected_median_ns=241116917 delta_ns=35174750 delta_percent=17.08
+--- PASS: TestLexicalExperimentAlternatingConstruction (5.77s)
+=== RUN   TestLexicalExperimentAlternatingConstruction
+    lexical_experiment_test.go:106: items=7889 pairs=12 shipped_median_ns=175435125 projected_median_ns=196962917 delta_ns=21527792 delta_percent=12.27
+--- PASS: TestLexicalExperimentAlternatingConstruction (4.62s)
+=== RUN   TestLexicalExperimentAlternatingConstruction
+    lexical_experiment_test.go:106: items=7889 pairs=12 shipped_median_ns=176450750 projected_median_ns=196957500 delta_ns=20506750 delta_percent=11.62
+--- PASS: TestLexicalExperimentAlternatingConstruction (4.85s)
+PASS
+ok  	github.com/jonhill90/agent-estate/estate/internal/knowledge	15.473s

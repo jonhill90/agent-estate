@@ -1,0 +1,16 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/jonhill90/agent-estate/estate/internal/knowledge
+cpu: Apple M3 Pro
+BenchmarkLexicalScorerConstruction/shipped-11         	       5	 148887858 ns/op	128095996 B/op	  297660 allocs/op
+BenchmarkLexicalScorerConstruction/shipped-11         	       5	 151392292 ns/op	128074188 B/op	  297659 allocs/op
+BenchmarkLexicalScorerConstruction/shipped-11         	       5	 151987950 ns/op	128041331 B/op	  297656 allocs/op
+BenchmarkLexicalScorerConstruction/shipped-11         	       5	 151641750 ns/op	128085120 B/op	  297659 allocs/op
+BenchmarkLexicalScorerConstruction/shipped-11         	       5	 159786125 ns/op	128041392 B/op	  297656 allocs/op
+BenchmarkLexicalScorerConstruction/projected-11       	       5	 180470100 ns/op	163244966 B/op	 1327906 allocs/op
+BenchmarkLexicalScorerConstruction/projected-11       	       5	 171909175 ns/op	163212297 B/op	 1327904 allocs/op
+BenchmarkLexicalScorerConstruction/projected-11       	       5	 181697000 ns/op	163256035 B/op	 1327907 allocs/op
+BenchmarkLexicalScorerConstruction/projected-11       	       5	 169646367 ns/op	163255974 B/op	 1327907 allocs/op
+BenchmarkLexicalScorerConstruction/projected-11       	       5	 193358208 ns/op	163310633 B/op	 1327911 allocs/op
+PASS
+ok  	github.com/jonhill90/agent-estate/estate/internal/knowledge	10.377s

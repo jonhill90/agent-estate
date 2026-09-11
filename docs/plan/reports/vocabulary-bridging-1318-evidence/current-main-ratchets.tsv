@@ -1,0 +1,15 @@
+mode	status	name	got	total	floor	max_misses
+bm25	OK	natural-language top-3 public unscoped	18	30	18	12
+bm25	OK	natural-language top-3 private scoped repo-docs	18	30	18	12
+bm25	OK	cases.json retrieval private	17	22	17	5
+bm25	OK	publishable reachable	5	5	5	0
+bm25	OK	github-stars top-3 public unscoped	7	8	7	1
+bm25	OK	github-stars top-10 public unscoped	7	8	7	1
+bm25	OK	none-01 absence guard	1	1	1	0
+semantic	FAIL	natural-language top-3 public unscoped	15	30	18	12
+semantic	FAIL	natural-language top-3 private scoped repo-docs	16	30	18	12
+semantic	OK	cases.json retrieval private	18	22	17	5
+semantic	FAIL	publishable reachable	4	5	5	0
+semantic	OK	github-stars top-3 public unscoped	7	8	7	1
+semantic	OK	github-stars top-10 public unscoped	7	8	7	1
+semantic	OK	none-01 absence guard	1	1	1	0

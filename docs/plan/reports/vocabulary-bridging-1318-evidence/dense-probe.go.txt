@@ -1,0 +1,354 @@
+package main
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"math"
+	"os"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/jonhill90/agent-estate/estate/internal/embedding"
+	"github.com/jonhill90/agent-estate/estate/internal/knowledge"
+	"github.com/jonhill90/agent-estate/estate/internal/knowledge/goldenset"
+)
+
+const (
+	indexPath = "/tmp/vocabulary-1318-evidence/index.json"
+	outPath   = "/tmp/vocabulary-1318-dense"
+)
+
+type cand struct{ id, text, permalink string }
+type scored struct {
+	cand
+	sim float64
+}
+type row struct {
+	arm, id                      string
+	bm, sem, dense, cutoff, pool int
+	expectedNone                 bool
+	qtime, scantime              time.Duration
+}
+type metric struct {
+	name                 string
+	hits, total, maxMiss int
+}
+
+func fatalf(f string, a ...any) { fmt.Fprintf(os.Stderr, f+"\n", a...); os.Exit(1) }
+
+func cosine(a, b []float32) float64 {
+	if len(a) != len(b) {
+		return -2
+	}
+	var dot, na, nb float64
+	for i := range a {
+		x, y := float64(a[i]), float64(b[i])
+		dot += x * y
+		na += x * x
+		nb += y * y
+	}
+	if na == 0 || nb == 0 {
+		return 0
+	}
+	return dot / (math.Sqrt(na) * math.Sqrt(nb))
+}
+
+func main() {
+	idx, err := knowledge.Read(indexPath)
+	if err != nil {
+		fatalf("read index: %v", err)
+	}
+	cfg := embedding.NewConfig()
+	cachePath := embedding.CachePath(indexPath)
+	cache, err := embedding.LoadOrNil(cachePath, indexPath, cfg.Model)
+	if err != nil {
+		fatalf("load cache: %v", err)
+	}
+	client, err := embedding.NewClient(cfg)
+	if err != nil {
+		fatalf("client: %v", err)
+	}
+	beforeI := digest(indexPath)
+	beforeC := digest(cachePath)
+	byID := map[string]knowledge.Item{}
+	sourceSet := map[string]bool{}
+	for _, it := range idx.Items {
+		byID[it.ID] = it
+		sourceSet[it.Source] = true
+	}
+	var sources []string
+	for s := range sourceSet {
+		sources = append(sources, s)
+	}
+	sort.Strings(sources)
+
+	// Production Query performs current-revision, privacy, tag and policy eligibility.
+	// A tag-only query avoids lexical admission while retaining those filters.
+	pools := map[string][]cand{}
+	poolFor := func(private bool, source string) []cand {
+		key := fmt.Sprintf("%t/%s", private, source)
+		if p, ok := pools[key]; ok {
+			return p
+		}
+		q := "source:" + source
+		res := knowledge.QueryWithRanking(indexPath, q, len(idx.Items)+1, private, nil)
+		p := make([]cand, 0, len(res.Matches))
+		for _, m := range res.Matches {
+			it := byID[m.ID]
+			p = append(p, cand{m.ID, strings.TrimSpace(it.Tier1 + ". " + it.Tier2), it.Permalink})
+		}
+		pools[key] = p
+		return p
+	}
+	eligible := func(private bool, source string) []cand {
+		if source != "" {
+			return append([]cand(nil), poolFor(private, source)...)
+		}
+		var out []cand
+		for _, s := range sources {
+			out = append(out, poolFor(private, s)...)
+		}
+		sort.Slice(out, func(i, j int) bool { return out[i].id < out[j].id })
+		return out
+	}
+
+	var rows []row
+	run := func(arm string, cases []goldenset.Case, private bool, source string, cutoff int, excludeExempt bool) {
+		pool := eligible(private, source)
+		for _, c := range cases {
+			if excludeExempt && c.UnscopedExempt {
+				continue
+			}
+			query := c.Question
+			if source != "" {
+				query = "source:" + source + " " + query
+			}
+			t0 := time.Now()
+			vs, e := client.Embed(context.Background(), []string{query})
+			qt := time.Since(t0)
+			if e != nil {
+				fatalf("embed %s/%s: %v", arm, c.ID, e)
+			}
+			qv := vs[0]
+			bmres := knowledge.QueryWithRanking(indexPath, query, len(idx.Items)+1, private, nil)
+			bm := rankMatches(bmres.Matches, c.ExpectedIdentifier)
+			ranker := func(_ string, cs []knowledge.RerankCandidate) ([]string, error) {
+				x := make([]scored, 0, len(cs))
+				for _, cc := range cs {
+					v, ok := cache.Lookup(cc.ID, cc.Text)
+					if !ok {
+						return nil, fmt.Errorf("cache miss %s", cc.ID)
+					}
+					x = append(x, scored{cand: cand{id: cc.ID}, sim: cosine(qv, v)})
+				}
+				sort.SliceStable(x, func(i, j int) bool { return x[i].sim > x[j].sim })
+				ids := make([]string, len(x))
+				for i := range x {
+					ids[i] = x[i].id
+				}
+				return ids, nil
+			}
+			semres := knowledge.QueryWithRanking(indexPath, query, len(idx.Items)+1, private, ranker)
+			if semres.RankingFallbackReason != "" {
+				fatalf("semantic fallback %s/%s: %s", arm, c.ID, semres.RankingFallbackReason)
+			}
+			sem := rankMatches(semres.Matches, c.ExpectedIdentifier)
+			t1 := time.Now()
+			x := make([]scored, 0, len(pool))
+			for _, cc := range pool {
+				v, ok := cache.Lookup(cc.id, cc.text)
+				if !ok {
+					fatalf("dense cache miss %s", cc.id)
+				}
+				x = append(x, scored{cc, cosine(qv, v)})
+			}
+			sort.SliceStable(x, func(i, j int) bool { return x[i].sim > x[j].sim })
+			st := time.Since(t1)
+			dr := rankDense(x, c.ExpectedIdentifier)
+			rows = append(rows, row{arm, c.ID, bm, sem, dr, cutoff, len(pool), c.ExpectedSource == goldenset.SourceNone, qt, st})
+		}
+	}
+	base, _ := goldenset.LoadRetrievalBaseline()
+	all, _ := goldenset.Load()
+	natural, _ := goldenset.LoadNatural()
+	stars, _ := goldenset.LoadStars()
+	run("baseline-private", base, true, "", 10, false)
+	run("score-private", all, true, "", 3, false)
+	var reachable, none []goldenset.Case
+	for _, c := range all {
+		if c.ExpectedSource == goldenset.SourceNone {
+			none = append(none, c)
+		} else if c.ExpectedSource == goldenset.SourceGithubStars || c.ExpectedSource == goldenset.SourceRepoDocs {
+			reachable = append(reachable, c)
+		}
+	}
+	run("reachable-public", reachable, false, "", 3, false)
+	run("none-public", none, false, "", 10, false)
+	run("natural-unscoped-top3", natural, false, "", 3, true)
+	run("natural-unscoped-top10", natural, false, "", 10, true)
+	run("natural-scoped-top3", natural, true, "repo-docs", 3, false)
+	run("natural-scoped-top10", natural, true, "repo-docs", 10, false)
+	run("stars-top3", stars, false, "", 3, false)
+	run("stars-top10", stars, false, "", 10, false)
+
+	if err := os.MkdirAll(outPath, 0755); err != nil {
+		fatalf("mkdir: %v", err)
+	}
+	writeRows(rows)
+	metrics := summarize(rows)
+	afterI := digest(indexPath)
+	afterC := digest(cachePath)
+	writeSummary(metrics, rows, sources, beforeI, beforeC, afterI, afterC, len(idx.Items), len(cache.Items))
+	fmt.Printf("wrote %s: %d measurements, index/cache unchanged=%t/%t\n", outPath, len(rows), beforeI == afterI, beforeC == afterC)
+}
+
+func rankMatches(ms []knowledge.Match, suffix string) int {
+	if suffix == "" {
+		return 0
+	}
+	for i, m := range ms {
+		if strings.HasSuffix(m.Permalink, suffix) {
+			return i + 1
+		}
+	}
+	return 0
+}
+func rankDense(xs []scored, suffix string) int {
+	if suffix == "" {
+		return 0
+	}
+	for i, x := range xs {
+		if strings.HasSuffix(x.permalink, suffix) {
+			return i + 1
+		}
+	}
+	return 0
+}
+func hit(rank, cut int) bool { return rank > 0 && rank <= cut }
+func verdict(a, b, cut int) string {
+	ah, bh := hit(a, cut), hit(b, cut)
+	if !ah && bh {
+		return "gain"
+	}
+	if ah && !bh {
+		return "regression"
+	}
+	return "same"
+}
+
+func writeRows(rows []row) {
+	var b strings.Builder
+	b.WriteString("arm\tid\tcutoff\tpool\tbm25_rank\tsemantic_rank\tdense_rank\tdense_vs_bm25\tdense_vs_semantic\tquery_vector_us\tdense_scan_sort_us\n")
+	for _, r := range rows {
+		vb, vs := verdict(r.bm, r.dense, r.cutoff), verdict(r.sem, r.dense, r.cutoff)
+		if r.expectedNone {
+			vb = "regression"
+			vs = "regression"
+		}
+		fmt.Fprintf(&b, "%s\t%s\t%d\t%d\t%d\t%d\t%d\t%s\t%s\t%d\t%d\n", r.arm, r.id, r.cutoff, r.pool, r.bm, r.sem, r.dense, vb, vs, r.qtime.Microseconds(), r.scantime.Microseconds())
+	}
+	if err := os.WriteFile(outPath+"/per-case.tsv", []byte(b.String()), 0644); err != nil {
+		fatalf("write rows: %v", err)
+	}
+}
+
+func summarize(rows []row) []metric {
+	budgets := map[string]int{"natural-unscoped-top3": 12, "natural-scoped-top3": 12, "score-private": 5, "reachable-public": 0, "stars-top3": 1, "stars-top10": 1, "none-public": 0}
+	order := []string{"natural-unscoped-top3", "natural-scoped-top3", "score-private", "reachable-public", "stars-top3", "stars-top10", "none-public", "baseline-private"}
+	var out []metric
+	for _, a := range order {
+		m := metric{name: a, maxMiss: budgets[a]}
+		for _, r := range rows {
+			if r.arm != a {
+				continue
+			}
+			m.total++
+			if r.expectedNone {
+				continue
+			}
+			if hit(r.dense, r.cutoff) {
+				m.hits++
+			}
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+func writeSummary(ms []metric, rows []row, sources []string, bi, bc, ai, ac string, indexN, cacheN int) {
+	var b strings.Builder
+	b.WriteString("# Global dense candidate counterfactual (frozen 2fbce3b evidence)\n\n")
+	b.WriteString("This is an API-level retrieval ceiling, not shipped CLI behavior. Production `QueryWithRanking` supplies policy-eligible candidates through tag-only `source:<source>` filtering; the counterfactual replaces lexical admission/order with cached-vector cosine order and applies no absence threshold. Each arm uses the same question vector for shipped semantic ordering and dense ordering.\n\n")
+	b.WriteString("## Ratchets\n\n| arm | dense | misses | allowed misses | result |\n|---|---:|---:|---:|---|\n")
+	for _, m := range ms {
+		status := "measurement"
+		if m.name != "baseline-private" {
+			status = "PASS"
+			if m.total-m.hits > m.maxMiss {
+				status = "FAIL"
+			}
+		}
+		fmt.Fprintf(&b, "| %s | %d/%d | %d | %d | %s |\n", m.name, m.hits, m.total, m.total-m.hits, m.maxMiss, status)
+	}
+	b.WriteString("\n## Changes at each arm's cutoff\n\n| arm | vs BM25 gains/regressions | vs shipped semantic gains/regressions |\n|---|---:|---:|\n")
+	for _, m := range ms {
+		gb, rb, gs, rs := 0, 0, 0, 0
+		for _, r := range rows {
+			if r.arm != m.name {
+				continue
+			}
+			if r.expectedNone {
+				rb++
+				rs++
+				continue
+			}
+			switch verdict(r.bm, r.dense, r.cutoff) {
+			case "gain":
+				gb++
+			case "regression":
+				rb++
+			}
+			switch verdict(r.sem, r.dense, r.cutoff) {
+			case "gain":
+				gs++
+			case "regression":
+				rs++
+			}
+		}
+		fmt.Fprintf(&b, "| %s | +%d/-%d | +%d/-%d |\n", m.name, gb, rb, gs, rs)
+	}
+	b.WriteString("\n## Cost and integrity\n\n")
+	var q, s []time.Duration
+	for _, r := range rows {
+		q = append(q, r.qtime)
+		s = append(s, r.scantime)
+	}
+	fmt.Fprintf(&b, "- Query-vector latency (one local model call per arm/case): %s.\n", stats(q))
+	fmt.Fprintf(&b, "- Eligible-vector lookup + cosine scan + stable sort: %s.\n", stats(s))
+	fmt.Fprintf(&b, "- Index: %d items; embedding cache: %d entries; sources filtered independently: `%s`.\n", indexN, cacheN, strings.Join(sources, "`, `"))
+	fmt.Fprintf(&b, "- Frozen index SHA-256 unchanged: `%s` (%t); cache SHA-256 unchanged: `%s` (%t).\n", bi, bi == ai, bc, bc == ac)
+	b.WriteString("- Dense returns candidates for `none-01` by construction; this is counted as an absence false-positive regression.\n- Full identifier ranks and per-query timings are in `per-case.tsv`; no source/question text is emitted.\n")
+	if err := os.WriteFile(outPath+"/summary.md", []byte(b.String()), 0644); err != nil {
+		fatalf("write summary: %v", err)
+	}
+}
+func stats(x []time.Duration) string {
+	sort.Slice(x, func(i, j int) bool { return x[i] < x[j] })
+	var sum time.Duration
+	for _, v := range x {
+		sum += v
+	}
+	return fmt.Sprintf("n=%d mean=%s p50=%s p95=%s max=%s", len(x), (sum / time.Duration(len(x))).Round(time.Microsecond), x[len(x)/2].Round(time.Microsecond), x[(len(x)*95-1)/100].Round(time.Microsecond), x[len(x)-1].Round(time.Microsecond))
+}
+func digest(path string) string {
+	b, e := os.ReadFile(path)
+	if e != nil {
+		fatalf("digest %s: %v", path, e)
+	}
+	h := sha256.Sum256(b)
+	st, _ := os.Stat(path)
+	return fmt.Sprintf("%s bytes=%d", hex.EncodeToString(h[:]), st.Size())
+}

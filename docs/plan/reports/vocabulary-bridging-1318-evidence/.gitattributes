@@ -1,0 +1,3 @@
+# Unified diffs include context prefixes; TSVs preserve empty final fields.
+*.patch -whitespace
+*.tsv whitespace=-blank-at-eol

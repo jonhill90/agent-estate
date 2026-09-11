@@ -1,0 +1,17 @@
+diff --git a/src/estate/main.go b/src/estate/main.go
+index 8e9fd80..a145457 100644
+--- a/src/estate/main.go
++++ b/src/estate/main.go
+@@ -1571,7 +1571,11 @@ func buildSemanticReranker(indexPath string) (knowledge.RerankFunc, string) {
+ 	// before the returned RerankFunc ever got to use it.
+ 	return func(question string, candidates []knowledge.RerankCandidate) ([]string, error) {
+ 		defer cancel()
+-		return rerank(question, candidates)
++		ids, err := rerank(question, candidates)
++		if err != nil {
++			return nil, err
++		}
++		return experimentFusion(candidates, ids), nil
+ 	}, ""
+ }
+ 

@@ -1,0 +1,112 @@
+cases_private	camelcase-01	HIT
+cases_private	camelcase-02	HIT
+cases_private	camelcase-03	HIT
+cases_private	camelcase-04	HIT
+cases_private	camelcase-05	HIT
+cases_private	corpus-01	HIT
+cases_private	corpus-02	HIT
+cases_private	corpus-03	HIT
+cases_private	corpus-04	HIT
+cases_private	docs-01	MISS
+cases_private	docs-02	HIT
+cases_private	loops-01	MISS
+cases_private	loops-02	MISS
+cases_private	loops-03	HIT
+cases_private	none-01	HIT
+cases_private	stars-01	HIT
+cases_private	stars-02	HIT
+cases_private	stars-03	HIT
+cases_private	vault-01	HIT
+cases_private	vault-02	MISS
+cases_private	vault-03	HIT
+cases_private	vault-04	HIT
+cases_public	camelcase-01	MISS
+cases_public	camelcase-02	MISS
+cases_public	camelcase-03	MISS
+cases_public	camelcase-04	MISS
+cases_public	camelcase-05	MISS
+cases_public	corpus-01	MISS
+cases_public	corpus-02	MISS
+cases_public	corpus-03	MISS
+cases_public	corpus-04	MISS
+cases_public	docs-01	MISS
+cases_public	docs-02	HIT
+cases_public	loops-01	MISS
+cases_public	loops-02	MISS
+cases_public	loops-03	MISS
+cases_public	none-01	HIT
+cases_public	stars-01	HIT
+cases_public	stars-02	HIT
+cases_public	stars-03	HIT
+cases_public	vault-01	MISS
+cases_public	vault-02	MISS
+cases_public	vault-03	MISS
+cases_public	vault-04	MISS
+natural_private_scoped	nl-01	HIT top-3
+natural_private_scoped	nl-02	MISS (not in top 10)
+natural_private_scoped	nl-03	MISS (not in top 10)
+natural_private_scoped	nl-04	MISS (not in top 10)
+natural_private_scoped	nl-05	HIT top-10 only (rank 6)
+natural_private_scoped	nl-06	HIT top-3
+natural_private_scoped	nl-07	MISS (not in top 10)
+natural_private_scoped	nl-08	MISS (not in top 10)
+natural_private_scoped	nl-09	MISS (not in top 10)
+natural_private_scoped	nl-10	MISS (not in top 10)
+natural_private_scoped	nl-11	MISS (not in top 10)
+natural_private_scoped	nl-12	HIT top-3
+natural_private_scoped	nl-13	HIT top-3
+natural_private_scoped	nl-14	HIT top-3
+natural_private_scoped	nl-15	HIT top-10 only (rank 4)
+natural_private_scoped	nl-16	HIT top-3
+natural_private_scoped	nl-17	HIT top-10 only (rank 8)
+natural_private_scoped	nl-18	HIT top-3
+natural_private_scoped	nl-19	HIT top-3
+natural_private_scoped	nl-20	HIT top-3
+natural_private_scoped	nl-21	HIT top-3
+natural_private_scoped	nl-22	HIT top-3
+natural_private_scoped	nl-23	MISS (not in top 10)
+natural_private_scoped	nl-24	MISS (not in top 10)
+natural_private_scoped	nl-25	MISS (not in top 10)
+natural_private_scoped	nl-26	HIT top-3
+natural_private_scoped	nl-27	HIT top-3
+natural_private_scoped	nl-28	HIT top-3
+natural_private_scoped	nl-29	HIT top-3
+natural_private_scoped	nl-30	HIT top-3
+natural_public_unscoped	nl-01	HIT top-3
+natural_public_unscoped	nl-02	MISS (not in top 10)
+natural_public_unscoped	nl-03	HIT top-10 only (rank 5)
+natural_public_unscoped	nl-04	MISS (not in top 10)
+natural_public_unscoped	nl-05	HIT top-10 only (rank 4)
+natural_public_unscoped	nl-06	HIT top-3
+natural_public_unscoped	nl-07	MISS (not in top 10)
+natural_public_unscoped	nl-08	MISS (not in top 10)
+natural_public_unscoped	nl-09	MISS (not in top 10)
+natural_public_unscoped	nl-10	MISS (not in top 10)
+natural_public_unscoped	nl-11	MISS (not in top 10)
+natural_public_unscoped	nl-12	HIT top-3
+natural_public_unscoped	nl-13	HIT top-3
+natural_public_unscoped	nl-14	MISS (not in top 10)
+natural_public_unscoped	nl-15	HIT top-3
+natural_public_unscoped	nl-16	HIT top-3
+natural_public_unscoped	nl-17	HIT top-3
+natural_public_unscoped	nl-18	HIT top-3
+natural_public_unscoped	nl-19	HIT top-3
+natural_public_unscoped	nl-20	HIT top-3
+natural_public_unscoped	nl-21	HIT top-3
+natural_public_unscoped	nl-22	HIT top-10 only (rank 8)
+natural_public_unscoped	nl-23	MISS (not in top 10)
+natural_public_unscoped	nl-24	HIT top-10 only (rank 5)
+natural_public_unscoped	nl-25	MISS (not in top 10)
+natural_public_unscoped	nl-26	HIT top-3
+natural_public_unscoped	nl-27	HIT top-3
+natural_public_unscoped	nl-28	HIT top-3
+natural_public_unscoped	nl-29	HIT top-3
+natural_public_unscoped	nl-30	HIT top-10 only (rank 4)
+stars_public_unscoped	stars-nl-01	HIT top-3
+stars_public_unscoped	stars-nl-02	HIT top-3
+stars_public_unscoped	stars-nl-03	HIT top-3
+stars_public_unscoped	stars-nl-04	HIT top-3
+stars_public_unscoped	stars-nl-05	HIT top-3
+stars_public_unscoped	stars-nl-06	HIT top-3
+stars_public_unscoped	stars-nl-07	HIT top-3
+stars_public_unscoped	stars-nl-08	MISS (not in top 10)

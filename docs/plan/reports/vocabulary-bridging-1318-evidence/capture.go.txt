@@ -1,0 +1,52 @@
+// Inert replay helper; copy into a disposable pinned worktree only.
+package main
+
+import (
+	"fmt"
+	"github.com/jonhill90/agent-estate/estate/internal/knowledge/goldenset"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+)
+
+func main() {
+	idx, bin := os.Getenv("ESTATE_KNOWLEDGE_INDEX"), os.Getenv("ESTATE_REAL_BIN")
+	if idx != "/tmp/vocabulary-1318-evidence/index.json" || bin == "" {
+		panic("requires designated private index and unmodified ESTATE_REAL_BIN")
+	}
+	cases, err := goldenset.LoadRetrievalBaseline()
+	if err != nil {
+		panic(err)
+	}
+	dir := filepath.Join(filepath.Dir(idx), "raw")
+	if err = os.MkdirAll(dir, 0700); err != nil {
+		panic(err)
+	}
+	for _, c := range cases {
+		for _, mode := range []string{"bm25", "semantic"} {
+			dest := filepath.Join(dir, "retrieval-"+mode+"-"+c.ID+".json")
+			if _, err := os.Stat(dest); err == nil {
+				continue
+			} else if !os.IsNotExist(err) {
+				panic(err)
+			}
+			args := []string{"knowledge", "query", "--private", "--json"}
+			if mode == "semantic" {
+				args = append(args, "--semantic")
+			}
+			args = append(args, c.Question)
+			data, err := exec.Command(bin, args...).Output()
+			if err != nil {
+				panic(err)
+			}
+			if !strings.HasPrefix(strings.TrimSpace(string(data)), "{") {
+				panic("CLI did not emit JSON")
+			}
+			if err = os.WriteFile(dest, data, 0600); err != nil {
+				panic(err)
+			}
+		}
+	}
+	fmt.Println("private production controls captured; existing files preserved")
+}

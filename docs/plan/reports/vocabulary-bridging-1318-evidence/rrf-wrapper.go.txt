@@ -1,0 +1,38 @@
+// Scratch measurement instrumentation; never included in the report PR.
+package main
+
+import (
+	"github.com/jonhill90/agent-estate/estate/internal/knowledge"
+	"os"
+	"sort"
+	"strconv"
+)
+
+func experimentFusion(candidates []knowledge.RerankCandidate, semantic []string) []string {
+	text := os.Getenv("ESTATE_EXPERIMENT_RRF_K")
+	if text == "" {
+		return semantic
+	}
+	k, err := strconv.Atoi(text)
+	if err != nil || (k != 10 && k != 60) {
+		panic("RRF probe requires k=10 or k=60")
+	}
+	lexicalRank := map[string]int{}
+	semanticRank := map[string]int{}
+	for i, c := range candidates {
+		lexicalRank[c.ID] = i + 1
+	}
+	for i, id := range semantic {
+		semanticRank[id] = i + 1
+	}
+	ids := append([]string(nil), semantic...)
+	score := func(id string) float64 { return 1/float64(k+lexicalRank[id]) + 1/float64(k+semanticRank[id]) }
+	sort.SliceStable(ids, func(i, j int) bool {
+		a, b := score(ids[i]), score(ids[j])
+		if a == b {
+			return lexicalRank[ids[i]] < lexicalRank[ids[j]]
+		}
+		return a > b
+	})
+	return ids
+}
