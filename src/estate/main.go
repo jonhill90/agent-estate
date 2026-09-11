@@ -841,6 +841,14 @@ func usage() {
                                         decision even while #1348 makes merge itself
                                         refuse everything (agent-estate#1379)
   estate corpus-audit [n]               hard parameters least supported by your words
+  estate provenance-review [--offset N] [--limit N] [--private] [--json]
+                                        every live parameter next to the prompt it was
+                                        judged from, grouped by source prompt, paged;
+                                        public render is ids and structure only (no
+                                        text), --private renders the text locally with a
+                                        do-not-quote advisory on credential-looking rows,
+                                        and the judgement column is left to you
+                                        (agent-estate#1394, #1395)
   estate candidates [-db path]          derive quarantined, cited CANDIDATE knowledge
                                          rows (status=candidate, kind=unclassified) from
                                          codex_provenance -- never promotes, never
@@ -2263,6 +2271,29 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Println("within limits")
+
+	case "provenance-review":
+		// agent-estate#1394/#1395: the rule as stored next to the prompt it
+		// was judged from, for every live parameter, grouped by source
+		// prompt. Read-only; quotes text_clean only; the judgement column is
+		// left to the reader on purpose (see internal/corpus/review.go).
+		fl := flag.NewFlagSet("provenance-review", flag.ContinueOnError)
+		offset := fl.Int("offset", 0, "first source prompt to show (0-based, over the sorted groups)")
+		limit := fl.Int("limit", 100, "how many source prompts to show")
+		private := fl.Bool("private", false, "render rule text, text_clean and text_raw with do-not-quote advisories -- terminal only, never publish")
+		asJSON := fl.Bool("json", false, "emit the page as JSON instead of markdown")
+		if err := fl.Parse(os.Args[2:]); err != nil {
+			os.Exit(2)
+		}
+		r, err := corpus.ReviewLive()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "estate:", err)
+			os.Exit(2)
+		}
+		if err := r.Render(os.Stdout, corpus.ReviewOptions{Offset: *offset, Limit: *limit, Private: *private, JSON: *asJSON}); err != nil {
+			fmt.Fprintln(os.Stderr, "estate:", err)
+			os.Exit(2)
+		}
 
 	case "corpus-audit":
 		fs, err := corpus.Audit()

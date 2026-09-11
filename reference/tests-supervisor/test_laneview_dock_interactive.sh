@@ -14,8 +14,8 @@
 # rendering once and going stale.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$HERE/../../scripts/supervisor/tmux-isolation.sh"
-LANEVIEW="$HERE/../../scripts/supervisor/laneview.sh"
+source "$HERE/../../reference/scripts/supervisor/tmux-isolation.sh"
+LANEVIEW="$HERE/../../reference/scripts/supervisor/laneview.sh"
 
 pass=0; fail=0
 ok()  { echo "  ok   $1"; pass=$((pass+1)); }
