@@ -474,6 +474,48 @@ class LedgerSchemaMixin:
                              ELSE CAST(strftime('%s', 'now') AS INTEGER) - MAX(at)
                         END AS seconds_since_capture
                     FROM prompts;
+
+                -- agent-estate#1395/#1394 (label-prompt-author-1395): a
+                -- durable "this exact text is about to be sent by someone
+                -- other than Jon" fact, registered by the INJECTING side
+                -- (a supervisor/Director tool calling `send_literal`, or
+                -- equivalent) BEFORE the physical send, per #1395's own
+                -- proposed fix -- "before the Director or a supervisor
+                -- injects text, it registers the prompt hash in the estate
+                -- ledger (durable fact first); the hook joins on hash."
+                -- `prompt_capture_hook.py`'s `capture()` consumes (looks up
+                -- AND deletes) a matching row when the identical text is
+                -- captured, so `prompts.author` is set from a real,
+                -- pre-recorded fact rather than a guess.
+                --
+                -- Deliberately NOT populated from pane identity alone
+                -- (`tmux_pane_target` matching a known machine pane): see
+                -- `_migrate_prompts_pane_columns` and
+                -- `itemize_prompts.director_pane_reason`'s own comment --
+                -- that is a CANDIDATE signal, never proof, because nothing
+                -- stops Jon from attaching to a lane's pane and typing
+                -- directly into it. A wrong author is worse than an absent
+                -- one (it is the defect #1395 measured), so this table
+                -- exists to give `author` a source that IS proof: the
+                -- injecting code is the one place that knows for certain
+                -- who is about to submit the text, before it becomes
+                -- indistinguishable inside the pane.
+                --
+                -- `text_hash` keys on the text alone (never `session_id` --
+                -- the injecting caller does not reliably know which
+                -- session/pane will end up capturing it before the send
+                -- lands). Consumed exactly once: a second, unrelated prompt
+                -- that happens to share identical text after this row is
+                -- consumed falls back to 'unknown', never reuses a stale
+                -- match. `registered_at` lets a caller purge rows whose
+                -- send never happened (a failed `send_literal`, a crashed
+                -- process) -- see `PENDING_PROMPT_AUTHOR_TTL_SECONDS` in
+                -- core_ledger_corpus.py.
+                CREATE TABLE IF NOT EXISTS pending_prompt_authors (
+                    text_hash TEXT PRIMARY KEY,
+                    author TEXT NOT NULL CHECK (author IN ('supervisor', 'director')),
+                    registered_at INTEGER NOT NULL
+                );
                 """
             )
         os.chmod(self.db_path, 0o600)
@@ -1081,6 +1123,60 @@ class LedgerSchemaMixin:
                     self._fail(failpoint, "before_add_tmux_pane_target_column")
                     connection.execute("ALTER TABLE prompts ADD COLUMN tmux_pane_target TEXT")
                     self._fail(failpoint, "after_add_tmux_pane_target_column")
+
+    def _migrate_prompts_author_column(self, *, failpoint=None):
+        """Add `prompts.author`, agent-estate#1395/#1394 (label-prompt-author-1395).
+
+        WHY. `prompts` had no author field at all: a Director's brief typed
+        into a lane's pane and a message Jon actually typed were stored
+        identically (#1395's own measured finding -- roughly half of the
+        vault's "hard" parameters and distilled facts trace to a prompt an
+        agent wrote, not Jon, with nothing in the schema recording which).
+        `author` is one of `'jon'`, `'supervisor'`, `'director'`, or
+        `'unknown'` -- never inferred from pane identity or prompt text
+        alone (see `pending_prompt_authors`'s own comment in `_initialize`
+        for why that would be a guess, and #1395's explicit finding that a
+        wrong attribution is worse than an absent one). `'unknown'` is the
+        default for every row, old and new, until a caller has a real,
+        registered fact to set it from -- this repo's invariant 6
+        ("`unknown` means 'not offered', not 'broken'") applies here
+        exactly: a row reading `author='unknown'` is not a defect, it is
+        the honest state of not having proof yet.
+
+        `NOT NULL DEFAULT 'unknown'` on `ADD COLUMN` is exactly
+        representable here (verified directly: SQLite accepts a NOT NULL
+        column added with a literal default and a CHECK that the default
+        satisfies -- 'unknown' passes its own CHECK, so every pre-existing
+        row gets a real, valid value, not an implicit NULL the way
+        `_migrate_source_tasks_review_column`'s nullable `is_review` does).
+        Same `ADD COLUMN` shape as that migration and
+        `_migrate_prompts_pane_columns` just above -- no rebuild needed,
+        the CHECK is new rather than widened, and `ADD COLUMN` never
+        touches `ONE_OPEN_PULL_PER_SOURCE_REF` or any other schema object.
+
+        Backfilling the ~12,400 prompts that predate this column is
+        explicitly out of scope for this migration (and for this whole
+        change) -- see the task brief's own "do not attempt to back-fill
+        12,400 rows in the same change." They read `author='unknown'`,
+        which is correct: authorship for that population is not proven,
+        not merely unrecorded."""
+        with self._locked():
+            with contextlib.closing(self._connect()) as probe:
+                existing = probe.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='prompts'"
+                ).fetchone()
+                if existing is None:
+                    return
+                columns = {row["name"] for row in probe.execute("PRAGMA table_info(prompts)").fetchall()}
+                if "author" in columns:
+                    return
+            with self._transaction() as connection:
+                self._fail(failpoint, "before_add_author_column")
+                connection.execute(
+                    "ALTER TABLE prompts ADD COLUMN author TEXT NOT NULL DEFAULT 'unknown' "
+                    "CHECK (author IN ('jon', 'supervisor', 'director', 'unknown'))"
+                )
+                self._fail(failpoint, "after_add_author_column")
 
     ONE_OPEN_PULL_PER_SOURCE_REF = "one_open_pull_per_source_ref"
 

@@ -271,6 +271,100 @@ class CaptureWritesPaneColumnsTests(unittest.TestCase):
         self.assertIsNone(rows[0]["tmux_pane_target"])
 
 
+class CaptureWritesAuthorColumnTests(unittest.TestCase):
+    """agent-estate#1395/#1394 (label-prompt-author-1395): `capture()`
+    consults `Ledger.consume_pending_author` and writes the result (or
+    'unknown') into `prompts.author`.
+
+    MUTATION-CHECK, BOTH DIRECTIONS (the task brief's own required check):
+    a prompt whose exact text was registered as machine-sent must be
+    labelled as such (`test_a_registered_supervisor_prompt_is_labelled_supervisor`),
+    and -- the direction that actually matters, because false attribution
+    is the defect #1395 measured, not an absent label -- a prompt from
+    Jon's own session, with nothing registered for it, must NEVER be
+    mislabelled `supervisor`/`director`; it stays `unknown`
+    (`test_an_unregistered_prompt_from_jons_own_session_is_never_mislabelled`)."""
+
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.ledger = Ledger(self.tempdir.name)
+
+    def test_a_registered_supervisor_prompt_is_labelled_supervisor(self):
+        text = "Hill90 supervisor events:\n- event happened\nAcknowledge with the usual command."
+        self.ledger.register_pending_author(text, author="supervisor")
+
+        prompt_capture_hook.capture({"session_id": "estate-pane-session", "prompt": text}, self.ledger)
+
+        rows = self.ledger.list_unitemised_prompts()
+        self.assertEqual(1, len(rows))
+        self.assertEqual("supervisor", rows[0]["author"])
+
+    def test_a_registered_director_prompt_is_labelled_director(self):
+        text = "Director decision required. Your complete brief is at /tmp/brief-9001.md."
+        self.ledger.register_pending_author(text, author="director")
+
+        status = prompt_capture_hook.capture({"session_id": "director-session", "prompt": text}, self.ledger)
+
+        # This particular text also matches a NOISE_MARKERS boilerplate
+        # shape and is mechanically dropped -- but the prompt row itself
+        # (never deleted, only its item) still carries the real author,
+        # proving the two mechanisms are independent: noise-dropping does
+        # not skip the author lookup, and the author lookup does not
+        # change noise classification.
+        self.assertIn("dropped as noise", status)
+        rows = self._all_prompts()
+        self.assertEqual(1, len(rows))
+        self.assertEqual("director", rows[0]["author"])
+        self.assertEqual([], self.ledger.list_unitemised_prompts(),
+                          "dropped as noise -- confirms the prompt row (checked above) is distinct "
+                          "from the unitemised queue, same as test_dispatch_brief_boilerplate_...")
+
+    def test_an_unregistered_prompt_from_jons_own_session_is_never_mislabelled(self):
+        # Nothing registered for this text -- the shape of every one of
+        # Jon's own real prompts, including the exact kind #1395 found
+        # mislabelled downstream ("the mistake was mine" attributed to
+        # "Jon's mistake"). The defect being fixed is a FALSE label, not a
+        # missing one, so the only acceptable outcome here is 'unknown' --
+        # never 'supervisor' or 'director' guessed from the text's content,
+        # length, or tone.
+        text = "the mistake was mine: I dispatched h#748 off #757's 'none fixed yet' table"
+        prompt_capture_hook.capture({"session_id": "jons-real-session", "prompt": text}, self.ledger)
+
+        rows = self.ledger.list_unitemised_prompts()
+        self.assertEqual(1, len(rows))
+        self.assertEqual("unknown", rows[0]["author"])
+        self.assertNotIn(rows[0]["author"], ("supervisor", "director"))
+
+    def test_consuming_a_registration_is_one_time_only(self):
+        text = "status report: three tasks completed"
+        self.ledger.register_pending_author(text, author="supervisor")
+        prompt_capture_hook.capture({"session_id": "s1", "prompt": text}, self.ledger)
+
+        # A second, later submission of the IDENTICAL text (a different
+        # session, a coincidence, or literally the same text re-typed by
+        # Jon) must not inherit the already-spent registration.
+        prompt_capture_hook.capture({"session_id": "s2", "prompt": text}, self.ledger)
+
+        rows = sorted(self.ledger.list_unitemised_prompts(), key=lambda r: r["session"])
+        # The idempotent `hp-` id is derived from (session_id, text), so
+        # two different sessions submitting the same text DO produce two
+        # distinct prompt rows here -- both real, worth asserting on both.
+        self.assertEqual(2, len(rows))
+        by_session = {row["session"]: row["author"] for row in rows}
+        self.assertEqual("supervisor", by_session["s1"])
+        self.assertEqual("unknown", by_session["s2"])
+
+    def _all_prompts(self):
+        import sqlite3
+        connection = sqlite3.connect(Path(self.tempdir.name) / "ledger.sqlite3")
+        connection.row_factory = sqlite3.Row
+        try:
+            return [dict(row) for row in connection.execute("SELECT * FROM prompts ORDER BY at").fetchall()]
+        finally:
+            connection.close()
+
+
 class CaptureHealthViewTests(unittest.TestCase):
     """agent-supervisor#687: the staleness signal itself."""
 

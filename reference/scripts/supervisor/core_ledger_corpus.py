@@ -11,6 +11,7 @@ classes into the single `Ledger` class in `core.py`.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import re
 import time
 
@@ -23,7 +24,7 @@ class LedgerCorpusMixin:
     # true by construction rather than by convention alone.
 
     def record_prompt(self, prompt_id, *, at, text_raw, context, text_clean=None, session=None, source_file=None,
-                       tmux_pane=None, tmux_pane_target=None):
+                       tmux_pane=None, tmux_pane_target=None, author="unknown"):
         """Write one prompt row. `text_raw` is set once, here, and never again.
 
         `tmux_pane`/`tmux_pane_target` (agent-supervisor#755 part B): which
@@ -33,7 +34,15 @@ class LedgerCorpusMixin:
         tmux at all, or a `claude-print`/`pi-rpc` lane) -- never guessed or
         backfilled after the fact, same as every other column here. See
         `core_ledger_schema.py`'s `_migrate_prompts_pane_columns` for why
-        these are a candidate signal only, never proof on their own."""
+        these are a candidate signal only, never proof on their own.
+
+        `author` (agent-estate#1395/#1394): `'jon'`, `'supervisor'`,
+        `'director'`, or `'unknown'` -- the default. Callers should pass
+        `'unknown'` unless they hold a real, proven fact (see
+        `consume_pending_author` below); this method does not validate the
+        value beyond what the column's own CHECK enforces, so an invalid
+        string still raises, just later and less legibly -- deliberate:
+        this mixin is the writer, not the place author values get decided."""
         if not prompt_id or not isinstance(prompt_id, str):
             raise ValueError("prompt_id is required")
         if not text_raw or not isinstance(text_raw, str):
@@ -44,14 +53,101 @@ class LedgerCorpusMixin:
             connection.execute(
                 """
                 INSERT INTO prompts(id, at, text_raw, text_clean, context, session, source_file,
-                                     tmux_pane, tmux_pane_target)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                     tmux_pane, tmux_pane_target, author)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (prompt_id, int(at), text_raw, text_clean, context, session, source_file,
-                 tmux_pane, tmux_pane_target),
+                 tmux_pane, tmux_pane_target, author),
             )
             row = connection.execute("SELECT * FROM prompts WHERE id=?", (prompt_id,)).fetchone()
         return self._dict(row)
+
+    # -- agent-estate#1395/#1394: proven (not guessed) prompt authorship --
+    #
+    # `register_pending_author`/`consume_pending_author` are the durable,
+    # hash-keyed handoff between an injecting caller (a supervisor/Director
+    # tool that is ABOUT to type text into a lane's pane, e.g. via
+    # `TmuxTransport.send_literal`) and `prompt_capture_hook.py`, which
+    # captures whatever the pane submits without itself knowing who sent
+    # it. Nothing in this repo wires an injection call site to
+    # `register_pending_author` yet -- that is deliberately proposed, not
+    # landed, in this same change (see the PR body: which call sites, and
+    # why auditing every transport's coverage is separate follow-up work).
+    # Landing the primitive now means the schema and the consuming half
+    # (the hook) never have to migrate twice.
+
+    # How long an unconsumed registration survives before it is treated as
+    # abandoned (a `send_literal` that raised before the text ever reached
+    # a pane, a process that registered and then crashed) and purged rather
+    # than lingering to falsely match some unrelated future prompt that
+    # happens to share the same text. Purged opportunistically on the next
+    # `register_pending_author` call -- no separate cron needed for a table
+    # this small and this short-lived by design.
+    PENDING_PROMPT_AUTHOR_TTL_SECONDS = 300
+
+    @staticmethod
+    def _pending_author_hash(text):
+        """`sha1` of the text alone -- deliberately NOT combined with
+        `session_id` the way `prompt_capture_hook._prompt_id` is. The
+        injecting caller registers this BEFORE the send, when it does not
+        yet reliably know which session/pane will end up capturing the
+        text (a fresh lane's harness session id is not always known before
+        the first prompt lands in it); the hook looks up by the same hash
+        of the text it just captured, independent of session."""
+        return hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()
+
+    def register_pending_author(self, text, author):
+        """Durably record, BEFORE the physical send, that `text` is about
+        to be injected by `author` (`'supervisor'` or `'director'` only --
+        `'jon'`/`'unknown'` are never registered, because this table exists
+        to prove the NON-Jon case; Jon's own prompts need no registration,
+        they are simply never matched here). Idempotent per exact text:
+        a second registration of identical text before the first is
+        consumed replaces it (`INSERT OR REPLACE`) rather than erroring,
+        since the caller re-sending after a retry is a real, ordinary case,
+        not a bug.
+
+        Returns nothing -- callers that need to confirm the write landed
+        can re-derive `_pending_author_hash(text)` and call
+        `consume_pending_author` in a test; production callers do not,
+        same as `record_prompt`'s siblings here treat their own writes as
+        trusted once `_transaction()` returns without raising."""
+        if author not in ("supervisor", "director"):
+            raise ValueError(f"register_pending_author: author must be 'supervisor' or 'director', got {author!r}")
+        if not text or not isinstance(text, str):
+            raise ValueError("text is required")
+        now = int(self.clock())
+        text_hash = self._pending_author_hash(text)
+        with self._locked(), self._transaction() as connection:
+            connection.execute(
+                "DELETE FROM pending_prompt_authors WHERE registered_at < ?",
+                (now - self.PENDING_PROMPT_AUTHOR_TTL_SECONDS,),
+            )
+            connection.execute(
+                "INSERT OR REPLACE INTO pending_prompt_authors(text_hash, author, registered_at) VALUES (?, ?, ?)",
+                (text_hash, author, now),
+            )
+
+    def consume_pending_author(self, text):
+        """Look up and DELETE a matching `pending_prompt_authors` row for
+        `text`, returning the registered author (`'supervisor'`/
+        `'director'`) or `None` if nothing matches (never registered, TTL
+        already purged it, or already consumed by an earlier capture of
+        the same text). Consuming rather than merely reading is what makes
+        this safe against reuse: once matched, the fact is spent, so a
+        LATER, unrelated prompt that happens to share the same literal text
+        cannot silently inherit someone else's registration."""
+        if not text:
+            return None
+        text_hash = self._pending_author_hash(text)
+        with self._locked(), self._transaction() as connection:
+            row = connection.execute(
+                "SELECT author FROM pending_prompt_authors WHERE text_hash=?", (text_hash,)
+            ).fetchone()
+            if row is None:
+                return None
+            connection.execute("DELETE FROM pending_prompt_authors WHERE text_hash=?", (text_hash,))
+        return row["author"]
 
     def update_text_clean(self, prompt_id, text_clean):
         """Replace the derived, cleaned-up text. `text_raw` is untouched --
