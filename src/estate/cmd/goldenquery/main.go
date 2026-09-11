@@ -459,9 +459,13 @@ func runBaselineStratum(w *bufio.Writer, bin string, verbose bool) (top10Hits, t
 		fmt.Fprintf(w, "goldenquery: equivalent-answer pass skipped -- could not read the compiled index (%s): %v\n", path, err)
 		return top10Hits, total, nil, ranAtLeastOne
 	}
-	credits = creditEquivalents(results, items)
+	var skipped []skippedCase
+	credits, skipped = creditEquivalents(results, items)
 	for _, e := range credits {
 		fmt.Fprintln(w, equivalenceLine(e))
+	}
+	for _, s := range skipped {
+		fmt.Fprintln(w, skippedLine(s))
 	}
 	return top10Hits, total, credits, ranAtLeastOne
 }
@@ -1060,7 +1064,7 @@ func main() {
 		// line, not the first: "designated identifier not in top ten" is
 		// not "answer not returned".
 		fmt.Fprintf(w, "---\nretrieval-baseline stratum, top-10 by designated identifier (strict; --private, unscoped -- agent-estate#1315/#1318): %d/%d\n", top10Hits, total)
-		fmt.Fprintf(w, "retrieval-baseline stratum, top-10 by equivalent answer (identifier OR returned item opens with / cites the designated text): %d/%d (+%d, each attributed above as [EQUIV])\n", top10Hits+len(credits), total, len(credits))
+		fmt.Fprintf(w, "retrieval-baseline stratum, top-10 by equivalent answer (identifier OR a returned item whose own first statement is / whose body cites the designated text): %d/%d (+%d, each attributed above as [EQUIV]; any [EQUIV-NOT-ASSESSED] line is a designated text too generic to judge)\n", top10Hits+len(credits), total, len(credits))
 		fmt.Fprintf(w, "retrieval-baseline stratum, designated identifier not in top-10: %d/%d -- of which %d returned the designated text under another id; %d genuinely lack it in the top ten\n", total-top10Hits, total, len(credits), total-top10Hits-len(credits))
 		return
 	}

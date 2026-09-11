@@ -54,6 +54,75 @@ func TestParaphraseIsNotCredited(t *testing.T) {
 	}
 }
 
+// Review on #1407, finding 1: a document that OPENS by quoting the designated
+// sentence in a blockquote and then contradicts it is not an opening. The
+// reviewer's exact candidate. Failed against 7bf1d55 (credited as "opens").
+func TestBlockquoteOpeningIsNotAnOpening(t *testing.T) {
+	cand := knowledge.Item{ID: "it-superseded", Tier2: "> " + designated + "\n\nThat was the old policy. It no longer holds: deploys now also allow a break-glass SSH path with sign-off."}
+	if clause, ok := equivalentAnswer(target(), cand, "corpus:item:it-844b5c8eef4e9a48"); ok {
+		t.Fatalf("a quoted-then-superseded opening was credited under clause %q", clause)
+	}
+	// The same quote WITH an explicit backlink is a cites credit: the
+	// designated text was returned and is traceable to its source, which
+	// is all either oracle measures (see the named limit in equivalence.go).
+	cand.Tier2 = "> " + designated + " `it-844b5c8eef4e9a48`\n\nThat was the old policy."
+	if clause, ok := equivalentAnswer(target(), cand, "corpus:item:it-844b5c8eef4e9a48"); !ok || clause != "cites" {
+		t.Fatalf("a quoted sentence with an explicit backlink must be a cites credit, got %q/%v", clause, ok)
+	}
+}
+
+// Review on #1407, finding 2: a short designated sentence must not ride on
+// a longer opening that merely begins with the same words. "opens" is
+// equality of the whole first statement, not a prefix. Failed against
+// 7bf1d55 (prefix match credited it).
+func TestOpensRequiresTheWholeFirstStatementNotAPrefix(t *testing.T) {
+	short := knowledge.Item{ID: "it-short", Permalink: "corpus:item:it-short", Tier2: "Never commit secrets."}
+	longer := knowledge.Item{ID: "it-longer", Tier2: "Never commit secrets to the public repo, ever. This document is about rotating SSH deploy keys quarterly."}
+	if clause, ok := equivalentAnswer(short, longer, "corpus:item:it-short"); ok {
+		t.Fatalf("a longer opening that merely begins with the designated words was credited under %q", clause)
+	}
+	// One paragraph whose first line runs on past the sentence is likewise
+	// not the sentence -- the reviewer's exact second example.
+	unrelated := knowledge.Item{ID: "it-unrelated", Tier2: "Never commit secrets. This document is actually about rotating SSH deploy keys quarterly and has nothing to do with the credential-store write policy the fixture asked about."}
+	if clause, ok := equivalentAnswer(short, unrelated, "corpus:item:it-short"); ok {
+		t.Fatalf("a first line that continues past the designated sentence was credited under %q", clause)
+	}
+	// Named limit, pinned as accepted: a document whose OWN first statement
+	// is exactly the designated sentence, followed by anything, states it.
+	states := knowledge.Item{ID: "it-states", Tier2: "Never commit secrets.\n\nThis document goes on to discuss rotating SSH deploy keys quarterly."}
+	if clause, ok := equivalentAnswer(short, states, "corpus:item:it-short"); !ok || clause != "opens" {
+		t.Fatalf("a document whose own first statement is the sentence must be credited as opens, got %q/%v", clause, ok)
+	}
+}
+
+// Below the retriever's own three-term admission floor the designated text
+// is too generic to judge: not credited by any path, and reported as not
+// assessed rather than as a miss. Failed against 7bf1d55 (credited).
+func TestGenericDesignatedTextIsNotAssessed(t *testing.T) {
+	generic := knowledge.Item{ID: "it-generic", Permalink: "corpus:item:it-generic", Tier2: "Keep going."}
+	cand := knowledge.Item{ID: "it-cand", Tier2: "Keep going.\n\nA note about something else entirely."}
+	if terms, tooGeneric := designatedTooGeneric(generic); !tooGeneric || terms != 2 {
+		t.Fatalf("want too generic with 2 terms, got %d/%v", terms, tooGeneric)
+	}
+	if clause, ok := equivalentAnswer(generic, cand, "corpus:item:it-generic"); ok {
+		t.Fatalf("a too-generic designated text was credited under %q", clause)
+	}
+	items := map[string]knowledge.Item{"it-generic": generic, "it-cand": cand}
+	r := naturalResult{c: goldenset.Case{ID: "rb-g", ExpectedIdentifier: "corpus:item:it-generic"}, matches: []parsedMatch{{ID: "it-cand"}}}
+	credits, skipped := creditEquivalents([]naturalResult{r}, items)
+	if len(credits) != 0 || len(skipped) != 1 || skipped[0].CaseID != "rb-g" || skipped[0].Terms != 2 {
+		t.Fatalf("want no credit and one skipped case, got credits=%+v skipped=%+v", credits, skipped)
+	}
+	if !strings.Contains(skippedLine(skipped[0]), "[EQUIV-NOT-ASSESSED] rb-g") {
+		t.Fatalf("skipped line = %s", skippedLine(skipped[0]))
+	}
+	// The floor is the retriever's, not the fixture's: three terms pass.
+	three := knowledge.Item{ID: "it-three", Permalink: "corpus:item:it-three", Tier2: "Never commit secrets."}
+	if _, tooGeneric := designatedTooGeneric(three); tooGeneric {
+		t.Fatal("three distinct content terms must clear the floor")
+	}
+}
+
 // Normalisation tolerates markdown and case but nothing else.
 func TestNormalisationIsDecorationAndCaseOnly(t *testing.T) {
 	if normalizeText("# **Deploys** run   through the `CI` pipeline") != "deploys run through the ci pipeline" {
@@ -90,7 +159,10 @@ func TestCreditEquivalentsIsAttributableAndLeavesStrictHitsAlone(t *testing.T) {
 	c := goldenset.Case{ID: "rb-22", ExpectedIdentifier: "corpus:item:it-844b5c8eef4e9a48"}
 	miss := naturalResult{c: c, rank: 0, ran: true, matches: []parsedMatch{{ID: "it-noise"}, {ID: "it-60ae535a15dde4f7"}, {ID: "it-60ae535a15dde4f7"}}}
 	hit := naturalResult{c: goldenset.Case{ID: "rb-09", ExpectedIdentifier: "corpus:item:it-844b5c8eef4e9a48"}, rank: 1, ran: true, matches: []parsedMatch{{ID: "it-60ae535a15dde4f7"}}}
-	credits := creditEquivalents([]naturalResult{miss, hit}, items)
+	credits, skipped := creditEquivalents([]naturalResult{miss, hit}, items)
+	if len(skipped) != 0 {
+		t.Fatalf("nothing here is too generic to assess, got skipped=%+v", skipped)
+	}
 	if len(credits) != 1 {
 		t.Fatalf("credits = %+v, want exactly one (the miss, once; the hit untouched)", credits)
 	}
@@ -99,7 +171,7 @@ func TestCreditEquivalentsIsAttributableAndLeavesStrictHitsAlone(t *testing.T) {
 		t.Fatalf("credit not attributable: %+v", e)
 	}
 	line := equivalenceLine(e)
-	for _, want := range []string{"[EQUIV] rb-22", "rank 2", "it-60ae535a15dde4f7", "it-844b5c8eef4e9a48", "opens with the designated sentence"} {
+	for _, want := range []string{"[EQUIV] rb-22", "rank 2", "it-60ae535a15dde4f7", "it-844b5c8eef4e9a48", "first statement is the designated sentence"} {
 		if !strings.Contains(line, want) {
 			t.Fatalf("equivalence line missing %q: %s", want, line)
 		}
@@ -118,7 +190,7 @@ func TestEquivalentBeyondTopTenIsNotCredited(t *testing.T) {
 	}
 	matches = append(matches, parsedMatch{ID: "it-60ae535a15dde4f7"})
 	r := naturalResult{c: goldenset.Case{ID: "rb-x", ExpectedIdentifier: "corpus:item:it-844b5c8eef4e9a48"}, matches: matches}
-	if got := creditEquivalents([]naturalResult{r}, items); len(got) != 0 {
+	if got, _ := creditEquivalents([]naturalResult{r}, items); len(got) != 0 {
 		t.Fatalf("rank-11 equivalent credited: %+v", got)
 	}
 }
