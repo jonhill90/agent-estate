@@ -510,3 +510,34 @@ func TestVerifyEditsRefusesSmuggledBytesInTo(t *testing.T) {
 		t.Logf("%s: correctly refused: %s", c.label, v.Reason)
 	}
 }
+
+// Round six's own finding (agent-estate#1405): the whitelist check indexed
+// tokenize(raw) (lowers the whole string, then matches); the replay indexed
+// wordRE.FindAllString(raw, -1) (matches first, never lowers the whole
+// string). strings.ToLower expands U+0130 (capital I with dot above) into
+// ASCII "i" plus a combining mark, and maps U+212A (the Kelvin sign) to
+// ASCII "k" -- neither matches [A-Za-z']+ on its own, so lowering the
+// whole string invents a token that was never there, and every later
+// index drifts by one. A whitelist-vetted edit for one token then lands
+// on, and replaces, a completely different, unvetted one. Fable's own
+// exact construction; both code points written as \u escapes, not pasted
+// literals, so this file's own source bytes are unambiguous about which
+// characters are under test.
+func TestVerifyRefusesEditThatDriftsOntoTheWrongTokenAcrossUnicodeLowering(t *testing.T) {
+	for _, c := range []struct{ raw, clean, label string }{
+		{"İ dont merge", "İ dont don't", "U+0130 (capital I with dot above) before the edited token drifts tokenize(raw) by one"},
+		{"K dont merge", "K dont don't", "U+212A (Kelvin sign) before the edited token drifts tokenize(raw) by one"},
+	} {
+		t.Run(c.label, func(t *testing.T) {
+			// The edit is genuinely whitelisted (dont -> don't) and, if the
+			// two walks agreed, would target "dont" at index 1. Under the
+			// drifted tokenize(raw) index space, index 1 is "merge" instead.
+			edit := Edit{TokenIndex: 1, From: "dont", To: "don't"}
+			v := VerifyEdits(c.raw, []Edit{edit}, c.clean)
+			if v.OK {
+				t.Fatalf("VerifyEdits(%q, edit dont->don't @1, %q) returned OK -- a vetted edit for \"dont\" replaced \"merge\" instead, and the pair was accepted", c.raw, c.clean)
+			}
+			t.Logf("correctly refused: %s", v.Reason)
+		})
+	}
+}

@@ -116,6 +116,20 @@ package corpus
 // clean with plain string equality. No tokenize() runs anywhere in either
 // comparison now. See VerifyEdits's own doc comment for why this makes the
 // "does the verifier still earn its place" argument stronger, not weaker.
+//
+// # Round six: two walks over raw, asserted identical, were not
+//
+// Round five's byte replay still indexed the whitelist check with
+// tokenize(raw) and the replay with wordRE.FindAllString(raw, -1),
+// asserting the two were "positionally identical". They were not: raw
+// text containing U+0130 (İ) or U+212A (the Kelvin sign) makes
+// tokenize(raw) (which lowers the whole string, then matches) invent a
+// token neither character alone would match, drifting every later index
+// by one -- so the whitelist check could validate a different token than
+// the one the replay actually substitutes. Fixed by making it structural
+// rather than asserted: one wordRE.FindAllString(raw, -1) call, with the
+// lowercase form derived per already-matched element (never by lowering
+// the whole string first) -- see Edit's and VerifyEdits's own doc comments.
 
 import (
 	"fmt"
@@ -280,15 +294,21 @@ func tokenize(s string) []string {
 
 // Edit is one substitution the generator actually applied, recorded at the
 // moment it happened -- never inferred afterward by comparing two finished
-// strings. TokenIndex is the position in tokenize(raw) (the same tokeniser
-// VerifyEdits uses) that this edit replaces; wordRE.FindAllString and
-// wordRE.ReplaceAllStringFunc walk a string's matches in the same order, and
-// lower-casing a string before matching (what tokenize does) never changes
-// where [A-Za-z']+ matches -- only the case of what it captures -- so a
-// counter incremented once per match inside applyFixes's own substitution
-// loop lands on exactly the index tokenize(raw) would assign that word.
+// strings. TokenIndex is the position in wordRE.FindAllString(raw, -1) --
+// NOT tokenize(raw) -- that this edit replaces. applyFixes's own
+// substitution loop (wordRE.ReplaceAllStringFunc over raw, counter
+// incremented once per match, each matched token lowered individually only
+// to look up the whitelist) and VerifyEdits both walk this exact match set,
+// so TokenIndex means the same position in both; this is the ONLY walk
+// either of them performs over raw. It is deliberately not tokenize(raw):
+// tokenize lowers the whole string before matching, and strings.ToLower can
+// expand a single non-ASCII character (U+0130 "İ" into ASCII "i" plus a
+// combining mark; U+212A, the Kelvin sign, into ASCII "k") into a token
+// [A-Za-z']+ would not have matched in the original casing -- a real
+// divergence found in review (agent-estate#1405 round six) between
+// tokenize(raw)'s index space and this one.
 type Edit struct {
-	TokenIndex int    // position in tokenize(raw)
+	TokenIndex int    // position in wordRE.FindAllString(raw, -1)
 	From       string // the raw token, lowercased -- must equal an allFixes.from
 	To         string // the case-adapted text actually written into clean at this position
 }
@@ -432,8 +452,29 @@ type VerifyResult struct {
 // and no way for a byte outside [A-Za-z'] to change unnoticed either,
 // without the string-equality comparison failing first.
 func VerifyEdits(raw string, edits []Edit, clean string) VerifyResult {
-	rawTokens := tokenize(raw)                         // lowercased, for From-matching (unchanged)
-	rawTokensOriginal := wordRE.FindAllString(raw, -1) // SAME matches, ORIGINAL case -- positionally identical to rawTokens, see this file's own Edit doc comment
+	// ONE walk, ONE index space: wordRE.FindAllString(raw, -1) is the single
+	// match set both checks below index into -- rawTokens is derived from
+	// it (one strings.ToLower per already-matched element), never from a
+	// second, independent match over a separately-lowered string. Round
+	// five's own tokenize(raw) (which lowers the WHOLE string, then
+	// matches) could disagree with this exact walk: strings.ToLower
+	// expands U+0130 (İ) into ASCII "i" + a combining mark and maps U+212A
+	// (the Kelvin sign) to ASCII "k" -- neither character matches
+	// [A-Za-z']+ on its own, so lowering the whole string before matching
+	// invents a token ("i" or "k") that was never there in the original,
+	// and every index after it drifts by one. Lowering each element of
+	// rawTokensOriginal individually cannot do this: wordRE only ever
+	// matches ASCII a-z/A-Z/', and strings.ToLower is a 1:1, non-expanding
+	// map for every ASCII letter -- there is no character that can appear
+	// *inside* an already-matched token and still expand under lowering.
+	// So the property this needs (the whitelist check and the replay agree
+	// on where every token is) is structural, not asserted: there is only
+	// one regex walk over raw anywhere in this function.
+	rawTokensOriginal := wordRE.FindAllString(raw, -1)
+	rawTokens := make([]string, len(rawTokensOriginal))
+	for i, t := range rawTokensOriginal {
+		rawTokens[i] = strings.ToLower(t)
+	}
 	byIndex := make(map[int]Edit, len(edits))
 	for _, e := range edits {
 		if e.TokenIndex < 0 || e.TokenIndex >= len(rawTokens) {
