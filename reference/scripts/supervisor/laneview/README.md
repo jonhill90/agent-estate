@@ -54,12 +54,28 @@ That is the whole contract. It buys the two guarantees #178 asked to be
 demonstrated:
 
 - **Apart:** delete every file under `laneview/` and `laneview.sh` itself
-  (and `laneview-plugin-tmux/`, if that's gone too). Nothing else in
-  `scripts/supervisor/` references this directory (verify with `grep -rl
-  laneview scripts/supervisor --include='*.sh' | grep -v
-  ^scripts/supervisor/laneview`) — dispatch, merge, and notify are
-  unaffected. The verification surface holds too: `tests/supervisor/
-  test_laneview.sh`, `test_laneview_tmux_plugin.sh`, and
+  (and `laneview-plugin-tmux/`, if that's gone too). **Corrected
+  2026-09-11, agent-estate#1397: three files in `reference/scripts/
+  supervisor/` do reference this directory** (path-corrected verify
+  command — the repo root is now `reference/scripts/supervisor`, not
+  `scripts/supervisor`: `grep -rl laneview reference/scripts/supervisor
+  --include='*.sh' | grep -v ^reference/scripts/supervisor/laneview`) —
+  `ui-evidence-gate.sh` (its own comment cites this document's rule 3 by
+  name — "no headless supervisor script names the viewer outside a
+  comment" — to explain why one of its options isn't hardcoded, and
+  attributes the actual enforcement to `test_laneview_isolation.sh`, not
+  to itself — #1397's account read as ui-evidence-gate.sh enforcing rule 3
+  directly; the code doesn't support that, corrected here),
+  `worktree-guard-audit.sh` (names `test_laneview_tmux_plugin.sh` and
+  `test_laneview_tui_interactive.sh` directly), and `tooling-drift.sh`
+  (deliberately excludes `laneview/` from its own scan — a reference to
+  this directory's *absence* from a rule, not a dependency on its
+  presence). None of the three breaks on deletion — all three reference
+  this directory in comments or scan logic, not as a runtime dependency —
+  but "nothing else references this directory" was not true as written.
+  Dispatch, merge, and notify remain unaffected, which was the load-bearing
+  half of the original claim. The verification surface holds too: `tests/
+  supervisor/test_laneview.sh`, `test_laneview_tmux_plugin.sh`, and
   `test_laneview_tui_interactive.sh` each check for their subject before
   doing anything else and print a `SKIP` line and exit 0 when it is
   missing, rather than failing on a bare "No such file or directory" —
