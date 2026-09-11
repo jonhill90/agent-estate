@@ -2239,9 +2239,9 @@ func main() {
 		// limits" saw output byte-identical in shape to the pre-fix gate that
 		// misled everyone on 2026-09-03 -- no way to tell whether paging was
 		// measured or whether these limits were wired at all.
-		fmt.Printf("load %.2f/core  free %.0fMB  swapouts %.0f/%s  worktrees %d  inflight %d  weekly budget %.0f%% left\n",
+		fmt.Printf("load %.2f/core  free %.0fMB  swapouts %.0f/%s  worktrees %d  inflight %d  weekly budget %.0f%% left  session %.0f%% left\n",
 			v.Reading.LoadPerCore, v.Reading.FreeMemMB, v.Reading.SwapoutRate, pressure.SampleWindow(),
-			v.Reading.Worktrees, v.Reading.InFlight, v.Reading.WeeklyRemaining)
+			v.Reading.Worktrees, v.Reading.InFlight, v.Reading.WeeklyRemaining, v.Reading.SessionRemaining)
 		if !v.OK {
 			for _, r := range v.Reasons {
 				fmt.Fprintln(os.Stderr, "refuse: "+r)

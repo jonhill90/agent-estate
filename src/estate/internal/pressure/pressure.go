@@ -1,11 +1,15 @@
 // Package pressure decides whether this host can take more work.
 //
-// Four independent limits, all of which must pass: load per core, free
-// memory, SWAP IN USE, and lanes actually in flight. Every one fails CLOSED -- if a limit
-// cannot be measured, the answer is refuse, never allow. The old supervisor
-// had three separate pressure checks that did not consult each other and a
-// session cap that the dispatchers actually in use never called; the host
-// needed a hard restart twice.
+// Seven independent limits, all of which must pass: load per core, free
+// memory, SWAP IN USE, worktree count, weekly token budget, the shorter
+// rolling session window (agent-estate#1127), and lanes actually in
+// flight. Every one fails CLOSED -- if a limit cannot be measured, the
+// answer is refuse, never allow. The old supervisor had three separate
+// pressure checks that did not consult each other and a session cap that
+// the dispatchers actually in use never called; the host needed a hard
+// restart twice. That session cap went unbuilt again in THIS supervisor
+// until agent-estate#1127 -- the field it needed (quota.Reading.
+// SessionUsedPercent) was already being read and simply never consulted.
 package pressure
 
 import (
@@ -91,6 +95,14 @@ type Reading struct {
 	Worktrees       int
 	InFlight        int
 	WeeklyRemaining float64
+	// SessionRemaining is the shorter rolling window's own remaining
+	// percentage -- agent-estate#1127: WeeklyRemaining alone said nothing
+	// about the constraint that actually killed a dispatch mid-turn on
+	// "You've hit your session limit". Sourced from the SAME quota.Read
+	// call as WeeklyRemaining (see the quota block in Check, below) -- no
+	// second codexbar shell-out, and exactly as fresh (bound by the same
+	// quota.MaxAge staleness check) as the weekly figure it sits beside.
+	SessionRemaining float64
 }
 
 type Verdict struct {
@@ -246,7 +258,10 @@ func Check(l *ledger.Ledger, lim Limits) Verdict {
 	}
 
 	// Budget is a limit like any other, and the one whose blindness actually
-	// cost a week. A reading that cannot be taken refuses.
+	// cost a week. A reading that cannot be taken refuses -- both windows,
+	// since one unreadable quota.Read call means BOTH WeeklyRemaining and
+	// SessionRemaining are unmeasured, not just the one this package used
+	// to consult.
 	readQuota := lim.ReadQuota
 	if readQuota == nil {
 		readQuota = quota.Read
@@ -256,7 +271,18 @@ func Check(l *ledger.Ledger, lim Limits) Verdict {
 		v.Reasons = append(v.Reasons, "could not measure token budget: "+err.Error())
 	} else {
 		v.Reading.WeeklyRemaining = r.WeeklyRemaining()
+		v.Reading.SessionRemaining = r.SessionRemaining()
 		if ok, why := quota.Allow(r); !ok {
+			v.OK = false
+			v.Reasons = append(v.Reasons, why)
+		}
+		// agent-estate#1127: the shorter rolling window, checked
+		// independently of the weekly one above so its own refusal names
+		// itself distinctly (quota.AllowSession's own doc comment) rather
+		// than the two folding into one reason a caller could not
+		// attribute. Both can fire from the same reading; both then
+		// appear, each in its own Reasons entry.
+		if ok, why := quota.AllowSession(r); !ok {
 			v.OK = false
 			v.Reasons = append(v.Reasons, why)
 		}
