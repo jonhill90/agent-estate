@@ -300,9 +300,15 @@ func knowledgeGrounding() string {
 		"off-topic, prefix the query with `source:<name>` -- e.g. `source:repo-docs` " +
 		"for how this repo works, `source:corpus-directive` for what the operator " +
 		"has decided -- to narrow to one source. Under `--private`, do so whenever " +
-		"you already know which source holds the answer: `--private` mode has " +
-		"several competing sources, and scoping to the right one measurably " +
-		"improves the hit rate there (agent-estate#1162; run " +
+		"you already know which source holds the answer -- e.g. a question about " +
+		"the operator's own standing rules, decisions, or memory (\"how is X " +
+		"organised\", \"what did Jon decide about Y\"): `source:vault-fact` or " +
+		"`source:corpus-directive`/`source:corpus-parameter`; a question about " +
+		"how THIS REPO works: `source:repo-docs` (agent-estate#1099: naming the " +
+		"source for the exact query shape that kept going unscoped, since the " +
+		"abstract instruction alone measurably was not enough) -- `--private` " +
+		"mode has several competing sources, and scoping to the right one " +
+		"measurably improves the hit rate there (agent-estate#1162; run " +
 		"`go run ./src/estate/cmd/goldenquery`, or see `docs/canonical/knowledge-system.md`'s " +
 		"own scoping section, for the current number -- neither is restated here " +
 		"on purpose, agent-estate#1166: the checked-in fixture this would-be " +
