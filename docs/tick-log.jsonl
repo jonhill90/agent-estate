@@ -85,3 +85,6 @@
 {"at":"2026-09-11T09:50:54Z","phase_item":"phase-3","src_head":"718ac1d877f179432580601c103a6cfcecdd1c15","artifact":null,"gap_seconds":472,"observed_turns":0}
 {"at":"2026-09-11T11:46:58Z","phase_item":"phase-3","src_head":"718ac1d877f179432580601c103a6cfcecdd1c15","artifact":"https://github.com/jonhill90/agent-dotfiles/issues/353","gap_seconds":6964,"observed_turns":0}
 {"at":"2026-09-11T11:51:35Z","phase_item":"phase-3","src_head":"718ac1d877f179432580601c103a6cfcecdd1c15","artifact":"https://github.com/jonhill90/agent-estate/pull/1406","gap_seconds":277,"observed_turns":0}
+{"at":"2026-09-11T11:58:37Z","phase_item":"phase-3","src_head":"718ac1d877f179432580601c103a6cfcecdd1c15","artifact":"https://github.com/jonhill90/agent-dotfiles/pull/354","gap_seconds":422,"observed_turns":0}
+{"at":"2026-09-11T12:03:05Z","phase_item":"phase-3","src_head":"718ac1d877f179432580601c103a6cfcecdd1c15","artifact":"https://github.com/jonhill90/agent-estate/pull/1405","gap_seconds":268,"observed_turns":0}
+{"at":"2026-09-11T12:12:25Z","phase_item":"phase-3","src_head":"718ac1d877f179432580601c103a6cfcecdd1c15","artifact":"https://github.com/jonhill90/agent-estate/pull/1408","gap_seconds":560,"observed_turns":0}
