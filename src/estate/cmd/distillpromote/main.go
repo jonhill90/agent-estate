@@ -19,6 +19,22 @@
 // a real corpus item, so the facts layer cannot contain a sentence Jon did not
 // cause to be written. Everything else on the note -- subject, evidence links,
 // provenance -- is mechanical.
+//
+// agent-estate#1339: before promoting, it checks the vault as it actually
+// stands, not just its own prior output. vault-view (internal/vaultview)
+// publishes a Parameter note per hard corpus item independently of this
+// command, with zero cross-awareness in either direction -- measured on the
+// live vault, 217 duplicate clusters (442 files) are exactly this shape.
+// existing.go's dedupe skips a (corpus_item, subject) pair this command has
+// already promoted (a prior run's own output, an exact repeat with nothing
+// new to say), but does NOT refuse merely because a Parameter note or a
+// Fact under a DIFFERENT subject already exists for the same corpus_item --
+// see the issue's own "do not merge your own PRs" case: promoted once under
+// "lane" and once under "merge", each with real, distinct evidence, and
+// neither redundant with the other. Publishing anyway, with the sibling
+// note(s) named under "Related notes" rather than silently duplicated, is
+// this command's answer to that -- it does not retire or edit anything else
+// in the vault; that is a migration's job, out of scope here.
 package main
 
 import (
@@ -44,6 +60,12 @@ type fact struct {
 	Subject  string
 	Chosen   distill.Item
 	Evidence []distill.Item
+	// Related is every OTHER existing vault note (Parameter or Fact) already
+	// on file for this same corpus_item, discovered by dedupe (agent-estate#1339)
+	// -- never nil-vs-empty-significant, just the ids to cite. Populated
+	// before render() so the written note names its own siblings instead of
+	// silently duplicating them uncredited.
+	Related []string
 }
 
 func main() {
@@ -120,15 +142,45 @@ func main() {
 		}
 	}
 
+	// agent-estate#1339: dedup against the vault as it actually stands, not
+	// just against this run's own output. Two independent mechanisms write
+	// into the vault -- vault-view publishes a Parameter note per hard
+	// corpus item, unconditionally; this command promotes a subset of that
+	// same population to Fact notes -- and until now neither checked the
+	// other. See existing.go's own doc comment for the measured overlap.
+	existingP, err := existingParams(*vault)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "existing parameters:", err)
+		os.Exit(1)
+	}
+	existingF, err := existingFacts(*vault)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "existing facts:", err)
+		os.Exit(1)
+	}
+	facts, skipped := dedupe(facts, existingP, existingF)
+
 	fmt.Printf("subjects with enough evidence: %d\n", len(subjects))
-	fmt.Printf("facts to promote:              %d\n", len(facts))
+	fmt.Printf("facts to promote:              %d\n", len(facts)+skipped)
+	fmt.Printf("already promoted (same corpus_item, same subject) -- skipped: %d\n", skipped)
+	related := 0
+	for _, f := range facts {
+		if len(f.Related) > 0 {
+			related++
+		}
+	}
+	fmt.Printf("publishing alongside an existing Parameter/Fact note for the same corpus_item: %d\n", related)
 	if !*apply {
 		fmt.Println("\ndry run -- nothing written. sample:")
 		for i, f := range facts {
 			if i >= 8 {
 				break
 			}
-			fmt.Printf("\n  [%s] %s\n    %s\n    (+%d evidence)\n", f.Subject, f.Chosen.ID, trunc(f.Chosen.Body, 120), len(f.Evidence))
+			rel := ""
+			if len(f.Related) > 0 {
+				rel = fmt.Sprintf(" (related: %s)", strings.Join(f.Related, ", "))
+			}
+			fmt.Printf("\n  [%s] %s\n    %s\n    (+%d evidence)%s\n", f.Subject, f.Chosen.ID, trunc(f.Chosen.Body, 120), len(f.Evidence), rel)
 		}
 		return
 	}
@@ -145,6 +197,70 @@ func main() {
 		written++
 	}
 	fmt.Printf("facts written: %d\n", written)
+}
+
+// dedupe is agent-estate#1339's own check: before writing a NEW Fact for
+// (corpus_item, subject), has this exact pair already been published?
+//
+// Two different answers for two different overlaps, deliberately not the
+// same rule -- a naive "one note per corpus_item" would destroy real
+// content (see this command's own comment above the fact struct, and the
+// issue's own "do not merge your own PRs" worked example: two Facts,
+// SUBJECT "lane" and SUBJECT "merge", sharing one corpus_item, each with
+// its own real, distinct evidence list; neither is redundant with the
+// other, only their headline/description collide):
+//
+//   - An existing FACT for the SAME corpus_item AND the SAME subject is an
+//     exact repeat -- a prior run's own output, or (today, since this tool
+//     has never run with -apply against the live vault) the pre-#1290
+//     pipeline's output landing on the identical (item, subject) pair this
+//     run would also choose. There is no new information in writing it
+//     again: SKIPPED, counted, never silent.
+//   - An existing Fact for the SAME corpus_item under a DIFFERENT subject,
+//     or an existing PARAMETER note for the same corpus_item at all (94% of
+//     candidates, measured -- vault-view's own coverage is close to
+//     universal), is NOT a reason to refuse: that Fact's evidence and
+//     synthesis for THIS subject does not exist anywhere else in the vault.
+//     Refusing here would make this command permanently promote nothing,
+//     since virtually every candidate it ever considers already has a
+//     Parameter note by construction (both draw from the same hard-item
+//     population). Published anyway, with Related populated so the note
+//     names what else already exists for its own corpus_item, rather than
+//     silently duplicating it uncredited -- the concrete answer to "publish,
+//     or mark the relationship": both, for this case.
+//
+// What this does NOT do: retire, edit, or merge the existing Parameter or
+// Fact note this new Fact is related to -- see this repo's own vault-write
+// discipline (no writes outside the file this command itself creates) and
+// this PR's own report on why a migration for the 442 files already on
+// disk is separate, future work. A newly-written Fact's Related field is
+// exactly the input such a migration would need: for each Fact naming a
+// Related Parameter note, retire that Parameter note (matching vault-view's
+// own "status: deprecated" retirement convention) once its content is
+// confirmed to be a strict subset of the Fact's, the same judgement the
+// issue investigation made by hand for this cluster's own 190137.md.
+func dedupe(facts []fact, params map[string]string, existing map[string][]factRef) (kept []fact, skipped int) {
+	for _, f := range facts {
+		exact := false
+		var related []string
+		if pid, ok := params[f.Chosen.ID]; ok {
+			related = append(related, pid)
+		}
+		for _, ref := range existing[f.Chosen.ID] {
+			if ref.Subject == f.Subject {
+				exact = true
+				break
+			}
+			related = append(related, ref.ID)
+		}
+		if exact {
+			skipped++
+			continue
+		}
+		f.Related = related
+		kept = append(kept, f)
+	}
+	return kept, skipped
 }
 
 // binding words mark a statement as a RULE rather than an observation.
@@ -224,6 +340,19 @@ func render(id string, f fact) string {
 		fmt.Fprintf(&b, "## Evidence (%d further statements on this subject)\n\n", len(f.Evidence))
 		for _, e := range f.Evidence {
 			fmt.Fprintf(&b, "- %s `%s`\n", oneline(e.Body, 150), e.ID)
+		}
+		b.WriteString("\n")
+	}
+	if len(f.Related) > 0 {
+		// agent-estate#1339: this corpus item is ALSO published as one or
+		// more other notes (a vault-view Parameter note, and/or a Fact
+		// under a different subject) -- named here rather than silently
+		// duplicated. Never edited or retired by this command; see this
+		// PR's own report for what a future migration would do with this.
+		b.WriteString("## Related notes\n\n")
+		b.WriteString("This corpus item is also published as:\n\n")
+		for _, id := range f.Related {
+			fmt.Fprintf(&b, "- `%s`\n", id)
 		}
 		b.WriteString("\n")
 	}
