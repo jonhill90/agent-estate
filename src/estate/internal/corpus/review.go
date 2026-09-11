@@ -9,11 +9,20 @@ package corpus
 // purpose -- a tool that decided "supported" versus "stronger than the
 // source" would manufacture the false confidence this work exists to remove.
 //
-// Read-only. Quotes text_clean only; text_raw is never rendered unless the
-// caller passes Private, and then only to a terminal. Rows whose text looks
-// like a credential or a personal arrangement are withheld by id with the
-// reason stated, never silently dropped, so the count is reportable and the
-// row is still reachable with Private.
+// Read-only, and PUBLIC-BY-STRUCTURE: the default render carries ids,
+// times, counts, weights, statuses and mechanical hints -- no prompt text
+// and no rule text of any kind -- so it has no credential exposure by
+// construction and needs no filter to be safe. The Private render carries
+// everything (rule bodies, text_clean, text_raw) for the operator to read
+// locally; that is where the question gets answered. Three review rounds on
+// #1403 found three different secret shapes a keyword-plus-shape filter
+// missed, and a fourth (a passphrase with spaces) needs no finding: free
+// text cannot be gated by shape, so the public path publishes none.
+//
+// The filter survives as an ADVISORY in the private render: a row whose
+// text looks like a credential or a personal arrangement is marked "do not
+// quote publicly" with the reason, for the human who lifts a quote into an
+// issue by hand. It advises; it never gates, and it never withholds.
 
 import (
 	"bufio"
@@ -30,7 +39,7 @@ import (
 // ReviewItem is one live parameter as stored.
 type ReviewItem struct {
 	ItemID string `json:"item_id"`
-	Body   string `json:"body"`
+	Body   string `json:"body,omitempty"` // private render only
 	Weight string `json:"weight"`
 	Status string `json:"status"`
 }
@@ -42,10 +51,11 @@ type ReviewGroup struct {
 	Author   string       `json:"author"`
 	Session  string       `json:"session,omitempty"`
 	Project  string       `json:"project,omitempty"`
-	Clean    string       `json:"text_clean,omitempty"`
+	Clean    string       `json:"text_clean,omitempty"` // private render only
+	CleanLen int          `json:"text_clean_length"`    // public: whether and how much cleaned text exists
 	RawLen   int          `json:"raw_length"`
-	Withheld string       `json:"withheld,omitempty"` // reason, when the row is not rendered publicly
-	Hints    []string     `json:"hints,omitempty"`    // mechanical, labelled, never a verdict
+	Advisory string       `json:"do_not_quote,omitempty"` // private render only: reason the human should not lift this text into a public place
+	Hints    []string     `json:"hints,omitempty"`        // mechanical, labelled, never a verdict
 	Items    []ReviewItem `json:"items"`
 	raw      string       // never serialised; rendered only under Private
 }
@@ -56,21 +66,22 @@ type Review struct {
 	Params        int           `json:"live_parameters"`
 	WithClean     int           `json:"prompts_with_text_clean"`
 	ParamsClean   int           `json:"live_parameters_with_text_clean"`
-	WithheldCount int           `json:"prompts_withheld"`
+	AdvisoryCount int           `json:"prompts_flagged_do_not_quote"`
 	Groups        []ReviewGroup `json:"groups"`
 }
 
-// sensitive names what must not reach a public artifact: credential shapes,
-// credential words, and the operator's own accounts or arrangements
-// (CLAUDE.local.md: "anything about his accounts, credentials, or personal
-// arrangements ... they are context you hold, not content you publish").
-// It errs toward withholding, because a withheld row is still listed and
-// reachable, while a leaked one is not recallable.
+// The do-not-quote advisory names what a human must not lift into a public
+// place: credential shapes, credential words, and the operator's own
+// accounts or arrangements (CLAUDE.local.md: "anything about his accounts,
+// credentials, or personal arrangements ... they are context you hold, not
+// content you publish"). It errs toward flagging, because a needless note
+// costs nothing and a missed one costs the human a second look.
 //
-// Three layers, checked in order, any one of which withholds:
+// Four layers, checked in order, any one of which flags:
 //
 //  1. keywords -- credential words, known key prefixes, and the operator's
 //     own accounts/arrangements;
+//
 //  2. secret SHAPE, independent of any keyword -- a long hex run, a JWT's
 //     three dot-separated segments, a `token=`/`secret:`-style assignment,
 //     or any UNBROKEN alphanumeric run of 20+ characters that mixes digits
@@ -78,38 +89,47 @@ type Review struct {
 //     run, so a hyphenated deployment name such as `audit-hill90-ui-client`
 //     or a path segment is judged piece by piece and passes, while a pasted
 //     key's own body -- which has no separators -- is caught;
+//
 //  3. the word "token" itself, which in this corpus is cost vocabulary
 //     ("waste tokens", "token usage", "16k tokens") far more often than a
 //     credential. It is withheld unless cost vocabulary sits within ~60
 //     characters of it, and always withheld when a value-shaped literal
 //     follows it.
 //
-// Which side this errs on, stated once: WITHHOLDING. A leaked secret is
-// unrecoverable and this artifact is meant to be publishable; a wrongly
-// withheld row is one of the operator's own prompts he cannot read here, but
-// it is listed by id and reachable with --private. So the rules above accept
-// known false positives -- a 40-hex git SHA reads as a hex run (1 of 970
-// prompts tonight), "ssh key" withholds prompts about provisioning a key
-// (3 of 970) -- rather than loosen.
+//  4. a single-case alphabetic run of 20+ characters -- a jammed-together
+//     passphrase ("correcthorsebatterystaple"). CamelCase identifiers, which
+//     are this corpus's own vocabulary (TempoIngestionErrors,
+//     createBoundedSseWriter -- 14 of 970 prompts carry one), mix cases and
+//     pass; a passphrase typed in CamelCase would pass with them.
 //
-// The residual gap this accepts, named rather than claimed away: a secret
-// whose longest unbroken alphanumeric run is UNDER 20 characters and which
-// is introduced by neither a credential word nor "token" -- a UUID-shaped
-// key, a short PIN, "use ab12cd34ef56gh78 to log in" -- passes. Below 20
-// characters the shape of a key is the shape of an ordinary identifier, and
-// no character-class or entropy rule separates them without withholding this
-// corpus's own infrastructure vocabulary; the cut was measured, not assumed.
+// What this is for, stated once: it ADVISES the human who lifts a quote
+// into a public place. It does not gate anything. Three review rounds on
+// #1403 each found a new shape the previous rule missed (bare "token" with
+// a value; single-case keys; alphabetic passphrases), and the next one is
+// free -- "correct horse battery staple" with spaces is under 20 characters
+// per word and matches nothing here. That is why the public render carries
+// no text at all (see the package comment) and this flag lives only in the
+// private render. As an advisory, a false positive costs a needless "do not
+// quote" note (a 40-hex commit SHA reads as a hex run; "ssh key" flags
+// prompts about provisioning one) and a false negative costs nothing the
+// human was not already responsible for.
 //
-// History: the first cut withheld 145 of 970 prompts on the bare word
+// Known misses, named so nobody reads the flag as complete: any secret whose
+// longest unbroken run is under 20 characters with no credential word and
+// no "token" (UUID-shaped keys, short PINs, "use ab12cd34ef56gh78 to log
+// in"); multi-word passphrases; CamelCase passphrases.
+//
+// History: a first cut withheld 145 of 970 prompts on the bare word
 // "token"; the second exempted it and let "my token is 9f8e7d…" through;
-// the third caught that but scored hyphenated identifiers as keys and missed
-// single-case keys of any length (review on #1403, twice). This lands at 120
-// (measured 2026-09-11), every one listed by id and reachable with --private.
+// the third scored hyphenated identifiers as keys and missed single-case
+// keys; the fourth missed alphabetic runs. Flagged now: 120 of 970 with the
+// alphabetic rule adding none (measured 2026-09-11).
 var sensitiveKeywords = regexp.MustCompile(`(?i)\b(sk-[a-z0-9]{6,}|ghp_[a-z0-9]{6,}|xox[abp]-[a-z0-9-]{6,}|password|passwd|passphrase|api[ -]?key|secret|bearer|creds?|credentials?|keychain|botfather|private key|ssh key|friend'?s? account|my friend|switch(ed|ing)? account|claude account|copilot account|subscriptions?|\bsubs\b|hill90admin)\b`)
 var secretHexRun = regexp.MustCompile(`\b[0-9a-fA-F]{24,}\b`)
 var secretJWT = regexp.MustCompile(`\b[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b`)
 var secretAssignment = regexp.MustCompile(`(?i)\b(token|secret|password|passwd|api[_ -]?key|apikey)\s*[:=]\s*\S{8,}`)
 var alnumRun = regexp.MustCompile(`[A-Za-z0-9]{20,}`)
+var singleCaseAlphaRun = regexp.MustCompile(`\b(?:[a-z]{20,}|[A-Z]{20,})\b`)
 var tokenWord = regexp.MustCompile(`(?i)\btokens?\b`)
 
 // a literal of 12+ key characters within three words after "token"; the
@@ -168,6 +188,9 @@ func sensitiveReason(texts ...string) string {
 		}
 		if s := secretShapedLiteral(t); s != "" {
 			return prefix + "secret-shaped literal)"
+		}
+		if singleCaseAlphaRun.MatchString(t) {
+			return prefix + "single-case alphabetic run, passphrase-shaped)"
 		}
 		if m := tokenThenValue.FindStringSubmatch(t); m != nil && strings.ContainsAny(m[1], "0123456789") {
 			return prefix + "token followed by a value)"
@@ -242,9 +265,10 @@ func parseReview(out string) (*Review, error) {
 			texts = append(texts, it.Body)
 		}
 		if reason := sensitiveReason(texts...); reason != "" {
-			g.Withheld = reason
-			r.WithheldCount++
+			g.Advisory = reason
+			r.AdvisoryCount++
 		}
+		g.CleanLen = len(g.Clean)
 		if g.Clean != "" {
 			r.WithClean++
 			r.ParamsClean += len(g.Items)
@@ -275,7 +299,7 @@ func shortProject(p string) string {
 func hints(g *ReviewGroup) []string {
 	var hs []string
 	if g.Clean == "" {
-		hs = append(hs, "source has no cleaned text; described, not quoted")
+		hs = append(hs, "source has no cleaned text")
 	}
 	if strings.Contains(g.raw, "?") {
 		hs = append(hs, "source contains a question mark")
@@ -323,9 +347,10 @@ type ReviewOptions struct {
 	JSON    bool
 }
 
-// Render writes the artifact. Public output quotes text_clean only and
-// withholds sensitive rows by id; Private adds text_raw and the withheld
-// rows' text, marked so it cannot be mistaken for publishable.
+// Render writes the artifact. Public output is ids and structure only --
+// no rule text, no cleaned text, no raw text, no advisory reason. Private
+// output carries all of it, marked so it cannot be mistaken for publishable,
+// with a do-not-quote advisory on rows the filter flags.
 func (r *Review) Render(w io.Writer, o ReviewOptions) error {
 	if o.Limit <= 0 {
 		o.Limit = 100
@@ -350,50 +375,57 @@ func (r *Review) Render(w io.Writer, o ReviewOptions) error {
 			Shown  int `json:"shown"`
 		}
 		v := out{Review: *r, Offset: start, Limit: o.Limit, Shown: len(page)}
-		v.Groups = page
+		v.Groups = make([]ReviewGroup, len(page))
+		copy(v.Groups, page)
 		if !o.Private {
+			// Public JSON is structure only: no rule text, no source text,
+			// no advisory (its reason can name what it matched).
 			for i := range v.Groups {
-				if v.Groups[i].Withheld != "" {
-					v.Groups[i].Clean = ""
-					v.Groups[i].Items = nil
+				v.Groups[i].Clean = ""
+				v.Groups[i].Advisory = ""
+				items := make([]ReviewItem, len(v.Groups[i].Items))
+				for j, it := range v.Groups[i].Items {
+					it.Body = ""
+					items[j] = it
 				}
+				v.Groups[i].Items = items
 			}
+			v.AdvisoryCount = 0
 		}
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
 		return enc.Encode(v)
 	}
 	fmt.Fprintf(w, "# Provenance review -- %d source prompts behind %d live parameters\n\n", r.Prompts, r.Params)
-	fmt.Fprintf(w, "Showing prompts %d-%d of %d (sorted by live parameters per source, then time). %d prompts (%d live parameters) have cleaned text and are quoted; the rest are described, not quoted. %d prompts are withheld here as credential/personal-arrangement matches and listed by id.\n\n",
-		start+1, end, r.Prompts, r.WithClean, r.ParamsClean, r.WithheldCount)
-	fmt.Fprintln(w, "Hints are mechanical and labelled. The judgement column -- supported / stronger than the source / not supported / cannot tell -- is yours; nothing here fills it in.")
+	fmt.Fprintf(w, "Showing prompts %d-%d of %d (sorted by live parameters per source, then time). %d prompts (%d live parameters) have cleaned text.\n\n",
+		start+1, end, r.Prompts, r.WithClean, r.ParamsClean)
 	if o.Private {
-		fmt.Fprintln(w, "\n*** PRIVATE RENDER: raw prompt text and withheld rows are included. Do not paste this anywhere public. ***")
+		fmt.Fprintf(w, "*** PRIVATE RENDER: rule text, cleaned text and raw prompt text are included. Do not paste this anywhere public. %d prompts carry a do-not-quote advisory. ***\n\n", r.AdvisoryCount)
+	} else {
+		fmt.Fprintln(w, "Public render: ids and structure only -- no prompt text and no rule text. Run with --private to read the rules and their sources locally; that is where the question gets answered.")
+		fmt.Fprintln(w)
 	}
+	fmt.Fprintln(w, "Hints are mechanical and labelled. The judgement column -- supported / stronger than the source / not supported / cannot tell -- is yours; nothing here fills it in.")
 	for i, g := range page {
 		fmt.Fprintf(w, "\n## %d. prompt %s -- %s -- recorded author: %s -- %d live parameter(s)", start+i+1, g.PromptID, g.At, g.Author, len(g.Items))
 		if g.Project != "" {
 			fmt.Fprintf(w, " -- project: %s", g.Project)
 		}
 		fmt.Fprintln(w)
-		if g.Withheld != "" && !o.Private {
-			fmt.Fprintf(w, "\nWithheld: %s. Items: ", g.Withheld)
-			for j, it := range g.Items {
-				if j > 0 {
-					fmt.Fprint(w, ", ")
-				}
-				fmt.Fprint(w, it.ItemID)
-			}
-			fmt.Fprintf(w, ". View locally with --private.\n")
-			continue
-		}
-		if g.Clean != "" {
-			fmt.Fprintf(w, "\nSource (text_clean): \"%s\"\n", g.Clean)
-		} else {
-			fmt.Fprintf(w, "\nSource: cleaned excerpt unavailable (raw length %d chars; private reference: prompt %s; view locally with --private).\n", g.RawLen, g.PromptID)
-		}
 		if o.Private {
+			if g.Advisory != "" {
+				fmt.Fprintf(w, "\nDO NOT QUOTE PUBLICLY: %s.\n", g.Advisory)
+			}
+			if g.Clean != "" {
+				fmt.Fprintf(w, "\nSource (text_clean): \"%s\"\n", g.Clean)
+			} else {
+				fmt.Fprintf(w, "\nSource: no cleaned text (raw length %d chars).\n", g.RawLen)
+			}
 			fmt.Fprintf(w, "\nRaw (PRIVATE, never publish): %s\n", g.raw)
+		} else if g.CleanLen > 0 {
+			fmt.Fprintf(w, "\nSource: cleaned text exists (%d chars; raw %d chars); read it with --private.\n", g.CleanLen, g.RawLen)
+		} else {
+			fmt.Fprintf(w, "\nSource: no cleaned text (raw length %d chars); read it with --private.\n", g.RawLen)
 		}
 		if len(g.Hints) > 0 {
 			fmt.Fprintln(w, "\nHints (mechanical, not verdicts):")
@@ -401,10 +433,18 @@ func (r *Review) Render(w io.Writer, o ReviewOptions) error {
 				fmt.Fprintf(w, "- %s\n", h)
 			}
 		}
-		fmt.Fprintln(w, "\n| # | rule as stored (weight, status) | your judgement |")
-		fmt.Fprintln(w, "|---|---|---|")
-		for j, it := range g.Items {
-			fmt.Fprintf(w, "| %d | %s (%s, %s) `%s` | supported / stronger than the source / not supported / cannot tell |\n", j+1, it.Body, it.Weight, it.Status, it.ItemID)
+		if o.Private {
+			fmt.Fprintln(w, "\n| # | rule as stored (weight, status) | your judgement |")
+			fmt.Fprintln(w, "|---|---|---|")
+			for j, it := range g.Items {
+				fmt.Fprintf(w, "| %d | %s (%s, %s) `%s` | supported / stronger than the source / not supported / cannot tell |\n", j+1, it.Body, it.Weight, it.Status, it.ItemID)
+			}
+		} else {
+			fmt.Fprintln(w, "\n| # | item | weight | status | your judgement |")
+			fmt.Fprintln(w, "|---|---|---|---|---|")
+			for j, it := range g.Items {
+				fmt.Fprintf(w, "| %d | `%s` | %s | %s | supported / stronger than the source / not supported / cannot tell |\n", j+1, it.ItemID, it.Weight, it.Status)
+			}
 		}
 	}
 	if end < len(r.Groups) {

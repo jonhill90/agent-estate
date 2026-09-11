@@ -844,9 +844,11 @@ func usage() {
   estate provenance-review [--offset N] [--limit N] [--private] [--json]
                                         every live parameter next to the prompt it was
                                         judged from, grouped by source prompt, paged;
-                                        quotes text_clean only, withholds credential/
-                                        personal rows by id, and leaves the judgement
-                                        column to you (agent-estate#1394, #1395)
+                                        public render is ids and structure only (no
+                                        text), --private renders the text locally with a
+                                        do-not-quote advisory on credential-looking rows,
+                                        and the judgement column is left to you
+                                        (agent-estate#1394, #1395)
   estate candidates [-db path]          derive quarantined, cited CANDIDATE knowledge
                                          rows (status=candidate, kind=unclassified) from
                                          codex_provenance -- never promotes, never
@@ -2278,7 +2280,7 @@ func main() {
 		fl := flag.NewFlagSet("provenance-review", flag.ContinueOnError)
 		offset := fl.Int("offset", 0, "first source prompt to show (0-based, over the sorted groups)")
 		limit := fl.Int("limit", 100, "how many source prompts to show")
-		private := fl.Bool("private", false, "also print text_raw and withheld rows -- terminal only, never publish")
+		private := fl.Bool("private", false, "render rule text, text_clean and text_raw with do-not-quote advisories -- terminal only, never publish")
 		asJSON := fl.Bool("json", false, "emit the page as JSON instead of markdown")
 		if err := fl.Parse(os.Args[2:]); err != nil {
 			os.Exit(2)

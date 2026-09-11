@@ -133,9 +133,11 @@ distilled from it, each one verbatim from a corpus item, never composed;
 `estate corpus-audit [n]` reports the hard parameters least supported by
 Jon's own words; `estate provenance-review [--offset N] [--limit N] [--private] [--json]`
 renders every live parameter next to the prompt it was judged from, grouped
-by source prompt and paged, quoting `text_clean` only and withholding
-credential/personal rows by id — it presents evidence and leaves the
-supported-or-stronger judgement to the reader (agent-estate#1394, #1395);
+by source prompt and paged; the public render is ids and structure only (no
+rule or prompt text, so nothing to leak), `--private` renders the text for
+the operator locally with a do-not-quote advisory on rows that look like a
+credential — it presents evidence and leaves the supported-or-stronger
+judgement to the reader (agent-estate#1394, #1395);
 and `estate candidates [-db path]` derives quarantined,
 cited CANDIDATE rows from the corpus — `estate candidates memory` is the one
 sanctioned write path into the vault. `internal/vaultview`
