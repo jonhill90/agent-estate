@@ -14,7 +14,7 @@ func TestApplyFixesContractions(t *testing.T) {
 		{"Whats up", "What's up"}, // case-adapted
 		{"IVE told you", "I'VE told you"},
 	} {
-		got, changes := applyFixes(c.raw)
+		got, _, changes := applyFixes(c.raw)
 		if got != c.want {
 			t.Errorf("applyFixes(%q) = %q, want %q (changes: %v)", c.raw, got, c.want, changes)
 		}
@@ -32,153 +32,215 @@ func TestApplyFixesLeavesAmbiguousContractionsAlone(t *testing.T) {
 		"it is her wont to complain",
 		"there is a cant to the roof",
 	} {
-		got, changes := applyFixes(raw)
-		if got != raw || len(changes) != 0 {
-			t.Errorf("applyFixes(%q) changed an ambiguous word: got %q, changes %v", raw, got, changes)
+		got, edits, changes := applyFixes(raw)
+		if got != raw || len(changes) != 0 || len(edits) != 0 {
+			t.Errorf("applyFixes(%q) changed an ambiguous word: got %q, changes %v, edits %v", raw, got, changes, edits)
 		}
 	}
 }
 
 func TestApplyFixesTyposAndProductNames(t *testing.T) {
-	got, _ := applyFixes("this consistantly fails, seperate the descripton, and use telegram or github")
+	got, edits, _ := applyFixes("this consistantly fails, seperate the descripton, and use telegram or github")
 	want := "this consistently fails, separate the description, and use Telegram or GitHub"
 	if got != want {
 		t.Errorf("applyFixes() = %q, want %q", got, want)
+	}
+	if len(edits) != 5 {
+		t.Errorf("expected 5 edits (consistantly, seperate, descripton, telegram, github), got %d: %+v", len(edits), edits)
 	}
 }
 
 func TestApplyFixesNoMatchReturnsUnchanged(t *testing.T) {
 	raw := "ship the fix and merge the PR once CI is green"
-	got, changes := applyFixes(raw)
-	if got != raw || len(changes) != 0 {
-		t.Errorf("expected no change, got %q changes %v", got, changes)
+	got, edits, changes := applyFixes(raw)
+	if got != raw || len(changes) != 0 || len(edits) != 0 {
+		t.Errorf("expected no change, got %q changes %v edits %v", got, changes, edits)
 	}
 }
+
+// applyFixes's own TokenIndex bookkeeping must agree with tokenize(raw)'s
+// own indexing -- VerifyEdits trusts this correspondence completely and
+// never re-derives it by searching, so a drift here would be silent and
+// total.
+func TestApplyFixesTokenIndexMatchesTokenize(t *testing.T) {
+	raw := "run teh tests then deploy the app, and adn fix taht bug"
+	_, edits, _ := applyFixes(raw)
+	rawTokens := tokenize(raw)
+	if len(edits) != 3 {
+		t.Fatalf("expected 3 edits (teh, adn, taht), got %d: %+v", len(edits), edits)
+	}
+	for _, e := range edits {
+		if rawTokens[e.TokenIndex] != e.From {
+			t.Errorf("edit claims index %d is %q, but tokenize(raw)[%d] = %q", e.TokenIndex, e.From, e.TokenIndex, rawTokens[e.TokenIndex])
+		}
+	}
+}
+
+// --- The real corruption already found live in the corpus, and the three
+// hand-authored word-substitution shapes -- none of these are whitelisted,
+// so the generator would never emit an edit for them. The honest
+// reconstruction under the edit-list design is a generator that claims
+// ZERO edits explain the transformation: replay then expects clean to equal
+// raw, token for token, and any of these must fail that immediately. ---
 
 // MUTATION-CHECK: this is the exact shape of corruption found LIVE in the
 // corpus's own existing text_clean population (mp-c9a15849f62017a1: "ew. you
 // made it worse... review garbage" -> "...review something broken", "ew."
-// dropped, "garbage" softened). If VerifyMeaningPreserved would pass this,
-// it is not doing its job.
+// dropped, "garbage" softened). No edit explains this transformation --
+// nothing in the whitelist touches any of the changed words -- so a
+// generator claiming zero edits, replayed against this raw/clean pair, must
+// be refused.
 func TestVerifyCatchesTheRealCorruptionFoundInTheCorpus(t *testing.T) {
 	raw := "ew. you made it worse. Can you screen shot at look yourself willout asking me to review garbage"
 	corrupted := "That made it worse. Screenshot it and look at it yourself instead of asking me to review something broken."
-	v := VerifyMeaningPreserved(raw, corrupted)
+	v := VerifyEdits(raw, nil, corrupted)
 	if v.OK {
-		t.Fatalf("VerifyMeaningPreserved passed the exact real corruption found in the corpus -- it must not")
+		t.Fatalf("VerifyEdits passed the exact real corruption found in the corpus -- it must not")
 	}
 	t.Logf("correctly refused: %s", v.Reason)
 }
 
 func TestVerifyCatchesDroppedNegation(t *testing.T) {
-	v := VerifyMeaningPreserved("do not deploy this", "do deploy this")
+	v := VerifyEdits("do not deploy this", nil, "do deploy this")
 	if v.OK {
-		t.Fatal("a dropped negation must be refused")
+		t.Fatal("a dropped negation, claimed by zero edits, must be refused")
 	}
 }
 
 func TestVerifyCatchesWordSubstitution(t *testing.T) {
-	v := VerifyMeaningPreserved("delete the old branch", "remove the old branch")
+	v := VerifyEdits("delete the old branch", nil, "remove the old branch")
 	if v.OK {
-		t.Fatal("delete -> remove is a word substitution, not a spelling fix, and must be refused")
+		t.Fatal("delete -> remove is a word substitution, not a spelling fix, and claiming zero edits for it must be refused")
 	}
 }
 
-// PR #1405's own review found this: the fuzzy edit-distance fallback in
-// wordSurvives asked whether SOME word anywhere in the clean text sat
-// close enough to a given raw word, not whether it was a variant of THAT
-// specific word -- so two short, unrelated real words a couple of edits
-// apart passed as "the same word, spelling-corrected". "ship"/"skip" is
-// not an edge case: it is a genuine, meaning-INVERTING substitution that
-// the gate's own doc comment claims to catch ("a word... substituted for a
-// different one") and did not. Fails against the code this fix pass
-// starts from; must pass after it, and stay pinned so the gap cannot
-// silently reopen if the fuzzy fallback (or anything shaped like it) is
-// ever reintroduced.
-func TestVerifyCatchesShipSkipMeaningInversion(t *testing.T) {
-	for _, c := range []struct{ raw, clean, label string }{
-		{"ship the release tonight", "skip the release tonight", "ship/skip -- opposite instructions"},
-		{"that lets the process finish", "that lots the process finish", "lets/lots -- nonsense substitution"},
-		{"deploy from main", "deploy form main", "from/form"},
-		{"push the fix now", "push the fix new", "now/new"},
-		{"read the file", "reed the file", "read/reed"},
+// Round one's own finding (fuzzy edit-distance let a meaning-inverting
+// substitution through because two short, unrelated real words sat close in
+// edit distance). Reconstructed as a generator FALSELY CLAIMING the
+// substitution is a vetted edit -- none of these five pairs is in allFixes,
+// so the whitelist check must refuse every one regardless of what the
+// string itself shows.
+func TestVerifyRefusesUnvettedEditsShipSkipAndRoundOnesFour(t *testing.T) {
+	for _, c := range []struct{ raw, clean, from, to, label string }{
+		{"ship the release tonight", "skip the release tonight", "ship", "skip", "ship/skip -- opposite instructions"},
+		{"that lets the process finish", "that lots the process finish", "lets", "lots", "lets/lots -- nonsense substitution"},
+		{"deploy from main", "deploy form main", "from", "form", "from/form"},
+		{"push the fix now", "push the fix new", "now", "new", "now/new"},
+		{"read the file", "reed the file", "read", "reed", "read/reed"},
 	} {
-		v := VerifyMeaningPreserved(c.raw, c.clean)
+		rawTokens := tokenize(c.raw)
+		idx := -1
+		for i, tok := range rawTokens {
+			if tok == c.from {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			t.Fatalf("%s: %q not found in tokenize(%q)", c.label, c.from, c.raw)
+		}
+		v := VerifyEdits(c.raw, []Edit{{TokenIndex: idx, From: c.from, To: c.to}}, c.clean)
 		if v.OK {
-			t.Fatalf("%s: VerifyMeaningPreserved(%q, %q) returned OK -- a real word substituted for a different, unrelated real word must be refused", c.label, c.raw, c.clean)
+			t.Fatalf("%s: VerifyEdits claimed %q->%q as an edit and it was accepted -- neither is a whitelisted allFixes entry", c.label, c.from, c.to)
 		}
 		t.Logf("%s: correctly refused: %s", c.label, v.Reason)
 	}
 }
 
-// Round two's own finding (Fable, REQUEST-CHANGES 5663876e): round one's fix
-// anchored to the vetted replacement WORD, not to its POSITION -- it asked
-// whether the `to` tokens were present anywhere in the clean token SET.
-// When a typo's vetted replacement is a common function word that already
-// appears elsewhere in the sentence (the, and, that -- most sentences),
-// that unrelated occurrence "vouches" for a substitution it had nothing to
-// do with, and the real, wrong substitution passes. All four reproduce
-// against 5663876e and must be refused here.
-func TestVerifyAnchorsToPositionNotJustToTheVettedWord(t *testing.T) {
-	for _, c := range []struct{ raw, clean, label string }{
-		{"run teh tests then deploy the app", "run all tests then deploy the app", "teh->all, vouched for by the unrelated \"the\" in \"the app\""},
-		{"fix teh bug in the module", "fix bug in the module", "teh dropped outright, \"the\" already present"},
-		{"stop adn revert, and report", "stop now revert, and report", "adn->now, vouched for by nothing -- no \"and\"/\"now\" elsewhere, but still a real word swap"},
-		{"i think taht is wrong, that one", "i think this is wrong, that one", "taht->this, vouched for by the unrelated \"that\" later in the sentence"},
+// Round two's and round three's own findings, reconstructed under the
+// edit-list design as what they actually were: a generator correctly
+// RECORDING a genuine, vetted edit (teh->the, adn->and, taht->that -- all
+// real allFixes entries), but the resulting clean STRING not actually
+// holding that replacement at the position the edit claims -- exactly the
+// shape that let a decoy elsewhere (a "the" that happened to already be in
+// "the app", a stopword-reachable coincidental "and") vouch for a
+// substitution it had nothing to do with, in every prior round's
+// search-based check. Replay has no search to fool: either clean holds the
+// recorded replacement at the recorded position, or it is refused, and
+// whatever ELSE clean contains is irrelevant to that comparison.
+func TestVerifyEditsRefusesWhenCleanDoesNotActuallyHoldTheRecordedReplacement(t *testing.T) {
+	for _, c := range []struct {
+		raw, clean, from, to, label string
+	}{
+		{"run teh tests then deploy the app", "run all tests then deploy the app", "teh", "the",
+			"teh recorded as ->the, but clean has ->all at that position (round two's exact bug)"},
+		{"fix teh bug in the module", "fix bug in the module", "teh", "the",
+			"teh recorded as ->the, but clean simply dropped it -- an unrelated \"the\" already present must not vouch"},
+		{"stop adn revert, and report", "stop now revert, and report", "adn", "and",
+			"adn recorded as ->and, but clean has ->now at that position"},
+		{"i think taht is wrong, that one", "i think this is wrong, that one", "taht", "that",
+			"taht recorded as ->that (its real vetted form), but clean has ->this -- an unrelated \"that\" later must not vouch"},
+		{"confirm adn it is done", "confirm it is and done", "adn", "and",
+			"round three's own finding: adn recorded as ->and at its real position, but clean dropped it and a stopword-reachable \"and\" later must not vouch"},
 	} {
-		v := VerifyMeaningPreserved(c.raw, c.clean)
+		rawTokens := tokenize(c.raw)
+		idx := -1
+		for i, tok := range rawTokens {
+			if tok == c.from {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			t.Fatalf("%s: %q not found in tokenize(%q)", c.label, c.from, c.raw)
+		}
+		v := VerifyEdits(c.raw, []Edit{{TokenIndex: idx, From: c.from, To: c.to}}, c.clean)
 		if v.OK {
-			t.Fatalf("%s: VerifyMeaningPreserved(%q, %q) returned OK -- a set-membership check would vouch for this on an unrelated occurrence of the vetted word; a positional one must not", c.label, c.raw, c.clean)
+			t.Fatalf("%s: VerifyEdits(%q, edit %s->%s @%d, %q) returned OK -- clean does not actually hold the recorded replacement at the recorded position", c.label, c.raw, c.from, c.to, idx, c.clean)
 		}
 		t.Logf("%s: correctly refused: %s", c.label, v.Reason)
 	}
 }
 
-// Bonus closure, not required: PR #1405's second review named "added words
-// are unchecked" as a non-blocking limit to write down. The positional walk
-// closes most of it as a direct consequence (a leading or interior addition
-// displaces every raw word after it), and the trailing case specifically
-// (nothing left to misalign against) is closed by the explicit
-// leftover-content check at the end of alignContentWords.
+// Bonus closure, carried from round three: an added content word with no
+// edit behind it. All three shapes -- leading, interior, trailing -- are
+// now caught by the exact same mechanism (a token-count mismatch in the
+// final replay comparison), not three separate cases: the edit list
+// claims zero edits, so replay expects clean's tokens to equal raw's
+// tokens exactly, and any extra token anywhere fails that immediately,
+// regardless of where it was inserted. Simpler than round three's own
+// walk-plus-leftover-check split, and covers the same ground.
 func TestVerifyCatchesAddedContentWords(t *testing.T) {
 	for _, c := range []struct{ raw, clean, label string }{
 		{"commit before continuing", "always commit before continuing", "leading addition"},
 		{"commit before continuing", "commit always before continuing", "interior addition"},
 		{"commit before continuing", "commit before continuing always", "trailing addition"},
 	} {
-		v := VerifyMeaningPreserved(c.raw, c.clean)
+		v := VerifyEdits(c.raw, nil, c.clean)
 		if v.OK {
-			t.Fatalf("%s: VerifyMeaningPreserved(%q, %q) returned OK -- an added content word with no vetted correction behind it must be refused", c.label, c.raw, c.clean)
+			t.Fatalf("%s: VerifyEdits(%q, nil, %q) returned OK -- an added content word with no edit behind it must be refused", c.label, c.raw, c.clean)
 		}
 		t.Logf("%s: correctly refused: %s", c.label, v.Reason)
 	}
 }
 
-// Regression: running this tool against the live corpus (read-only) found
-// that the FIRST cut of wordSurvives refused every one of its own
-// dictionary's short transposition fixes -- "teh"->"the", "adn"->"and",
-// "htat"/"taht"->"that" -- because len(w)/4 floors to 0 for any word under
-// 4 letters, and a transposition scores Levenshtein distance 2, not 1. All
-// 12 of the live corpus's refusals that turn on this were false refusals of
-// exactly this shape before the fix; this pins the fix, not the bug.
-func TestVerifyAcceptsShortTranspositionTypos(t *testing.T) {
-	for _, c := range []struct{ raw, clean string }{
-		{"read teh corpus", "read the corpus"},
-		{"typescript adn blank", "typescript and blank"},
-		{"confirmed htat we", "confirmed that we"},
-		{"after taht is confirmed", "after that is confirmed"},
+// The real generator path: applyFixes's own edits, replayed by VerifyEdits,
+// must pass for every whitelisted fix it actually makes -- including the
+// short transpositions (teh, adn, htat, taht) that broke round one's first
+// cut of the fuzzy-distance check for an unrelated reason (a distance
+// threshold that floored to 0 for short words). That specific bug cannot
+// recur here -- there is no distance threshold left in this design at all.
+func TestVerifyAcceptsRealGeneratorEdits(t *testing.T) {
+	for _, raw := range []string{
+		"read teh corpus",
+		"typescript adn blank",
+		"confirmed htat we",
+		"after taht is confirmed",
+		"this consistantly fails and the descripton is wrong",
+		"use telegram or github for updates",
 	} {
-		v := VerifyMeaningPreserved(c.raw, c.clean)
+		clean, edits, _ := applyFixes(raw)
+		v := VerifyEdits(raw, edits, clean)
 		if !v.OK {
-			t.Errorf("VerifyMeaningPreserved(%q, %q) refused: %s -- a real, whitelisted transposition fix must pass", c.raw, c.clean, v.Reason)
+			t.Errorf("VerifyEdits(%q, applyFixes's own edits, %q) refused: %s -- a real generator edit must always replay clean", raw, clean, v.Reason)
 		}
 	}
 }
 
 func TestVerifyPassesRealSpellingFixes(t *testing.T) {
 	raw := "this consistantly fails and the descripton is wrong"
-	clean, _ := applyFixes(raw)
-	v := VerifyMeaningPreserved(raw, clean)
+	clean, edits, _ := applyFixes(raw)
+	v := VerifyEdits(raw, edits, clean)
 	if !v.OK {
 		t.Fatalf("a real, whitelisted spelling fix must pass verification, got refused: %s", v.Reason)
 	}
@@ -190,19 +252,58 @@ func TestVerifyPreservesProfanityAndBluntness(t *testing.T) {
 	// must carry profanity/bluntness unchanged -- this is a quoting-time
 	// filter, never a cleaning-time one (see the PR body for the argument).
 	raw := "this is fucking broken and you made it worse, fix it now"
-	clean, _ := applyFixes(raw) // no whitelisted word appears -- identity
-	if clean != raw {
-		t.Fatalf("no fix should have applied to this sentence, got %q", clean)
+	clean, edits, _ := applyFixes(raw) // no whitelisted word appears -- identity, zero edits
+	if clean != raw || len(edits) != 0 {
+		t.Fatalf("no fix should have applied to this sentence, got %q edits %v", clean, edits)
 	}
-	v := VerifyMeaningPreserved(raw, clean)
+	v := VerifyEdits(raw, edits, clean)
 	if !v.OK {
 		t.Fatalf("identity clean of a profane sentence must pass: %s", v.Reason)
 	}
-	// A hypothetical censored version must be REFUSED.
+	// A hypothetical censored version, with no edit behind it, must be REFUSED.
 	censored := "this is [redacted] broken and you made it worse, fix it now"
-	v2 := VerifyMeaningPreserved(raw, censored)
+	v2 := VerifyEdits(raw, nil, censored)
 	if v2.OK {
-		t.Fatal("censoring profanity is a meaning/tone change and must be refused, not silently accepted")
+		t.Fatal("censoring profanity is a meaning/tone change with no edit behind it and must be refused, not silently accepted")
+	}
+}
+
+// --- Edit-list integrity checks, new to round four: these have no round
+// one/two/three analogue because there was no edit list before now, but
+// they are exactly the shape a hand-authored or future-buggy edit list
+// could take, and the whitelist/replay split above must catch each. ---
+
+func TestVerifyEditsRefusesOutOfRangeTokenIndex(t *testing.T) {
+	v := VerifyEdits("fix teh bug", []Edit{{TokenIndex: 99, From: "teh", To: "the"}}, "fix the bug")
+	if v.OK {
+		t.Fatal("an edit naming a token index past the end of raw must be refused")
+	}
+}
+
+func TestVerifyEditsRefusesTwoEditsClaimingTheSameIndex(t *testing.T) {
+	v := VerifyEdits("teh teh", []Edit{
+		{TokenIndex: 0, From: "teh", To: "the"},
+		{TokenIndex: 0, From: "teh", To: "the"},
+	}, "the the")
+	if v.OK {
+		t.Fatal("two edits claiming the same token index must be refused, even if individually valid")
+	}
+}
+
+func TestVerifyEditsRefusesAnEditThatMisnamesTheRawToken(t *testing.T) {
+	// The edit claims index 1 is "teh", but raw's token 1 is actually "adn".
+	v := VerifyEdits("fix adn bug", []Edit{{TokenIndex: 1, From: "teh", To: "the"}}, "fix the bug")
+	if v.OK {
+		t.Fatal("an edit that misnames the raw token at its own claimed index must be refused")
+	}
+}
+
+func TestVerifyEditsRefusesAnEditWhoseToDoesNotMatchTheWhitelist(t *testing.T) {
+	// "teh" is real and at the right position, but the recorded replacement
+	// is not allFixes's own vetted form for it.
+	v := VerifyEdits("fix teh bug", []Edit{{TokenIndex: 1, From: "teh", To: "there"}}, "fix there bug")
+	if v.OK {
+		t.Fatal("an edit whose recorded replacement is not the whitelist's own vetted text for that word must be refused")
 	}
 }
 
@@ -239,8 +340,9 @@ func TestProposeCleanIsIdempotent(t *testing.T) {
 // knownVariant is built from allFixes directly (see its own doc comment):
 // every from/to pair the generator can produce must be recognised as a
 // legitimate variant, and nothing else should be -- this is the load-bearing
-// property the old, removed levenshtein-based fuzzy fallback could not
-// guarantee (see TestVerifyCatchesShipSkipMeaningInversion).
+// property the whitelist-membership check in VerifyEdits depends on
+// completely, now that there is no fuzzy fallback of any kind left to fall
+// back to.
 func TestKnownVariantCoversEveryWhitelistEntryAndNothingElse(t *testing.T) {
 	for _, s := range allFixes {
 		variant, ok := knownVariant[s.from]

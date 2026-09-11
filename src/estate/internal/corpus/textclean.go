@@ -23,7 +23,67 @@ package corpus
 // against already happened once, unaudited, in the live corpus -- and it is
 // why this generator is a closed whitelist of single-word substitutions,
 // never a rewriter, and why every proposed write still passes an
-// independent meaning-preservation check before it is trusted.
+// independent verification gate before it is trusted.
+//
+// # Round four: verify-after-generate replaced with verify-the-generator's-own-record
+//
+// Three prior rounds (agent-estate#1405) all failed the same way, one level
+// further in each time:
+//
+//   - round one: a fuzzy edit-distance fallback asked whether SOME word in
+//     clean sat close to a raw word. "ship"->"skip" passed -- geometrically
+//     identical to "teh"->"the" to a bare distance threshold.
+//   - round two: anchored to the SPECIFIC vetted replacement WORD instead of
+//     a distance band, but still asked whether that word's tokens were
+//     present anywhere in clean's token SET. "run teh tests then deploy the
+//     app" -> "run all tests then deploy the app" passed: "the" is vetted
+//     for "teh", "the" appears (unrelated) in "the app", so it vouched for a
+//     substitution it had nothing to do with.
+//   - round three: replaced the set with a positional walk -- a real
+//     improvement, but the walk still SEARCHES clean (skipping stopwords
+//     looking for a match), and a decoy reachable through nothing but a
+//     stopword hop still vouches for a silently dropped typo:
+//     VerifyMeaningPreserved("confirm adn it is done", "confirm it is and
+//     done") returned OK=true, because "and" a few stopwords later "counts"
+//     even though the real "adn" simply vanished.
+//
+// Every round is the same shape: "does something acceptable exist in clean"
+// answered by searching clean, whether the search is a distance band, a set
+// membership test, or a bounded stopword-hop. Re-deriving an alignment
+// between two FINISHED strings is strictly harder than the job requires --
+// the generator already knows, at the moment it substitutes a token, exactly
+// which token it replaced, at which position, with what. Throwing that away
+// and re-inferring it later is where all three rounds' adversarial surface
+// lives.
+//
+// This round has the generator (applyFixes) EMIT that record -- an Edit per
+// substitution, at generation time, never inferred afterward -- and the
+// verifier (VerifyEdits) checks two TOTAL properties, neither a search:
+//
+//  1. Every recorded edit is a genuine, currently-whitelisted allFixes entry
+//     (knownVariant, built from allFixes directly, same as before). An edit
+//     naming anything else is refused outright, whatever it claims to
+//     explain -- the whitelist stays the sole authority for what counts as a
+//     legitimate substitution.
+//  2. Replaying the edits against raw's own tokenization, at the exact
+//     positions they name, must reproduce clean's own tokenization EXACTLY.
+//     No alignment is inferred and no clean-side search happens at all --
+//     position comes entirely from the generator's own record. A raw token
+//     the edit list doesn't name must survive verbatim, at its own position;
+//     a token it does name must have been replaced with exactly the
+//     recorded, vetted text. Nothing "vouches" for anything: either the
+//     string clean actually holds matches what the edits say happened, or it
+//     is refused, full stop.
+//
+// This retires negation-count and length-ratio as SEPARATE checks (both
+// were true backstops against the old search-based gate, which could be
+// fooled into ignoring a dropped or added token entirely). Exact positional
+// replay strictly subsumes both: a dropped "not" is a raw token with no
+// corresponding edit that fails to survive verbatim, which replay already
+// catches; there is no way for token counts to drift, silently, without the
+// join-by-space comparison failing. Keeping them alongside would be
+// unreachable dead weight, not defence in depth -- see VerifyEdits's own
+// doc comment for the argument this file settled before writing the check.
 
 import (
 	"fmt"
@@ -182,72 +242,59 @@ func matchCase(src, replacement string) string {
 	return replacement
 }
 
-// applyFixes runs every whitelisted substitution once, whole-word only,
-// case-adapted. Returns the result and exactly which fixes fired (empty if
-// none did -- the caller decides what an unchanged result means).
-func applyFixes(raw string) (string, []string) {
-	byFrom := map[string]substitution{}
-	for _, s := range allFixes {
-		byFrom[s.from] = s
-	}
-	var applied []string
-	out := wordRE.ReplaceAllStringFunc(raw, func(tok string) string {
-		lower := strings.ToLower(tok)
-		if s, ok := byFrom[lower]; ok {
-			applied = append(applied, fmt.Sprintf("%s -> %s (%s)", tok, matchCase(tok, s.to), s.reason))
-			return matchCase(tok, s.to)
-		}
-		return tok
-	})
-	sort.Strings(applied)
-	return out, applied
-}
-
-// stopwords are excluded from the content-word preservation check -- function
-// words whose presence/absence a spelling-and-grammar pass may legitimately
-// shift (an inserted "a", a dropped duplicate "the"), as opposed to content
-// words, which must survive intact or the change is not a spelling fix.
-var stopwords = map[string]bool{}
-
-func init() {
-	for _, w := range strings.Fields(
-		"a an the and or but if then so to of in on at for with as is are was were " +
-			"be been being do does did have has had i you he she it we they me him her " +
-			"us them my your his its our their this that these those not no",
-	) {
-		stopwords[w] = true
-	}
-}
-
-var negationWords = map[string]bool{
-	"not": true, "no": true, "never": true, "none": true, "nothing": true,
-	"cannot": true, "cant": true, "wont": true, "dont": true, "doesnt": true,
-	"didnt": true, "isnt": true, "wasnt": true, "werent": true, "wouldnt": true,
-	"shouldnt": true, "couldnt": true, "hasnt": true, "havent": true, "nobody": true,
-	"neither": true, "nor": true, "n't": true,
-}
-
 func tokenize(s string) []string {
 	return wordRE.FindAllString(strings.ToLower(s), -1)
 }
 
-func negationCount(s string) int {
-	n := 0
-	for _, w := range tokenize(s) {
-		if negationWords[w] || strings.HasSuffix(w, "n't") {
-			n++
-		}
+// Edit is one substitution the generator actually applied, recorded at the
+// moment it happened -- never inferred afterward by comparing two finished
+// strings. TokenIndex is the position in tokenize(raw) (the same tokeniser
+// VerifyEdits uses) that this edit replaces; wordRE.FindAllString and
+// wordRE.ReplaceAllStringFunc walk a string's matches in the same order, and
+// lower-casing a string before matching (what tokenize does) never changes
+// where [A-Za-z']+ matches -- only the case of what it captures -- so a
+// counter incremented once per match inside applyFixes's own substitution
+// loop lands on exactly the index tokenize(raw) would assign that word.
+type Edit struct {
+	TokenIndex int    // position in tokenize(raw)
+	From       string // the raw token, lowercased -- must equal an allFixes.from
+	To         string // the case-adapted text actually written into clean at this position
+}
+
+// applyFixes runs every whitelisted substitution once, whole-word only,
+// case-adapted, and records each one as an Edit at generation time. Returns
+// the resulting string, the edit list VerifyEdits checks, and a
+// human-readable description per fix (for the report only -- verification
+// never reads this).
+func applyFixes(raw string) (clean string, edits []Edit, applied []string) {
+	byFrom := map[string]substitution{}
+	for _, s := range allFixes {
+		byFrom[s.from] = s
 	}
-	return n
+	tokenIndex := -1
+	out := wordRE.ReplaceAllStringFunc(raw, func(tok string) string {
+		tokenIndex++
+		lower := strings.ToLower(tok)
+		if s, ok := byFrom[lower]; ok {
+			replacement := matchCase(tok, s.to)
+			edits = append(edits, Edit{TokenIndex: tokenIndex, From: lower, To: replacement})
+			applied = append(applied, fmt.Sprintf("%s -> %s (%s)", tok, replacement, s.reason))
+			return replacement
+		}
+		return tok
+	})
+	sort.Strings(applied)
+	return out, edits, applied
 }
 
 // knownVariant maps a raw word this file KNOWS how to correct (the `from`
 // side of an entry in `allFixes`, lowercase) to its own vetted replacement,
-// tokenized. Built from `allFixes` directly -- the SAME table
-// `applyFixes` reads -- so this can never drift out of sync with the
-// generator: widening the whitelist (adding an entry to `contractionFixes`/
-// `typoFixes`/`productNameFixes`) widens what the verifier recognises as a
-// legitimate word-level variant in the exact same commit, automatically.
+// tokenized. Built from `allFixes` directly -- the SAME table `applyFixes`
+// reads -- so this can never drift out of sync with the generator: widening
+// the whitelist widens what VerifyEdits recognises as a legitimate edit in
+// the exact same commit, automatically. This is the sole authority for
+// whether a recorded edit was actually vetted; nothing else may substitute
+// for it.
 var knownVariant = func() map[string][]string {
 	m := map[string][]string{}
 	for _, s := range allFixes {
@@ -256,156 +303,105 @@ var knownVariant = func() map[string][]string {
 	return m
 }()
 
-// alignContentWords is PR #1405's third pass at this check, after two
-// rounds both failed on the same underlying shape: set membership standing
-// in for position.
-//
-//  1. round one: `wordSurvives` asked whether SOME word anywhere in clean
-//     sat within a generic edit-distance band of w. "ship"->"skip" passed --
-//     geometrically indistinguishable from "teh"->"the" to a bare distance
-//     threshold.
-//  2. round two: anchored to the SPECIFIC vetted word (knownVariant) instead
-//     of a distance band, but still asked whether that word's tokens were
-//     present anywhere in the clean token SET. "run teh tests then deploy
-//     the app" -> "run all tests then deploy the app" passed: "the" is
-//     vetted for "teh", "the" appears in "the app", so it vouched for a
-//     substitution it had nothing to do with. Any typo whose vetted
-//     replacement is a common function word could be swapped for anything
-//     and still "survive".
-//
-// The pattern across both failures is the same: neither check has any
-// notion of WHERE in the sentence a word is allowed to have changed, only
-// whether an acceptable-looking token exists somewhere. A generic distance
-// threshold and a set-membership lookup are both instances of "search the
-// whole clean text for something that looks right" -- exactly the shape
-// that keeps failing, regardless of what "looks right" means.
-//
-// The generator (applyFixes) does not have this problem: it walks raw
-// left to right and knows, for each token, whether it changed and to
-// what. Re-deriving that from two finished strings is solving a strictly
-// harder problem than the generator already solved, and throwing away
-// information it had. This function does not take an edit list from the
-// generator (that would mean changing VerifyMeaningPreserved's signature,
-// and every existing and prior-round test that hand-constructs a (raw,
-// clean) pair to attack this gate), but it stops SEARCHING the clean text
-// and starts WALKING it instead: a single left-to-right pass over raw's
-// content words, tracking a cursor into clean's own tokens that only ever
-// moves forward. A raw word is accepted only if, starting from where the
-// walk currently sits, clean holds it verbatim OR holds its one specific
-// vetted replacement (knownVariant), immediately (skipping only stopwords
-// clean may have legitimately inserted first). A word that "survives"
-// later in the sentence, or that only the WRONG position could explain,
-// no longer counts -- there is no set left to search.
-//
-// This closes the class, not the instance: multiset counting (count(to) >=
-// count(from) + pre-existing count(to)) was the other fix on the table and
-// is also defeated by a decoy -- pad the sentence with one extra
-// coincidental "the" and a count-only check is satisfied again. Position is
-// the only thing neither a distance band nor a count can fake.
-//
-// As a consequence, not a separate feature: this also closes most of what
-// PR #1405's second review named as a non-blocking, unchecked limit -- an
-// ADDED content word ("commit before continuing" -> "always commit before
-// continuing") that the old set-membership check never noticed at all. A
-// leading or interior addition breaks the walk the same way a substitution
-// does, because everything after it stops finding its match at the
-// position the walk expects. A purely TRAILING addition (after every raw
-// content word has already matched) is not caught by the walk itself --
-// there is nothing left to misalign -- so it is checked separately, once,
-// after the walk: any non-stopword token left over in clean past where the
-// last match landed is unaccounted-for content, and refuses the same way a
-// missing word does. Between the two, no content word may be added,
-// dropped, or moved without being named -- applyFixes itself never adds a
-// content word at all (a substitution's `to` is a vetted replacement, never
-// an insertion), so this costs nothing against the real generator; it only
-// closes a gap a hand-constructed or future generator could otherwise slip
-// through.
-func alignContentWords(rawTokens, cleanTokens []string) (missing []string) {
-	j := 0
-	for _, w := range rawTokens {
-		if stopwords[w] {
-			continue
-		}
-		matched := false
-		for j < len(cleanTokens) {
-			if cleanTokens[j] == w {
-				j++
-				matched = true
-				break
-			}
-			if variant, ok := knownVariant[w]; ok && j+len(variant) <= len(cleanTokens) {
-				same := true
-				for k, part := range variant {
-					if cleanTokens[j+k] != part {
-						same = false
-						break
-					}
-				}
-				if same {
-					j += len(variant)
-					matched = true
-					break
-				}
-			}
-			if !stopwords[cleanTokens[j]] {
-				break
-			}
-			j++ // a stopword clean may have legitimately inserted; keep looking
-		}
-		if !matched {
-			missing = append(missing, w)
-		}
-	}
-	for _, extra := range cleanTokens[j:] {
-		if !stopwords[extra] {
-			missing = append(missing, fmt.Sprintf("(added) %s", extra))
-		}
-	}
-	return missing
-}
-
-// VerifyResult is the outcome of checking one proposed (raw, clean) pair.
+// VerifyResult is the outcome of checking one proposed (raw, edits, clean)
+// triple.
 type VerifyResult struct {
 	OK     bool
 	Reason string // set when OK is false
 }
 
-// VerifyMeaningPreserved is the independent gate every proposed clean must
-// pass before it is ever written, regardless of how it was generated --
-// defence in depth, not a restatement of what applyFixes already does by
-// construction. Three checks, any one failing refuses the whole row:
+// VerifyEdits is the independent gate every proposed clean must pass before
+// it is ever written -- round four of agent-estate#1405, after three rounds
+// of a search-based check (fuzzy distance, then set membership, then a
+// positional walk that could still be tricked by a stopword-reachable
+// decoy) each failed the same way one level further in. See this file's own
+// header comment for the three-round history and why the design changed
+// rather than being patched a fourth time.
 //
-//  1. Every content word (non-stopword) in raw survives in clean, at the
-//     position the walk has reached, verbatim or as the SPECIFIC, vetted
-//     replacement this file's own whitelist names for it -- never a word
-//     that merely appears somewhere else in the sentence (see
-//     alignContentWords's own doc comment for why two prior shapes of this
-//     check both failed exactly that way, and why a positional walk closes
-//     the class rather than the instance). This also catches the
-//     "garbage" -> "something broken" shape found live in this corpus's
-//     own existing text_clean population (see this file's own header
-//     comment) -- a word dropped or replaced with something not in the
-//     whitelist is refused either way.
-//  2. Negation count is unchanged -- a dropped or added "not"/"never"/-n't
-//     inverts meaning outright and must never pass silently.
-//  3. Length stays within a generous band (0.6x-1.6x by character count) --
-//     a cheap backstop against wholesale drops or additions the first two
-//     checks were not built to catch directly.
-func VerifyMeaningPreserved(raw, clean string) VerifyResult {
+// Two checks, both TOTAL -- no distance, no set, no bounded search, no
+// "close enough" -- either refuses the whole row:
+//
+//  1. Every edit must be a genuine, currently-whitelisted allFixes entry:
+//     the raw token it names must match what's actually at that position in
+//     raw, and its recorded replacement must equal knownVariant's own
+//     vetted text for that word, exactly. An edit naming anything else --
+//     an unvetted substitution, or a claim about a token that isn't
+//     actually there -- is refused outright, whatever the rest of the pair
+//     looks like. This is what keeps the whitelist the sole authority: an
+//     edit list is not a side channel around it.
+//  2. Replaying every edit against raw's own tokenization, at the exact
+//     position it names, must reproduce clean's own tokenization EXACTLY --
+//     token for token, in order. A raw token no edit names must survive
+//     verbatim, at its own position; a named token must have become exactly
+//     its recorded replacement. There is no scan of clean for something
+//     acceptable: position comes entirely from the edit list the generator
+//     already recorded, so nothing elsewhere in the sentence -- a
+//     coincidental decoy, a stopword run, an unrelated real word -- can
+//     vouch for a mismatch at the position that actually matters. Either
+//     clean holds what the edits say happened, or it does not.
+//
+// Does the verifier still earn its place, now that the generator hands it
+// the very edits it made? Yes, and it is not a tautology, as long as (and
+// this file keeps it true) applyFixes's own STRING construction and this
+// function's TOKEN-level replay are two different computations over two
+// different representations of the same event, not one function calling
+// itself twice: applyFixes builds `clean` by byte-level regex substitution
+// over the raw string; VerifyEdits independently re-tokenizes the resulting
+// `clean` string and compares it, token by token, against what the edit
+// list alone predicts. A bug in how applyFixes joins a replacement back
+// into the string -- wrong case-adaptation applied at the string-join step
+// but not reflected in the Edit it recorded, an off-by-one in which
+// occurrence a regex match touched, a stray extra byte -- changes the
+// STRING without changing the RECORD, and replay catches exactly that
+// divergence. What it does NOT catch, and cannot: a generator that
+// correctly records and correctly applies an edit that was never the right
+// decision to make in the first place (check 1 bounds that instead, via the
+// whitelist) -- and a hand-authored (raw, edits, clean) triple that lies
+// about all three consistently, which no verifier operating on the
+// generator's own output can ever detect, because at that point it is not
+// checking generated output at all. Both are named, not hidden: this gate
+// verifies EXECUTION against RECORD and RECORD against WHITELIST; it was
+// never, in any of its four versions, capable of verifying DECISION against
+// intent that lives only in Jon's head.
+//
+// Retired from this check, argued in this file's own header comment: the
+// old negation-count and length-ratio backstops. Exact positional replay
+// subsumes both -- there is no way for a token to vanish, invert, or appear
+// from nowhere without the token-sequence comparison failing first.
+func VerifyEdits(raw string, edits []Edit, clean string) VerifyResult {
 	rawTokens := tokenize(raw)
-	cleanTokens := tokenize(clean)
-	missing := alignContentWords(rawTokens, cleanTokens)
-	if len(missing) > 0 {
-		return VerifyResult{false, fmt.Sprintf("content word(s) not found in clean text: %s", strings.Join(missing, ", "))}
-	}
-	if rn, cn := negationCount(raw), negationCount(clean); rn != cn {
-		return VerifyResult{false, fmt.Sprintf("negation count changed: raw has %d, clean has %d", rn, cn)}
-	}
-	if len(raw) > 0 {
-		ratio := float64(len(clean)) / float64(len(raw))
-		if ratio < 0.6 || ratio > 1.6 {
-			return VerifyResult{false, fmt.Sprintf("length ratio %.2f outside 0.6-1.6 band (raw %d chars, clean %d chars)", ratio, len(raw), len(clean))}
+	byIndex := make(map[int]Edit, len(edits))
+	for _, e := range edits {
+		if e.TokenIndex < 0 || e.TokenIndex >= len(rawTokens) {
+			return VerifyResult{false, fmt.Sprintf("edit names token index %d, but raw has %d token(s)", e.TokenIndex, len(rawTokens))}
 		}
+		if prior, dup := byIndex[e.TokenIndex]; dup {
+			return VerifyResult{false, fmt.Sprintf("two edits claim token index %d (%q and %q)", e.TokenIndex, prior.From, e.From)}
+		}
+		if rawTokens[e.TokenIndex] != e.From {
+			return VerifyResult{false, fmt.Sprintf("edit at index %d claims raw token %q, but raw actually has %q there", e.TokenIndex, e.From, rawTokens[e.TokenIndex])}
+		}
+		variant, ok := knownVariant[e.From]
+		if !ok {
+			return VerifyResult{false, fmt.Sprintf("edit %q -> %q is not a whitelisted allFixes entry", e.From, e.To)}
+		}
+		if got := tokenize(e.To); strings.Join(got, " ") != strings.Join(variant, " ") {
+			return VerifyResult{false, fmt.Sprintf("edit %q -> %q does not match allFixes's own vetted replacement %q", e.From, e.To, strings.Join(variant, " "))}
+		}
+		byIndex[e.TokenIndex] = e
+	}
+
+	want := make([]string, 0, len(rawTokens))
+	for i, rt := range rawTokens {
+		if e, ok := byIndex[i]; ok {
+			want = append(want, tokenize(e.To)...)
+		} else {
+			want = append(want, rt)
+		}
+	}
+	got := tokenize(clean)
+	if strings.Join(want, " ") != strings.Join(got, " ") {
+		return VerifyResult{false, fmt.Sprintf("replaying %d edit(s) against raw yields %q, but clean is %q -- clean does not match what the recorded edits explain", len(edits), strings.Join(want, " "), strings.Join(got, " "))}
 	}
 	return VerifyResult{true, ""}
 }
@@ -431,20 +427,21 @@ type CleanProposal struct {
 
 // ProposeClean generates and verifies a candidate text_clean for one raw
 // prompt. It never returns an unverified write: ActionClean is only
-// returned once VerifyMeaningPreserved has passed against the specific
-// (raw, clean) pair actually proposed. ActionIdentity is the "nothing in
-// the whitelist matched" case -- raw is copied verbatim (a no-op change
-// cannot fail meaning-preservation by construction, and CLAUDE.local.md's
-// own rule ("if text_clean is null for a prompt worth quoting, clean it and
-// write it back first") reads as "make it quotable", not "guarantee it is
-// typo-free" -- a prompt with no whitelisted-typo match is not thereby
-// unclean, it is simply outside what this tool can improve).
+// returned once VerifyEdits has passed against the specific edit list
+// applyFixes actually produced for this (raw, clean) pair. ActionIdentity is
+// the "nothing in the whitelist matched" case -- raw is copied verbatim (a
+// no-op change cannot fail verification by construction: zero edits trivially
+// replay to raw itself, and CLAUDE.local.md's own rule ("if text_clean is
+// null for a prompt worth quoting, clean it and write it back first") reads
+// as "make it quotable", not "guarantee it is typo-free" -- a prompt with no
+// whitelisted-typo match is not thereby unclean, it is simply outside what
+// this tool can improve).
 func ProposeClean(promptID, raw string) CleanProposal {
-	clean, changes := applyFixes(raw)
+	clean, edits, changes := applyFixes(raw)
 	if len(changes) == 0 {
 		return CleanProposal{PromptID: promptID, Raw: raw, Clean: raw, Action: ActionIdentity}
 	}
-	v := VerifyMeaningPreserved(raw, clean)
+	v := VerifyEdits(raw, edits, clean)
 	if !v.OK {
 		return CleanProposal{PromptID: promptID, Raw: raw, Action: ActionRefuse, Reason: v.Reason}
 	}
