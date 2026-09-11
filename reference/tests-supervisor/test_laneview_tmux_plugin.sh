@@ -8,9 +8,9 @@
 # server, never a bare `tmux kill-server` (agent-dotfiles#258).
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$HERE/../../scripts/supervisor/tmux-isolation.sh"
+source "$HERE/../../reference/scripts/supervisor/tmux-isolation.sh"
 
-if [ ! -d "$HERE/../../scripts/supervisor/laneview-plugin-tmux" ]; then
+if [ ! -d "$HERE/../../reference/scripts/supervisor/laneview-plugin-tmux" ]; then
   echo "laneview-plugin-tmux"
   echo "  SKIP no laneview-plugin-tmux -- viewer adapter not installed"
   exit 0
@@ -21,7 +21,7 @@ fi
 # whatever bind-key was called with, i.e. laneview.tmux's own resolved
 # path -- compares like with like instead of a "../.." string that never
 # appears in tmux's own state.
-PLUGIN_DIR="$(cd "$HERE/../../scripts/supervisor/laneview-plugin-tmux" && pwd)"
+PLUGIN_DIR="$(cd "$HERE/../../reference/scripts/supervisor/laneview-plugin-tmux" && pwd)"
 PLUGIN="$PLUGIN_DIR/laneview.tmux"
 POPUP="$PLUGIN_DIR/popup.sh"
 
@@ -88,10 +88,10 @@ fi
 #    dependency, and grepping markdown would fail on the very doc this
 #    property is described in.
 REPO_ROOT="$HERE/../.."
-hits=$(grep -rl 'laneview-plugin-tmux' "$REPO_ROOT/scripts" "$REPO_ROOT/tests" \
+hits=$(grep -rl 'laneview-plugin-tmux' "$REPO_ROOT/reference/scripts" "$REPO_ROOT/reference/tests-supervisor" \
     --include='*.sh' --include='*.tmux' --include='*.py' 2>/dev/null \
-  | grep -v '^'"$REPO_ROOT"'/scripts/supervisor/laneview-plugin-tmux/' \
-  | grep -v '^'"$REPO_ROOT"'/tests/supervisor/test_laneview_tmux_plugin.sh$')
+  | grep -v '^'"$REPO_ROOT"'/reference/scripts/supervisor/laneview-plugin-tmux/' \
+  | grep -v '^'"$REPO_ROOT"'/reference/tests-supervisor/test_laneview_tmux_plugin.sh$')
 if [ -z "$hits" ]; then
   ok "nothing outside laneview-plugin-tmux/ and this test depends on it in code"
 else

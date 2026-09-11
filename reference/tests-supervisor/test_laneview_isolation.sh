@@ -13,7 +13,7 @@
 # deleting the explanation.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SUPERVISOR="$HERE/../../scripts/supervisor"
+SUPERVISOR="$HERE/../../reference/scripts/supervisor"
 pass=0; fail=0
 ok()   { echo "  ok   $1"; pass=$((pass+1)); }
 bad()  { echo "  FAIL $1 — $2"; fail=$((fail+1)); }

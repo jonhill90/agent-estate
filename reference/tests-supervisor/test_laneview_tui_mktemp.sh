@@ -19,7 +19,7 @@
 # hands back, not by asserting the source reads a particular way.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TUI="$HERE/../../scripts/supervisor/laneview/tui.sh"
+TUI="$HERE/../../reference/scripts/supervisor/laneview/tui.sh"
 
 pass=0; fail=0
 ok()  { echo "  ok   $1"; pass=$((pass+1)); }
