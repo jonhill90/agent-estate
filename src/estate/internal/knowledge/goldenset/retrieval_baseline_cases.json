@@ -52,8 +52,9 @@
     "id": "rb-08",
     "question": "What's supposed to happen to a dispatched task that times out instead of finishing cleanly?",
     "expected_source": "repo-docs",
-    "expected_identifier": "docs/product/SPEC.md#agent-estate-spec--dispatch-srcestate-estate-dispatch-issue-brief-file",
-    "rationale": "SPEC.md's Dispatch section: \"context deadline hit → `unknown` (\\\"unknown is not failed\\\"), slot stays held.\""
+    "expected_identifier": "docs/product/SPEC.md#agent-estate-spec--dispatch-srcestate-estate-dispatch-harnessname-issue-brief-file",
+    "rationale": "SPEC.md's Dispatch section: \"context deadline hit → `unknown` (\\\"unknown is not failed\\\"), slot stays held.\"",
+    "note": "agent-estate#1318 (PR #1386's own report): stale anchor. Commit 04aee5d added `[--harness=NAME]` to this section's own heading, which changed its GitHub-style slug -- the old anchor above no longer names any indexed item. Re-pinned to the current heading's real slug (verified 2026-09-11 against a fresh private index: the corrected identifier resolves to item it-c946e54d6cbfd513, whose tier2 contains this case's own rationale text verbatim). Question left unchanged -- only the pointer was wrong. Still MISSES top-10 even corrected (not found in the top 10 for this exact question, verified the same session) -- a measurement defect, not a ranking fix; this case remains a genuine ranking failure under its corrected target."
   },
   {
     "id": "rb-09",
