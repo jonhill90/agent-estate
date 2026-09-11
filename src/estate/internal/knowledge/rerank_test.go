@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -290,4 +291,135 @@ func TestQueryWithRankingRerankerNeverSeesWithheldPrivateItems(t *testing.T) {
 		t.Fatal("the private item never appeared to the reranker even in --private mode -- the fixture question does not exercise what this test claims to")
 	}
 	_ = gotPrivate
+}
+
+// displayLimitFixtureIndex builds QueryLimit+2 (12) items sharing the same
+// probe term rerankFixtureIndex uses ("zzzdisplaylimitprobe" -- a distinct
+// probe so this fixture never collides with rerankFixtureIndex's own),
+// once each in Tier1, so a single-term query for it admits EVERY item
+// identically (agent-estate#1369: a one-distinct-term query's own floor is
+// min(2,1)==1 -- see minMatchedTerms's doc comment -- so one title match is
+// already sufficient; no second term, and no fight with per-source
+// admission rules, is needed to construct this scenario). rerank-answer is
+// the one item this fixture exists to promote: identical probe-term match
+// to every decoy, but padded with 40 distinct filler terms in Tier2 that
+// contribute nothing to the query match while inflating BM25's own length-
+// normalisation term (bm25.go's doc.length) far past avgdl -- the same
+// mechanism (longer document, same term count, lower score) bm25.go's own
+// tier1SearchableText/weightedTermFreqs comments describe, not a special
+// case invented for this fixture. The 11 decoys carry no such padding, so
+// BM25 ranks all 11 above rerank-answer on identical term matches alone.
+func displayLimitFixtureIndex(t *testing.T) string {
+	t.Helper()
+	const probe = "zzzdisplaylimitprobe"
+
+	filler := make([]string, 0, 40)
+	for i := 0; i < 40; i++ {
+		filler = append(filler, fmt.Sprintf("zzzdisplaylimitfiller%02d", i))
+	}
+
+	items := make([]Item, 0, 12)
+	items = append(items, Item{
+		ID: "display-limit-answer", Source: "vault-fact",
+		Permalink: "/vault/agent/facts/display-limit-answer.md",
+		Tier1:     probe + " answer item",
+		// 40 distinct terms found nowhere in the query: they add nothing
+		// to this item's score (Score only sums terms present in the
+		// question) but inflate doc.length well past avgdl, which is
+		// exactly what depresses this item's own score for the probe
+		// term it DOES share with every decoy.
+		Tier2:       strings.Join(filler, " ") + ".",
+		Publishable: true, PublishBasis: "test fixture: marked publishable",
+	})
+	for i := 1; i <= 11; i++ {
+		items = append(items, Item{
+			ID: fmt.Sprintf("display-limit-decoy-%02d", i), Source: "vault-fact",
+			Permalink:   fmt.Sprintf("/vault/agent/facts/display-limit-decoy-%02d.md", i),
+			Tier1:       fmt.Sprintf("%s decoy item %02d", probe, i),
+			Tier2:       "a short, unpadded decoy document.",
+			Publishable: true, PublishBasis: "test fixture: marked publishable",
+		})
+	}
+
+	res := Result{
+		GeneratedAt:   time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC),
+		StalenessRule: stalenessRule,
+		Note:          derivedNote,
+		Items:         items,
+	}
+	path := filepath.Join(t.TempDir(), "index.json")
+	if err := Write(path, res); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// promoteToFrontRerank is a trivial, deterministic RerankFunc: targetID
+// first, every other candidate id after it in whatever order Query itself
+// already handed in (BM25 order) -- the smallest possible reorder that can
+// prove promotion across a rank boundary, deliberately not a full reverse
+// (reverseRerank above already covers "the reorder is genuinely applied";
+// this stub isolates "one specific low-ranked item moves to a visible
+// position" instead).
+func promoteToFrontRerank(targetID string) RerankFunc {
+	return func(_ string, candidates []RerankCandidate) ([]string, error) {
+		ids := make([]string, 0, len(candidates))
+		ids = append(ids, targetID)
+		for _, c := range candidates {
+			if c.ID != targetID {
+				ids = append(ids, c.ID)
+			}
+		}
+		return ids, nil
+	}
+}
+
+// TestQueryWithRankingPromotesAnItemAcrossTheDisplayLimit is agent-estate#1369:
+// the one hermetic-suite gap TestSemanticCeilingExperiment's real-corpus,
+// real-LM-Studio requirement leaves uncovered -- proof that a reranker's
+// reorder survives PAST the n>limit truncation in query.go, not just
+// within an already-visible page. Nothing here touches a network, LM
+// Studio, or a live index; displayLimitFixtureIndex and promoteToFrontRerank
+// above are both hermetic, deterministic Go values.
+func TestQueryWithRankingPromotesAnItemAcrossTheDisplayLimit(t *testing.T) {
+	path := displayLimitFixtureIndex(t)
+	question := "zzzdisplaylimitprobe"
+	const target = "display-limit-answer"
+
+	bm25 := Query(path, question, 0, false)
+	if bm25.TotalMatched != 12 {
+		t.Fatalf("fixture must produce exactly 12 eligible candidates (1 answer + 11 decoys), got %d -- the fixture's own premise is broken, not the reranker", bm25.TotalMatched)
+	}
+	bm25HasTarget := false
+	for _, m := range bm25.Matches {
+		if m.ID == target {
+			bm25HasTarget = true
+		}
+	}
+	if bm25HasTarget {
+		t.Fatalf("fixture must reproduce an eligible answer BELOW the display limit under plain BM25 -- %q already appears in the top %d, so promoting it proves nothing; the length-padding in displayLimitFixtureIndex did not depress its score enough", target, QueryLimit)
+	}
+	if len(bm25.Matches) != QueryLimit {
+		t.Fatalf("BM25 Matches has %d item(s), want exactly QueryLimit (%d) with 12 eligible candidates", len(bm25.Matches), QueryLimit)
+	}
+
+	reranked := QueryWithRanking(path, question, 0, false, promoteToFrontRerank(target))
+	if reranked.RankingMethod != "semantic" {
+		t.Fatalf("RankingMethod = %q, want %q -- promoteToFrontRerank is a valid, complete permutation and must be accepted", reranked.RankingMethod, "semantic")
+	}
+	if reranked.RankingFallbackReason != "" {
+		t.Fatalf("RankingFallbackReason = %q, want empty -- a valid rerank must not report a fallback", reranked.RankingFallbackReason)
+	}
+	rerankedHasTarget := false
+	for _, m := range reranked.Matches {
+		if m.ID == target {
+			rerankedHasTarget = true
+		}
+	}
+	if !rerankedHasTarget {
+		t.Fatalf("--semantic Matches does not contain %q -- reranking failed to promote an item ranked below the display limit across it, the exact defect agent-estate#1369 exists to catch", target)
+	}
+	if reranked.Matches[0].ID != target {
+		t.Fatalf("reranked.Matches[0].ID = %q, want %q -- promoteToFrontRerank puts the target first; if it is not first, applyRerank's reorder is not surviving the display-limit truncation intact", reranked.Matches[0].ID, target)
+	}
 }
