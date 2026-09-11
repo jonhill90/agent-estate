@@ -1,5 +1,5 @@
 // Package knowledge builds `estate knowledge`'s compiled index -- a
-// derived, regenerable read over six sources that already exist, none
+// derived, regenerable read over seven sources that already exist, none
 // of them owned or written by this package:
 //
 //   - GitHub stars (gh api user/starred --paginate)
@@ -22,8 +22,14 @@
 //     authority/scope/access-policy/owner/freshness declarations, never
 //     that source's own extracted content, which stays in the
 //     register's own private cache. See catalogue.go's own doc comment.
+//   - this repository's own docs/skills-registry.jsonl -- metadata ABOUT
+//     external skills (name, triggers, repo, upstream revision,
+//     evaluation/adoption status), never a skill's own material and
+//     never installed or loaded by this package or any caller of it --
+//     agent-estate#1021 (see skills.go's own doc comment for why that is
+//     a structural property, not a convention)
 //
-// NEVER AUTHORITATIVE. This package never writes to any of its six
+// NEVER AUTHORITATIVE. This package never writes to any of its seven
 // sources, never migrates or rewrites anything, and never chooses a
 // storage format for the operator's own knowledge base -- that is his
 // open decision, not this package's to settle. What Generate produces is
@@ -60,9 +66,9 @@ type Item struct {
 	// written into anything durable).
 	ID string `json:"id"`
 
-	// Source names which of the five readers produced this item --
-	// "github-stars", "vault-fact", "corpus-parameter", "loops-research"
-	// or "repo-docs".
+	// Source names which of the seven readers produced this item --
+	// "github-stars", "vault-fact", "corpus-parameter", "loops-research",
+	// "repo-docs", "catalogue-source" or "skill-registry".
 	Source string `json:"source"`
 
 	// Permalink is a URL or filesystem path a reader can actually open
@@ -225,7 +231,7 @@ type GeneratedBy struct {
 // baked into this compiled artifact instead. See PrivateIndexRemedy's own
 // doc comment for the full defect; this is the same fix applied to the
 // one copy of the message that ships inside the index file itself.
-const stalenessRule = "stale the moment any of its six sources changes; " +
+const stalenessRule = "stale the moment any of its seven sources changes; " +
 	"this Result carries no freshness check of its own beyond generated_at " +
 	"-- before trusting a count here over a live read of the source, " +
 	PrivateIndexRemedy

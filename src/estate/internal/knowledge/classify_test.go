@@ -219,6 +219,7 @@ func TestClassifyPublishableSetIsExactlyGithubStarsAndRepoDocs(t *testing.T) {
 		"loops-research":   false,
 		"vault-fact":       false,
 		"catalogue-source": false,
+		"skill-registry":   false,
 	}
 
 	for _, source := range classifiedSourceNames(t) {

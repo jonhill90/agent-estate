@@ -87,6 +87,16 @@ STATE_FILE_EXEMPTIONS = {
         "live state, internal/tick.DefaultEscalationPath, same deferral "
         "as docs/tick-log.jsonl"
     ),
+    "docs/skills-registry.jsonl": (
+        "NOT live process state, unlike the two entries above -- a "
+        "deliberately curated, PR-reviewed record of external-skill "
+        "metadata (agent-estate#1021), read by "
+        "internal/knowledge.skillsSource the same way repoDocsSource "
+        "reads AGENTS.md/docs/**/*.md: this repository's own written "
+        "record, just JSONL-structured rather than prose. docs/ was the "
+        "deliberate choice (skills.go's own doc comment), not a "
+        "deferral; this line is that choice made explicit for the gate."
+    ),
 }
 
 STATE_FILE_SUFFIXES = (".json", ".jsonl")

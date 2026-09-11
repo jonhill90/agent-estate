@@ -3,7 +3,7 @@ package knowledge
 // classify decides Item.Publishable and Item.PublishBasis for source, at
 // compile time (agent-estate#1028) -- see Item's own doc comment for the
 // "UNCLASSIFIED MEANS PRIVATE" rule this function exists to enforce. Every
-// item any of the six sources produce is run through this call before it
+// item any of the seven sources produce is run through this call before it
 // enters a Result; no source constructs an Item's Publishable field
 // itself.
 //
@@ -73,6 +73,26 @@ func classify(source string) (publishable bool, basis string) {
 		return false, "vault-fact: the operator's own memory vault, never public -- explicit classification, not a fallthrough (agent-estate#1059)"
 	case "catalogue-source":
 		return false, "catalogue-source: the private source register may name locators under the operator's own home directory or catalogue an unpublished source -- explicit classification, not a fallthrough (agent-estate#1139 lane B)"
+	case "skill-registry":
+		// Explicit, not the default fallthrough -- agent-estate#1021 asks
+		// "public or private? argue it rather than inheriting a default."
+		// The file this source reads (docs/skills-registry.jsonl) IS
+		// committed to this public repository, which is the exact fact
+		// that makes repo-docs public above -- but repo-docs' own case is
+		// scoped to already-written prose (AGENTS.md, docs/**/*.md) the
+		// operator composed knowing it was public from the start. A
+		// skills-registry row is different in kind: it is an ONGOING,
+		// per-entry evaluation note (StatusReason for a rejected
+		// candidate), the kind of unvetted content this doc comment
+		// already names as the thing a source-level public default
+		// cannot see into. It is also not the same shape as github-stars:
+		// starring a repo is one already-public act with no content of
+		// its own; a rejection reason is freshly composed prose whose
+		// content has never been reviewed for publication the way this
+		// repo's docs/ prose has. Kept private, on its own explicit line,
+		// so a future entry with a candid rejection reason is private by
+		// construction rather than by nobody having objected yet.
+		return false, "skill-registry: per-entry evaluation notes are unvetted, ongoing content, unlike repo-docs' already-published prose or github-stars' content-free public act -- explicit classification, not a fallthrough (agent-estate#1021)"
 	default:
 		return false, source + ": source defaults to private -- no per-item publishability marker exists yet (agent-estate#1028)"
 	}
