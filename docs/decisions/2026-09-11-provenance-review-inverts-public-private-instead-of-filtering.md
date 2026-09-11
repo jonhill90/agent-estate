@@ -6,20 +6,26 @@
 
 `estate provenance-review` renders every live parameter beside the prompt it
 was judged from, so Jon can answer "did I ask for this, or did you make it
-up?" himself. The first design gated a **public** render behind a credential
-filter — same text as the private render, minus rows the filter withheld.
+up?" himself. `text_raw` was private-only from the first design, never
+serialized to the public path at all; the public render surfaced rule
+bodies and cleaned text (`text_clean`, where available) gated by a
+credential filter that withheld rows it judged sensitive from that public
+set.
 
 ## Three review rounds, each attacking the filter and finding a new shape
 
-Each round broke the filter with a real, reproducible string, not a
-contrived one; the author closed the finding without narrowing the corpus,
-then the next round broke the fix:
+Each round broke the filter with a constructed, plausible attack string —
+not an observed live leak — reproducible against the shipped code; the
+author closed the finding without narrowing the corpus, then the next
+round broke the fix:
 
-1. **Bare `token`.** A real secret introduced by the unqualified word
-   "token" (`"paste the token I gave you into .env"`) slipped through
-   entirely, because the exemption for cost-talk (`"watch token usage..."`)
-   matched on the word alone. Closed with a cost-context rule plus a
-   shape-only layer (hex runs, JWT segments, `key=value` assignments).
+1. **Bare `token`.** The unqualified word "token" introducing a secret
+   value slipped through entirely (`"paste the token I gave you into
+   .env"` itself carries no actual secret — it demonstrates the exemption
+   matches on the bare word alone, not a real credential leaking), because
+   the exemption for cost-talk (`"watch token usage..."`) matched on the
+   word alone. Closed with a cost-context rule plus a shape-only layer (hex
+   runs, JWT segments, `key=value` assignments).
 2. **Case-mixing.** The shape layer required `hasLower && hasUpper` (or
    punctuation) on an unbroken run, so a purely lowercase 80-character
    secret passed at any length — and, found in the same round, the fix's
@@ -32,7 +38,11 @@ then the next round broke the fix:
    alphabetic secret was never caught at any length — Diceware-style
    recovery phrases and made-up passphrases carry no digit by construction.
    The reviewer's own suggested close, a 20-character alphabetic floor,
-   would have re-withheld `audit-hill90-ui-client` a second time.
+   would have re-flagged the same prompt round 2's shape rule had already
+   false-positived on (`mp-ad05191fd122d49f`) — not via
+   `audit-hill90-ui-client` itself, which is hyphenated into segments none
+   20 characters long, but via a different string elsewhere in that same
+   prompt, `ScheduledWorkflowSignalMissing`.
 
 ## The decision: stop calibrating, invert the design
 

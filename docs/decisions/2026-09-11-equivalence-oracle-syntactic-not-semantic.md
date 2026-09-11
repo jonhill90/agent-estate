@@ -15,10 +15,15 @@ the untouched strict score — never replacing it.
 An item is credited only if its text contains the designated text
 verbatim (normalised for case/markdown/whitespace only) **and** either
 **opens** with it (the candidate's own first statement *is* the sentence)
-or **cites** the designated item's id inline. A mid-body quote, however
-exact, and any paraphrase, however good, are refused — "nothing here
-widens past verbatim containment... because a reader's acceptance cannot
-live in a test" (the file's own comment, confirmed by the code).
+or **cites** the designated item's own id inline. A mid-body quote with
+no such citation, however exact, and any paraphrase, however good, are
+refused — "nothing here widens past verbatim containment... because a
+reader's acceptance cannot live in a test" (the file's own comment,
+confirmed by the code). A mid-body quote that *does* carry an explicit
+citation of the designated id is credited via the `cites` clause, even if
+the surrounding text goes on to supersede what it quotes — the same
+tolerance the kept opens/retraction behaviour below extends, stated
+explicitly for `cites` in the file's own comment.
 
 ## The bug this closed, and the line it drew instead
 
@@ -26,11 +31,21 @@ Round one found two real false credits: a leading `>` blockquote was
 normalised away as decoration before the "opens" check, so a document
 that *quotes* the designated sentence and then contradicts it read as
 "opens"; and `designatedText` had no length floor, so a short, generic
-sentence could ride a coincidental shared opening phrase. Both closed —
-blockquote lines are no longer stripped, they're skipped outright when
-reading a candidate's own first statement; a term floor (reused from
-`internal/corpus`'s own pre-existing admission-floor convention, not
-invented for this fixture) refuses assessment below it.
+sentence could ride a coincidental shared opening phrase. Blockquote
+lines are no longer stripped for the first; they're skipped outright when
+reading a candidate's own first statement. For the second, the reviewer's
+own round-one suggestion — a length or word-count floor on
+`designatedText` — was rejected as fixture-fitted: any number chosen
+against today's shortest target (61 characters) is calibrated to this
+fixture, not derived. Closed instead with two rules that carry no number:
+"opens" now requires equality of the candidate's *whole* first statement,
+not a prefix match, which alone stops a short sentence riding a longer
+opening; and, unrelated to this specific fix but covering the same
+short-text case from outside it, the retrieval layer's own pre-existing
+admission floor for a corpus candidate (`internal/knowledge/query.go`,
+agent-estate#1134 — reusing `internal/corpus`'s token-counting shape, not
+its floor) already refuses to assess a designated text under three
+distinct content terms.
 
 ## The kept behaviour, attacked at its sharpest edge
 
@@ -70,11 +85,14 @@ later, not to change the code.
 
 The line drawn here — mechanical/syntactic detection stays in scope,
 anything requiring understanding of meaning does not, even at its
-sharpest and least comfortable edge — will bind every future extension of
-this oracle to a new equivalence shape. It currently exists in one PR
-review comment on `#1407`, not in `equivalence.go`'s own doc comment, and
-not anywhere a future author touching this file would read before adding
-a fifth clause.
+sharpest and least comfortable edge — is this oracle's own accepted
+boundary as shipped, until this record or a future one reconsiders it; it
+does not settle how a differently-scoped mechanism should draw the same
+line (`#1405`'s meaning-preservation verifier is a different contract,
+still under review, unresolved by this decision). It currently exists in
+one PR review comment on `#1407`, not in `equivalence.go`'s own doc
+comment, and not anywhere a future author touching this file would read
+before adding a fifth clause.
 
 ## References
 
