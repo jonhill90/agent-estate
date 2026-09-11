@@ -627,8 +627,17 @@ esac
 # follow-up work (growing the watchdog stub an input-buffer model, the way
 # tmux-dispatch already has one), not a silent claim of verification this
 # call cannot back.
+WATCHDOG_NUDGE="/loop Supervisor tick. Follow $TICK exactly. Dispatch to idle worker lanes rather than implementing yourself. Never call stop, always re-arm."
+# agent-estate#1395/#1394 (wire-author-registration fix pass): register
+# BEFORE the physical send below, same reasoning as every other wired site.
+# Failure logs and falls through -- this restart is load-bearing (the
+# watchdog's whole job); an attribution write must never block it. Worst
+# case: the row reads 'unknown', the pre-existing safe default.
+if ! printf '%s' "$WATCHDOG_NUDGE" | python3 "$HERE/cli.py" register-pending-author --author supervisor >/dev/null; then
+  log "register-pending-author failed -- sending anyway (author stays unknown, safe, never wrong)"
+fi
 blind_send "$PANE" \
-  "/loop Supervisor tick. Follow $TICK exactly. Dispatch to idle worker lanes rather than implementing yourself. Never call stop, always re-arm." \
+  "$WATCHDOG_NUDGE" \
   --preclear-settle 1 --type-settle 2 --literal
 
 echo "$now" >"$STAMP"

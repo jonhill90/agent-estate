@@ -273,6 +273,15 @@ fi
 TICK="${SUPERVISOR_TICK:-$HERE/loop-tick.md}"
 NUDGE="/loop Supervisor tick. Follow $TICK exactly. Dispatch to idle worker lanes rather than implementing yourself. Never call stop, always re-arm."
 
+# agent-estate#1395/#1394 (wire-author-registration fix pass): register
+# BEFORE the physical send below, same reasoning as every other wired site.
+# Failure logs and falls through -- this nudge re-arming a stalled loop is
+# load-bearing; an attribution write must never block it. Worst case:
+# the row reads 'unknown', the pre-existing safe default.
+if ! printf '%s' "$NUDGE" | python3 "$HERE/cli.py" register-pending-author --author supervisor >/dev/null; then
+  echo "director-route: register-pending-author failed -- sending anyway (author stays unknown, safe, never wrong)" >&2
+fi
+
 # agent-supervisor#178: type, verify, THEN submit, via the shared primitive
 # in send.sh -- extracted from dispatch.sh's own loop. `--preclear` is this
 # call's `C-u` (this pane can hold leftover text from anywhere, unlike

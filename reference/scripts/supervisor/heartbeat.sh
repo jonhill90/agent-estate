@@ -223,6 +223,16 @@ if ! tmux capture-pane -p -t "=$TARGET" >/dev/null 2>&1; then
   fi
 fi
 
+# agent-estate#1395/#1394 (wire-author-registration fix pass): register
+# BEFORE the physical send below, same reasoning as every other wired site.
+# Failure here logs and falls through to the send anyway -- a stall nudge is
+# operationally load-bearing (the whole point of this script); an
+# attribution write failing must never block it. Worst case on failure: the
+# row reads 'unknown', the pre-existing, safe default -- never wrong.
+if ! printf '%s' "$MSG" | python3 "$HERE/cli.py" register-pending-author --author supervisor >/dev/null; then
+  log "register-pending-author failed -- sending anyway (author stays unknown, safe, never wrong)"
+fi
+
 # C-u then retype then Enter, ALWAYS -- Enter alone does not submit text a
 # previous send-keys left in the box.
 tmux send-keys -t "=$TARGET" C-u 2>/dev/null
