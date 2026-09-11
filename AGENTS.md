@@ -63,8 +63,17 @@ will bite you and where to look for a given task.
 ## The hard rules that bind every task
 
 - **The app is Go.** Shell and Python are not an implementation option for the
-  app, at any size, for any reason. `reference/` is reference material, not a
-  codebase. Full statement: [docs/orientation/go-only.md](docs/orientation/go-only.md).
+  app (`src/estate`, `src/tui`), at any size, for any reason. That is the
+  whole rule; it does not extend to helper scripts elsewhere in the repo —
+  Jon relaxed that part on 2026-09-11 ("can use the scripts as needed — make
+  them as needed"; agent-estate#1412). A named 17-file subset of
+  `reference/scripts/supervisor/` — `core.py` and its ledger mixins, plus
+  `itemize_prompts.py`, `mine_prompts.py`, `prompt_capture_hook.py` (a live
+  registered hook) and two migration scripts — is live infrastructure the app
+  and that hook call; do not delete it. Everything else under `reference/` is
+  retired, and deleting it is authorised, not a risk. Full statement,
+  including what is still retired and what changed:
+  [docs/orientation/go-only.md](docs/orientation/go-only.md).
 - **Credential store — read-only, no exceptions.** Never write, reset, or
   probe the macOS Keychain; a failed read is a report, not a repair
   (agent-estate#665).
