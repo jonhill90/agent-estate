@@ -26,7 +26,10 @@ WHAT THIS DOES, and just as importantly what it does NOT do:
    `tmux_pane`/`tmux_pane_target` (agent-supervisor#755 part B) -- which
    pane, if any, this hook's own process inherited `$TMUX_PANE` from,
    resolved to `session:window` the same invariant-10-safe way every
-   `*-self.sh` tool does. See `_resolve_tmux_pane`'s own docstring.
+   `*-self.sh` tool does. See `_resolve_tmux_pane`'s own docstring. Also
+   records `author` (agent-estate#1395/#1394) -- `'unknown'` unless an
+   injecting caller registered this exact text as machine-sent before it
+   landed here; see `Ledger.consume_pending_author`'s own docstring.
 2. If the prompt matches a known STRUCTURAL noise marker (dispatch-brief
    boilerplate, loop-tick cron text, harness-injected role=user shapes --
    the SAME marker lists `itemize_prompts.py`/`mine_prompts.py` already use,
@@ -232,6 +235,15 @@ def capture(payload, ledger):
         context = last_assistant_text(transcript_path) if transcript_path else None
         context = (context or CONTEXT_UNDETERMINED)[:400]
         tmux_pane, tmux_pane_target = _resolve_tmux_pane()
+        # agent-estate#1395/#1394: `unknown` unless an injecting caller
+        # (a supervisor/Director tool, not yet any -- see the PR body)
+        # registered this EXACT text via `register_pending_author` before
+        # sending it. Never set from `tmux_pane_target` or the prompt's own
+        # wording -- both are candidate signals at best (see
+        # `director_pane_reason`'s own comment), and a wrong attribution is
+        # worse than an absent one (#1395's own finding, and the defect
+        # this column exists to stop repeating one column over).
+        author = ledger.consume_pending_author(text) or "unknown"
         ledger.record_prompt(
             prompt_id,
             at=int(time.time()),
@@ -241,6 +253,7 @@ def capture(payload, ledger):
             source_file=os.path.basename(transcript_path) if transcript_path else None,
             tmux_pane=tmux_pane,
             tmux_pane_target=tmux_pane_target,
+            author=author,
         )
         wrote_prompt = True
     else:
